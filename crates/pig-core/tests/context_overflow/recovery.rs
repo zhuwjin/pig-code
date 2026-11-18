@@ -370,7 +370,7 @@ async fn a_growing_compaction_surfaces_the_overflow_instead_of_retrying() {
     );
     assert!(
         matches!(
-            errors[0],
+            errors[0].semantic_error(),
             pig_protocol::CoreError::ContextWindowExceeded { .. }
         ),
         "the final error is typed: {:?}",
@@ -455,7 +455,7 @@ async fn a_second_overflow_surfaces_the_typed_error() {
     assert_eq!(errors.len(), 1, "only the final error reaches the UI");
     assert!(
         matches!(
-            errors[0],
+            errors[0].semantic_error(),
             pig_protocol::CoreError::ContextWindowExceeded { .. }
         ),
         "the final error is typed: {:?}",
@@ -507,10 +507,8 @@ async fn no_compactable_prefix_surfaces_the_error() {
     assert!(
         events.iter().any(|event| matches!(
             event,
-            Event::Error {
-                error: pig_protocol::CoreError::ContextWindowExceeded { .. },
-                ..
-            }
+            Event::Error { error, .. }
+                if matches!(error.semantic_error(), pig_protocol::CoreError::ContextWindowExceeded { .. })
         )),
         "typed error reaches the UI: {events:#?}"
     );

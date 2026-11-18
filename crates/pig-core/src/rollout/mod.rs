@@ -23,6 +23,10 @@ mod recovery;
 pub(crate) use conversation::ConversationStore;
 pub(crate) use recovery::{tool_execution_recoveries, tool_execution_start_records};
 
+/// Each immutable conversation file has a finite quota. Exhaustion is a typed
+/// terminal condition for new execution, never a reason to discard old input.
+pub(crate) const DEFAULT_HISTORY_LIMIT_BYTES: u64 = 256 * 1024 * 1024;
+
 /// Prefix of the marked user-role message that hands a compaction summary to
 /// the next model request. Replay uses it to distinguish a compaction handoff
 /// from a real user message; legacy system-role notes have no marker.
@@ -574,6 +578,8 @@ pub enum RolloutFailureKind {
     /// The file could not be flushed to stable storage. The bytes are present
     /// in the file but a crash may still lose them.
     Sync,
+    /// The record was rejected before writing because it would exceed quota.
+    HistoryLimit,
 }
 
 impl RolloutFailureKind {
@@ -583,6 +589,7 @@ impl RolloutFailureKind {
             Self::Write => "write",
             Self::Poisoned => "poisoned",
             Self::Sync => "sync",
+            Self::HistoryLimit => "history_limit",
         }
     }
 }
@@ -601,6 +608,8 @@ pub struct Rollout {
     /// Set after a partial write that could not be rolled back. Every later
     /// append fails immediately instead of corrupting the file further.
     poisoned: Option<String>,
+    bytes: u64,
+    limit_bytes: u64,
 }
 
 /// Summary of a recovered rollout load: the torn final line that was dropped
@@ -613,6 +622,14 @@ pub struct RolloutRecovery {
 
 impl Rollout {
     pub fn create(dir: &Path, meta: &SessionMeta) -> Result<Self, CoreError> {
+        Self::create_with_limit(dir, meta, DEFAULT_HISTORY_LIMIT_BYTES)
+    }
+
+    pub(crate) fn create_with_limit(
+        dir: &Path,
+        meta: &SessionMeta,
+        limit_bytes: u64,
+    ) -> Result<Self, CoreError> {
         std::fs::create_dir_all(dir).map_err(|e| CoreError::SessionsDirCreate {
             detail: e.to_string(),
         })?;
@@ -626,6 +643,8 @@ impl Rollout {
             path,
             file,
             poisoned: None,
+            bytes: 0,
+            limit_bytes,
         };
         rollout
             .append(&record)
@@ -640,6 +659,14 @@ impl Rollout {
 
     /// resume continuation: opens the existing rollout in append mode (does not overwrite meta or history lines)
     pub fn open_append(dir: &Path, id: &str) -> Result<Self, CoreError> {
+        Self::open_append_with_limit(dir, id, DEFAULT_HISTORY_LIMIT_BYTES)
+    }
+
+    pub(crate) fn open_append_with_limit(
+        dir: &Path,
+        id: &str,
+        limit_bytes: u64,
+    ) -> Result<Self, CoreError> {
         let path = dir.join(format!("{id}.jsonl"));
         // Appending after a torn final line would glue the new record onto the
         // broken bytes. Session::load always recovers first; this guard keeps a
@@ -668,10 +695,19 @@ impl Rollout {
                 path: path.display().to_string(),
                 detail: e.to_string(),
             })?;
+        let bytes = file
+            .metadata()
+            .map_err(|error| CoreError::RolloutOpen {
+                path: path.display().to_string(),
+                detail: error.to_string(),
+            })?
+            .len();
         Ok(Self {
             path,
             file,
             poisoned: None,
+            bytes,
+            limit_bytes,
         })
     }
 
@@ -684,47 +720,55 @@ impl Rollout {
     /// append until the session is reopened through [`Rollout::load`].
     pub fn append(&mut self, record: &RolloutRecord) -> Result<(), RolloutError> {
         if let Some(detail) = &self.poisoned {
-            return Err(RolloutError {
-                kind: RolloutFailureKind::Poisoned,
-                detail: detail.clone(),
-            });
+            return Err(RolloutError::new(
+                RolloutFailureKind::Poisoned,
+                detail.clone(),
+            ));
         }
-        let mut line = serde_json::to_string(record).map_err(|error| RolloutError {
-            kind: RolloutFailureKind::Serialize,
-            detail: error.to_string(),
-        })?;
+        let mut line = serde_json::to_string(record)
+            .map_err(|error| RolloutError::new(RolloutFailureKind::Serialize, error.to_string()))?;
         line.push('\n');
-        let start = self.file.metadata().map(|meta| meta.len()).ok();
+        let start = self
+            .file
+            .metadata()
+            .map_err(|error| RolloutError::new(RolloutFailureKind::Write, error.to_string()))?
+            .len();
+        self.bytes = start;
+        let attempted_bytes = self.bytes.saturating_add(line.len() as u64);
+        if attempted_bytes > self.limit_bytes {
+            return Err(RolloutError::quota(
+                self.limit_bytes,
+                self.bytes,
+                attempted_bytes,
+            ));
+        }
         if let Err(error) = self.file.write_all(line.as_bytes()) {
             // Try to remove a partial line. If that fails, the file may hold a
             // torn record and must not receive another append.
-            let rolled_back = start.is_some_and(|start| self.file.set_len(start).is_ok());
+            let rolled_back = self.file.set_len(start).is_ok();
             if !rolled_back {
                 let detail = format!("failed to append a rollout record: {error}");
                 self.poisoned = Some(detail.clone());
-                return Err(RolloutError {
-                    kind: RolloutFailureKind::Write,
-                    detail,
-                });
+                return Err(RolloutError::new(RolloutFailureKind::Write, detail));
             }
             tracing::warn!(
                 path = %self.path.display(),
                 "partially written rollout line rolled back; continuing",
             );
-            return Err(RolloutError {
-                kind: RolloutFailureKind::Write,
-                detail: error.to_string(),
-            });
+            return Err(RolloutError::new(
+                RolloutFailureKind::Write,
+                error.to_string(),
+            ));
         }
+        self.bytes = attempted_bytes;
         Ok(())
     }
 
     /// Real durability at a turn boundary (`sync_data`, not `flush`).
     pub fn sync(&mut self) -> Result<(), RolloutError> {
-        self.file.sync_data().map_err(|error| RolloutError {
-            kind: RolloutFailureKind::Sync,
-            detail: error.to_string(),
-        })
+        self.file
+            .sync_data()
+            .map_err(|error| RolloutError::new(RolloutFailureKind::Sync, error.to_string()))
     }
 
     /// Load every record. A torn **final** line is recovered from the last
@@ -774,7 +818,10 @@ impl Rollout {
                 path: path.display().to_string(),
                 detail: e.to_string(),
             })?;
-            let _ = file.sync_data();
+            file.sync_data().map_err(|error| CoreError::RolloutRead {
+                path: path.display().to_string(),
+                detail: format!("failed to sync the repaired rollout tail: {error}"),
+            })?;
         }
         Ok((parsed.records, None))
     }
@@ -836,6 +883,37 @@ impl Rollout {
             }),
         ))
     }
+}
+
+pub(crate) fn ensure_history_capacity(
+    path: &Path,
+    record: &RolloutRecord,
+    limit_bytes: u64,
+) -> Result<(), CoreError> {
+    let used_bytes = match std::fs::metadata(path) {
+        Ok(metadata) => metadata.len(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) => {
+            return Err(CoreError::RolloutWrite {
+                path: path.display().to_string(),
+                detail: format!("could not inspect history size: {error}"),
+            });
+        }
+    };
+    let line = serde_json::to_string(record).map_err(|error| CoreError::RolloutWrite {
+        path: path.display().to_string(),
+        detail: error.to_string(),
+    })?;
+    let attempted_bytes = used_bytes.saturating_add(line.len() as u64 + 1);
+    if attempted_bytes > limit_bytes {
+        return Err(CoreError::HistoryLimitExceeded {
+            path: path.display().to_string(),
+            limit_bytes,
+            used_bytes,
+            attempted_bytes,
+        });
+    }
+    Ok(())
 }
 
 fn parse_line(body: &[u8], line_no: usize) -> Result<RolloutRecord, CoreError> {
@@ -914,6 +992,38 @@ fn backup_path(path: &Path) -> PathBuf {
 pub struct RolloutError {
     pub kind: RolloutFailureKind,
     pub detail: String,
+    quota: Option<HistoryQuota>,
+}
+
+#[derive(Clone, Debug)]
+struct HistoryQuota {
+    limit_bytes: u64,
+    used_bytes: u64,
+    attempted_bytes: u64,
+}
+
+impl RolloutError {
+    fn new(kind: RolloutFailureKind, detail: String) -> Self {
+        Self {
+            kind,
+            detail,
+            quota: None,
+        }
+    }
+
+    fn quota(limit_bytes: u64, used_bytes: u64, attempted_bytes: u64) -> Self {
+        Self {
+            kind: RolloutFailureKind::HistoryLimit,
+            detail: format!(
+                "durable history quota exceeded: limit {limit_bytes} bytes, used {used_bytes} bytes, attempted {attempted_bytes} bytes"
+            ),
+            quota: Some(HistoryQuota {
+                limit_bytes,
+                used_bytes,
+                attempted_bytes,
+            }),
+        }
+    }
 }
 
 impl std::fmt::Display for RolloutError {
@@ -932,6 +1042,14 @@ impl std::error::Error for RolloutError {}
 impl RolloutError {
     /// Convert to the UI-facing structured error.
     pub fn into_core(self, path: &Path) -> CoreError {
+        if let Some(quota) = self.quota {
+            return CoreError::HistoryLimitExceeded {
+                path: path.display().to_string(),
+                limit_bytes: quota.limit_bytes,
+                used_bytes: quota.used_bytes,
+                attempted_bytes: quota.attempted_bytes,
+            };
+        }
         CoreError::RolloutWrite {
             path: path.display().to_string(),
             detail: format!("{}: {}", self.kind.label(), self.detail),
@@ -1621,6 +1739,64 @@ mod tests {
         assert_eq!(error.kind, RolloutFailureKind::Poisoned);
         let records = Rollout::load(&path).expect("file still valid");
         assert_eq!(records.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn history_quota_rejects_the_whole_record_without_touching_prior_history() {
+        let (dir, path) = temp_rollout("history-quota");
+        let meta = SessionMeta {
+            id: "s1".into(),
+            title: "history quota".into(),
+            title_custom: true,
+            cwd: PathBuf::from("/tmp"),
+            created_at: 1,
+            updated_at: 1,
+            pinned: false,
+            archived: false,
+            provider_id: None,
+            model_id: None,
+            reasoning_level: None,
+            permissions: Default::default(),
+            plan_enabled: false,
+        };
+        let mut rollout = Rollout::create_with_limit(&dir, &meta, 2048).expect("create");
+        rollout
+            .append(&RolloutRecord::Text {
+                text: "kept".into(),
+            })
+            .expect("within quota");
+        rollout.sync().expect("sync");
+        let original = std::fs::read(&path).expect("original bytes");
+        let used = original.len() as u64;
+        let error = rollout
+            .append(&RolloutRecord::Text {
+                text: "x".repeat(4096),
+            })
+            .expect_err("quota is enforced before writing")
+            .into_core(&path);
+        assert!(matches!(
+            error,
+            CoreError::HistoryLimitExceeded {
+                limit_bytes,
+                used_bytes,
+                attempted_bytes,
+                ..
+            } if limit_bytes == 2048 && used_bytes == used && attempted_bytes > limit_bytes
+        ));
+        assert_eq!(std::fs::read(&path).expect("preserved bytes"), original);
+
+        let mut reopened = Rollout::open_append_with_limit(&dir, "s1", used).expect("reopen");
+        assert!(
+            reopened
+                .append(&RolloutRecord::Text { text: "x".into() })
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("unchanged after reopen"),
+            original
+        );
+        assert_eq!(Rollout::load(&path).expect("replay").len(), 2);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

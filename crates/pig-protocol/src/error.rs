@@ -128,6 +128,15 @@ pub enum CoreError {
         path: String,
         detail: String,
     },
+    /// The complete durable history reached its explicit retention quota.
+    /// Existing records remain intact; callers must start a new session rather
+    /// than dropping or silently truncating user history.
+    HistoryLimitExceeded {
+        path: String,
+        limit_bytes: u64,
+        used_bytes: u64,
+        attempted_bytes: u64,
+    },
     DataDirCreate {
         path: String,
         detail: String,

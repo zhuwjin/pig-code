@@ -2070,10 +2070,9 @@ async fn a_failed_trust_save_does_not_activate_project_surfaces() {
             continue;
         };
         match &event {
-            Event::Error {
-                error: CoreError::ConfigWrite { .. },
-                ..
-            } => {
+            Event::Error { error, .. }
+                if matches!(error.semantic_error(), CoreError::ConfigWrite { .. }) =>
+            {
                 save_failed = true;
                 break;
             }
@@ -2937,10 +2936,10 @@ async fn running_plan_toggle_is_deferred_and_applied_next_turn() {
         received.iter().any(|e| matches!(
             e,
             Event::Error {
-                error: pig_protocol::CoreError::RevertTurnInFlight,
+                error,
                 fatal: false,
                 ..
-            }
+            } if matches!(error.semantic_error(), pig_protocol::CoreError::RevertTurnInFlight)
         )),
         "a rejected operation is typed nonfatal: {received:#?}"
     );

@@ -777,7 +777,9 @@ impl Manager {
             let task_id = id.clone();
             tokio::spawn(async move {
                 stop_session_tasks_until_idle(entry, task_events).await;
-                let _ = task_tx.send(super::DeletionProgress::TasksIdle(task_id));
+                let _ = task_tx
+                    .send(super::DeletionProgress::TasksIdle(task_id))
+                    .await;
             });
             tokio::spawn(async move {
                 if tokio::time::timeout(super::SESSION_DELETE_GRACE, registry.wait_for_idle())
@@ -796,7 +798,9 @@ impl Manager {
                     );
                 }
                 registry.wait_for_idle().await;
-                let _ = deletion_tx.send(super::DeletionProgress::ExecutionsIdle(id));
+                let _ = deletion_tx
+                    .send(super::DeletionProgress::ExecutionsIdle(id))
+                    .await;
             });
         } else if !pending_already
             && let Some(deletion) = self.pending_deletions.get_mut(&session_id)

@@ -244,7 +244,7 @@ async fn recall_busy_rejected_and_empty_session() {
     .await;
     assert!(
         rejected.iter().any(
-            |e| matches!(e, Event::Error { error, .. } if *error == CoreError::RecallTurnInFlight)
+            |e| matches!(e, Event::Error { error, .. } if error.semantic_error() == &CoreError::RecallTurnInFlight)
         ),
         "busy recall should be rejected with RecallTurnInFlight: {rejected:#?}"
     );
@@ -295,7 +295,7 @@ async fn recall_busy_rejected_and_empty_session() {
     .await;
     assert!(
         empty.iter().any(
-            |e| matches!(e, Event::Error { error, .. } if *error == CoreError::NothingToRecall)
+            |e| matches!(e, Event::Error { error, .. } if error.semantic_error() == &CoreError::NothingToRecall)
         ),
         "recall with no user message should error NothingToRecall: {empty:#?}"
     );

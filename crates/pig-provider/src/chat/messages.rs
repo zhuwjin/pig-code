@@ -197,8 +197,8 @@ impl ToolCall {
     }
 }
 
-pub(crate) fn finish(
-    tx: &tokio::sync::mpsc::UnboundedSender<ProviderEvent>,
+pub(crate) async fn finish(
+    tx: &tokio::sync::mpsc::Sender<ProviderEvent>,
     tool_calls: Vec<ToolCall>,
     reason: pig_protocol::FinishReason,
 ) {
@@ -208,9 +208,9 @@ pub(crate) fn finish(
         .filter(|call| !call.name.trim().is_empty())
         .collect();
     if !calls.is_empty() {
-        let _ = tx.send(ProviderEvent::ToolCalls(calls));
+        let _ = tx.send(ProviderEvent::ToolCalls(calls)).await;
     }
-    let _ = tx.send(ProviderEvent::Finished(reason));
+    let _ = tx.send(ProviderEvent::Finished(reason)).await;
 }
 
 pub(crate) fn is_false(value: &bool) -> bool {

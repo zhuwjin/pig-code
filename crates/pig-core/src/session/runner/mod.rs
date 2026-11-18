@@ -48,8 +48,8 @@ pub(super) struct Manager {
     sessions: HashMap<String, SessionEntry>,
     deleted_sessions: std::collections::HashSet<String>,
     pending_deletions: HashMap<String, PendingDeletion>,
-    deletion_tx: tokio::sync::mpsc::UnboundedSender<DeletionProgress>,
-    deletion_rx: tokio::sync::mpsc::UnboundedReceiver<DeletionProgress>,
+    deletion_tx: tokio::sync::mpsc::Sender<DeletionProgress>,
+    deletion_rx: tokio::sync::mpsc::Receiver<DeletionProgress>,
     pending_terminal: Vec<(
         String,
         crate::store::BackgroundTask,
@@ -57,11 +57,11 @@ pub(super) struct Manager {
     )>,
     pending_replays: Vec<String>,
     id_counter: u64,
-    task_notify_tx: tokio::sync::mpsc::UnboundedSender<crate::task::TaskChange>,
+    task_notify_tx: async_channel::Sender<crate::task::TaskChange>,
     /// Plugin turns waited on by `PluginSessionAction::Wait`.
     plugin_waiters: Vec<PluginTurnWaiter>,
     op_rx: async_channel::Receiver<Op>,
-    task_notify_rx: tokio::sync::mpsc::UnboundedReceiver<crate::task::TaskChange>,
+    task_notify_rx: async_channel::Receiver<crate::task::TaskChange>,
 }
 
 pub(super) fn emit(event_tx: &async_channel::Sender<Event>, event: Event) {
@@ -138,8 +138,8 @@ impl Manager {
             );
         }
         let (task_notify_tx, task_notify_rx) =
-            tokio::sync::mpsc::unbounded_channel::<crate::task::TaskChange>();
-        let (deletion_tx, deletion_rx) = tokio::sync::mpsc::unbounded_channel();
+            async_channel::bounded::<crate::task::TaskChange>(1024);
+        let (deletion_tx, deletion_rx) = tokio::sync::mpsc::channel(256);
         Self {
             config_path,
             sessions_dir,
@@ -703,7 +703,10 @@ pub async fn agent_loop(
                     Ok(op) => Incoming::Op(op),
                     Err(_) => break,
                 },
-                Some(change) = task_notify_rx.recv() => Incoming::TaskNotify(change),
+                change = task_notify_rx.recv() => match change {
+                    Ok(change) => Incoming::TaskNotify(change),
+                    Err(_) => break,
+                },
                 Some(progress) = deletion_rx.recv() => Incoming::DeletionIdle(progress),
                 Some((session_id, session, outcome)) = turns.next(), if !turns.is_empty() => {
                     Incoming::Turn(session_id, session, outcome)

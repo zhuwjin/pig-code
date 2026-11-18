@@ -1623,7 +1623,7 @@ mod task_wait_tests {
     #[tokio::test]
     async fn dropping_wait_requeues_terminal_notification() {
         let (mut state, _store, root) = fixture("wait-drop-requeue");
-        let (notify, mut changes) = tokio::sync::mpsc::unbounded_channel();
+        let (notify, changes) = async_channel::bounded(1024);
         state.task_notify = notify;
         let task_id = register(&state, true);
         {

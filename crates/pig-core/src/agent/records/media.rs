@@ -2,8 +2,6 @@ use super::*;
 
 use crate::rollout::RolloutRecord;
 
-use super::jsonl::append_agent_conversation_record;
-
 /// Append a deterministic degradation note to a message's model-facing text.
 fn append_note(msg: &mut ChatMsg, note: &str) {
     msg.content.get_or_insert_with(String::new).push_str(note);
@@ -18,7 +16,7 @@ pub fn append_agent_message(
     path: &Path,
     msg: &mut ChatMsg,
     context_window: u64,
-) -> Result<(), String> {
+) -> Result<(), pig_protocol::CoreError> {
     let tool_execution_ids = msg.tool_calls.as_ref().map_or_else(Vec::new, |calls| {
         calls
             .iter()
@@ -94,8 +92,8 @@ pub fn append_agent_mailbox_message(
     message_id: String,
     notification_id: Option<String>,
     text: String,
-) -> Result<(), String> {
-    super::append_agent_conversation_record(
+) -> Result<(), pig_protocol::CoreError> {
+    super::jsonl::try_append_agent_conversation_record(
         path,
         &RolloutRecord::MailboxMessage {
             message_id,
@@ -104,7 +102,8 @@ pub fn append_agent_mailbox_message(
             sent_at_ms: crate::model_io::now_ms(),
         },
     )?;
-    super::sync_agent_context(path)
+    let mut store = super::AgentConversationStore::new(path);
+    crate::rollout::ConversationStore::sync(&mut store)
 }
 
 /// Append one message with its display metadata and, for an assistant, the
@@ -114,7 +113,7 @@ pub fn append_agent_message_meta(
     msg: &mut ChatMsg,
     context_window: u64,
     meta: super::AgentMsgMeta,
-) -> Result<(), String> {
+) -> Result<(), pig_protocol::CoreError> {
     let ts_ms = crate::model_io::now_ms();
     let text = msg.content.clone().unwrap_or_default();
     let record = match msg.role.as_str() {
@@ -142,13 +141,17 @@ pub fn append_agent_message_meta(
             reasoning_ms: meta.reasoning_ms,
         },
         "tool" => {
-            return Err(
-                "a tool result needs its ToolCall; use append_agent_tool_result".to_string(),
-            );
+            return Err(pig_protocol::CoreError::Internal {
+                detail: "a tool result needs its ToolCall; use append_agent_tool_result".into(),
+            });
         }
-        role => return Err(format!("unsupported subagent message role {role}")),
+        role => {
+            return Err(pig_protocol::CoreError::Internal {
+                detail: format!("unsupported subagent message role {role}"),
+            });
+        }
     };
-    append_agent_conversation_record(path, &record)
+    super::jsonl::try_append_agent_conversation_record(path, &record)
 }
 
 /// Append a tool result as the canonical `tool_call` record, pairing it with
@@ -160,7 +163,7 @@ pub fn append_agent_tool_result(
     msg: &mut ChatMsg,
     context_window: u64,
     meta: super::AgentMsgMeta,
-) -> Result<(), String> {
+) -> Result<(), pig_protocol::CoreError> {
     let (images, documents) = persist_message_media(path, msg, context_window);
     let record = RolloutRecord::ToolCall {
         execution_id: execution_id.to_string(),
@@ -178,7 +181,7 @@ pub fn append_agent_tool_result(
         delivered_notification_ids: Vec::new(),
         recovery: None,
     };
-    append_agent_conversation_record(path, &record)
+    super::jsonl::try_append_agent_conversation_record(path, &record)
 }
 
 /// Apply the current child model's media capabilities to an already-rehydrated

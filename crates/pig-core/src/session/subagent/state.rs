@@ -37,7 +37,7 @@ pub(crate) struct SubagentState {
     /// Sticky first child-context append failure. Once set, every later
     /// append fails fast and the driver returns a failure result instead of
     /// advancing live history past what the JSONL contains.
-    pub(in crate::session) persist_failure: Option<String>,
+    pub(in crate::session) persist_failure: Option<CoreError>,
     /// Exclusive JSONL writer claim; moved into the managed lifecycle before
     /// the drive starts and released when it ends.
     pub(in crate::session) writer: Option<AgentWriterGuard>,

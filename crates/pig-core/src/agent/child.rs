@@ -501,7 +501,7 @@ fn persist_history(prep: &mut ChildPrep) -> Result<(), String> {
                 },
             )
         };
-        result?;
+        result.map_err(|error| pig_provider::core_error_en(&error))?;
     }
     Ok(())
 }
@@ -723,7 +723,7 @@ pub(crate) fn prepare_resume_child(
         // instead of running with a live prompt the JSONL does not contain.
         return Err(ChildPrepError::ItemLevel(child_persist_failure_note(
             &prep.agent_id,
-            &error,
+            &pig_provider::core_error_en(&error),
             true,
             ChildPersistPhase::NotStarted,
         )));

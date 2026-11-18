@@ -148,6 +148,10 @@ pub(super) fn start_turn_inner(
             },
         });
     };
+    if let Some(error) = session.durable_history_failure() {
+        entry.session = Some(session);
+        return Err(StartTurnFailure { message, error });
+    }
     if !notification_only && let Some(store) = entry.state.task_store.clone() {
         if let Err(error) =
             crate::session::pending::claim_pending_execution(&store, &session_id, &message)

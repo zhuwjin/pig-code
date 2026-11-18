@@ -97,7 +97,7 @@ async fn run_with_messages(
 ) -> (Option<Value>, Vec<ProviderEvent>) {
     let before = log.lock().expect("log").len();
     let format = model.api_format;
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(256);
     let task = tokio::spawn(stream_chat(
         model,
         messages,
@@ -386,7 +386,7 @@ async fn anthropic_tool_result_is_error_is_encoded_and_other_formats_ignore_it()
         for is_error in [false, true] {
             let model = resolved_model(port, format, true, false, "mock-model");
             let before = log.lock().expect("log").len();
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let (tx, mut rx) = tokio::sync::mpsc::channel(256);
             let task = tokio::spawn(stream_chat(
                 model,
                 vec![

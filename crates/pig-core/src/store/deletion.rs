@@ -51,7 +51,7 @@ mod tests {
     fn deletion_request_survives_reopen_and_final_commit_clears_it() {
         let root =
             std::env::temp_dir().join(crate::agent::runtime::new_runtime_id("deletion-store"));
-        let mut store = Store::open(&root).expect("open store");
+        let store = Store::open(&root).expect("open store");
         store
             .request_session_deletion("s1")
             .expect("request deletion");

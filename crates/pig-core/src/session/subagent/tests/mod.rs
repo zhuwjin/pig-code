@@ -307,7 +307,7 @@ fn compaction_test_session_with_format(
     let store = Arc::new(Mutex::new(
         crate::store::Store::open(&data_dir).expect("store"),
     ));
-    let (task_tx, _task_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (task_tx, _task_rx) = async_channel::bounded(1024);
     let runtime = Arc::new(RuntimeConfig::from_snapshot(
         config,
         &cwd,
@@ -775,7 +775,7 @@ fn swarm_test_session(name: &str) -> (Session, ResolvedModel, PathBuf) {
     let store = Arc::new(Mutex::new(
         crate::store::Store::open(&data_dir).expect("store"),
     ));
-    let (task_tx, _task_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (task_tx, _task_rx) = async_channel::bounded(1024);
     let runtime = Arc::new(RuntimeConfig::from_snapshot(
         config,
         &cwd,

@@ -422,10 +422,8 @@ pub(crate) fn last_was_typed_overflow(events: &[Event]) -> bool {
     events.iter().any(|event| {
         matches!(
             event,
-            Event::Error {
-                error: pig_protocol::CoreError::ContextWindowExceeded { .. },
-                ..
-            }
+            Event::Error { error, .. }
+                if matches!(error.semantic_error(), pig_protocol::CoreError::ContextWindowExceeded { .. })
         )
     })
 }

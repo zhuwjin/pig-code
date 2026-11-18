@@ -25,7 +25,7 @@ fn temp_dir(name: &str) -> std::path::PathBuf {
 /// session read root is `data_dir/sessions`, the spill dir is
 /// `data_dir/sessions/<session>/tool-results`).
 fn state_with_data_dir(session_id: &str, data_dir: &std::path::Path) -> SessionToolState {
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, _rx) = async_channel::bounded(1024);
     SessionToolState::new(
         session_id.to_string(),
         tx,
@@ -771,9 +771,9 @@ async fn dangerous_command_not_blocked_at_execute_layer() {
 /// State with a real notify channel (for_test drops the receiver, so notifications never arrive)
 fn notify_state() -> (
     SessionToolState,
-    tokio::sync::mpsc::UnboundedReceiver<pig_core::task::TaskChange>,
+    async_channel::Receiver<pig_core::task::TaskChange>,
 ) {
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, rx) = async_channel::bounded(1024);
     (SessionToolState::new("test".into(), tx, vec![], vec![]), rx)
 }
 
@@ -783,7 +783,7 @@ fn notify_state() -> (
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn foreground_command_not_leaked_into_snapshot() {
     let dir = temp_dir("fg-snapshot");
-    let (state, mut rx) = notify_state();
+    let (state, rx) = notify_state();
 
     // The background task exits after 0.2s → its watcher notify lands inside the foreground command's execution window
     let bg_id = pig_core::task::spawn_background(&state, &dir, "sleep 0.2");
@@ -827,7 +827,7 @@ async fn foreground_command_not_leaked_into_snapshot() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn timeout_conversion_visible_and_notified() {
     let dir = temp_dir("fg-convert");
-    let (state, mut rx) = notify_state();
+    let (state, rx) = notify_state();
 
     let outcome =
         pig_core::task::run_foreground(&state, &dir, "sleep 5", std::time::Duration::from_secs(1))
@@ -859,7 +859,7 @@ async fn timeout_conversion_visible_and_notified() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancelled_foreground_leaves_no_trace() {
     let dir = temp_dir("fg-cancel");
-    let (state, mut rx) = notify_state();
+    let (state, rx) = notify_state();
 
     let fg_state = state.clone();
     let fg_dir = dir.clone();

@@ -81,7 +81,7 @@ pub fn net_test_blocking(config_path: &std::path::Path) {
                 provider_name: provider.name.clone(),
                 tool_settings: Default::default(),
             };
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let (tx, mut rx) = tokio::sync::mpsc::channel(256);
             let cancel = tokio_util::sync::CancellationToken::new();
             rt.block_on(stream_chat(
                 resolved,

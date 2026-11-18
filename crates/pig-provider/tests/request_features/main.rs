@@ -112,7 +112,7 @@ async fn run(
 ) -> (Option<Value>, Vec<ProviderEvent>) {
     let before = log.lock().expect("log").len();
     let format = model.api_format;
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(256);
     let task = tokio::spawn(stream_chat(
         model,
         messages,

@@ -134,7 +134,7 @@ async fn send_with_policy(
     cancel: &tokio_util::sync::CancellationToken,
     retry_now: Option<&tokio::sync::Notify>,
     policy: RetryPolicy,
-    mut on_retry: impl FnMut(RetryNotice),
+    mut on_retry: impl FnMut(RetryNotice) -> futures_util::future::BoxFuture<'static, ()>,
 ) -> Result<SendOutcome, CoreError> {
     if cancel.is_cancelled() {
         return Ok(SendOutcome::Cancelled);
@@ -187,7 +187,8 @@ async fn send_with_policy(
             max_attempts: policy.max_retries,
             delay,
             reason,
-        });
+        })
+        .await;
         if wait_before_retry(delay, cancel, retry_now).await {
             return Ok(SendOutcome::Cancelled);
         }
@@ -221,15 +222,18 @@ async fn wait_before_retry(
 pub(crate) async fn send_with_retry(
     build: impl Fn(u32) -> reqwest::RequestBuilder,
     control: &CallControl,
-    events: &tokio::sync::mpsc::UnboundedSender<ProviderEvent>,
+    events: &tokio::sync::mpsc::Sender<ProviderEvent>,
 ) -> Result<SendOutcome, CoreError> {
     send_with_policy(
         build,
         control.cancel_token(),
         Some(control.retry_notify()),
         STREAM_RETRY_POLICY,
-        |notice| {
-            let _ = events.send(ProviderEvent::Retrying(notice));
+        move |notice| {
+            let events = events.clone();
+            Box::pin(async move {
+                let _ = events.send(ProviderEvent::Retrying(notice)).await;
+            })
         },
     )
     .await
@@ -251,6 +255,7 @@ pub(crate) async fn send_sidecar_with_retry(
             reason = ?notice.reason,
             "retrying one-shot request"
         );
+        Box::pin(async {})
     })
     .await
 }
@@ -374,6 +379,7 @@ mod tests {
             move |notice| {
                 *observed.lock().expect("capture") = Some(notice.delay);
                 token.cancel();
+                Box::pin(async {})
             },
         )
         .await;

@@ -702,6 +702,16 @@ mod tests {
         let (agent, root, session_id) = session_journal_fixture("expired").await;
         let journal = agent.journal.clone();
         while journal.try_recv().is_ok() {}
+        let raw_events = agent.events.clone();
+        let raw_drain = tokio::spawn(async move { while raw_events.recv().await.is_ok() {} });
+        let draining_journal = journal.clone();
+        let drain = tokio::spawn(async move {
+            let mut latest = None;
+            for _ in 0..1_100 {
+                latest = Some(draining_journal.recv().await.expect("journal event"));
+            }
+            latest
+        });
         for _ in 0..1_100 {
             agent
                 .ops
@@ -711,10 +721,10 @@ mod tests {
                 .await
                 .expect("publish catalog");
         }
-        let mut latest = None;
-        for _ in 0..1_100 {
-            latest = Some(journal.recv().await.expect("journal event"));
-        }
+        let latest = tokio::time::timeout(std::time::Duration::from_secs(30), drain)
+            .await
+            .expect("bounded queues must be drained while publishing")
+            .expect("journal drain task");
         let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let requested = requests.clone();
         let mut output = Vec::new();
@@ -735,6 +745,7 @@ mod tests {
         );
         assert!(output.is_empty());
         agent.close().await.expect("close journal fixture");
+        raw_drain.await.expect("raw event drain");
         let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -740,7 +740,7 @@ pub(crate) async fn stream_anthropic(
     config: &ResolvedModel,
     messages: Vec<ChatMsg>,
     tools: Vec<serde_json::Value>,
-    tx: &tokio::sync::mpsc::UnboundedSender<ProviderEvent>,
+    tx: &tokio::sync::mpsc::Sender<ProviderEvent>,
     control: &CallControl,
 ) -> Result<(), CallError> {
     let pdf = messages.iter().any(|message| !message.documents.is_empty());
@@ -789,7 +789,9 @@ pub(crate) async fn stream_anthropic(
     };
 
     let mut response_metadata = crate::ProviderResponseMetadata::from_response(&response);
-    let _ = tx.send(ProviderEvent::ResponseMetadata(response_metadata.clone()));
+    let _ = tx
+        .send(ProviderEvent::ResponseMetadata(response_metadata.clone()))
+        .await;
     let status = response.status();
     let idle = control.idle_timeout();
     if !status.is_success() {
@@ -868,13 +870,17 @@ pub(crate) async fn stream_anthropic(
                         && !id.is_empty()
                     {
                         response_metadata.response_id = Some(id.to_string());
-                        let _ = tx.send(ProviderEvent::ResponseMetadata(response_metadata.clone()));
+                        let _ = tx
+                            .send(ProviderEvent::ResponseMetadata(response_metadata.clone()))
+                            .await;
                     }
                     usage.merge(&json["message"]["usage"]);
                 }
                 "content_block_start" => {
                     let index = json["index"].as_u64().unwrap_or(0) as usize;
-                    replay_blocks.start(index, &json["content_block"], &mut tool_stream, tx);
+                    replay_blocks
+                        .start(index, &json["content_block"], &mut tool_stream, tx)
+                        .await;
                 }
                 "content_block_delta" => {
                     let index = json["index"].as_u64().unwrap_or(0) as usize;
@@ -886,7 +892,7 @@ pub(crate) async fn stream_anthropic(
                             {
                                 replay_blocks.text(index, text);
                                 api.text(text);
-                                let _ = tx.send(ProviderEvent::Text(text.to_string()));
+                                let _ = tx.send(ProviderEvent::Text(text.to_string())).await;
                             }
                         }
                         Some("thinking_delta") => {
@@ -895,7 +901,9 @@ pub(crate) async fn stream_anthropic(
                             {
                                 replay_blocks.thinking(index, thinking);
                                 api.reasoning(thinking);
-                                let _ = tx.send(ProviderEvent::Reasoning(thinking.to_string()));
+                                let _ = tx
+                                    .send(ProviderEvent::Reasoning(thinking.to_string()))
+                                    .await;
                             }
                         }
                         Some("signature_delta") => {
@@ -907,7 +915,7 @@ pub(crate) async fn stream_anthropic(
                             if let Some(partial) = delta["partial_json"].as_str()
                                 && !replay_blocks.server_delta(index, partial)
                             {
-                                tool_stream.push(index, None, None, Some(partial), tx);
+                                tool_stream.push(index, None, None, Some(partial), tx).await;
                             }
                         }
                         Some("citations_delta") => {
@@ -948,14 +956,16 @@ pub(crate) async fn stream_anthropic(
                                 normalized.total,
                                 normalized.reasoning_output,
                             );
-                            let _ = tx.send(ProviderEvent::Usage {
-                                input: normalized.input,
-                                cache_read: normalized.cache_read,
-                                output: normalized.output,
-                                used: normalized.used,
-                                total: normalized.total,
-                                reasoning_output: normalized.reasoning_output,
-                            });
+                            let _ = tx
+                                .send(ProviderEvent::Usage {
+                                    input: normalized.input,
+                                    cache_read: normalized.cache_read,
+                                    output: normalized.output,
+                                    used: normalized.used,
+                                    total: normalized.total,
+                                    reasoning_output: normalized.reasoning_output,
+                                })
+                                .await;
                         }
                         finish_reason = Some(reason);
                     }
@@ -1000,7 +1010,8 @@ pub(crate) async fn stream_anthropic(
                     config,
                     &mut api,
                     tx,
-                );
+                )
+                .await;
             }
         }
     }
@@ -1017,6 +1028,7 @@ pub(crate) async fn stream_anthropic(
         &mut api,
         tx,
     )
+    .await
 }
 
 #[derive(Default)]
@@ -1028,12 +1040,12 @@ struct AnthropicReplayBlocks {
 }
 
 impl AnthropicReplayBlocks {
-    fn start(
+    async fn start(
         &mut self,
         index: usize,
         block: &serde_json::Value,
         tool_stream: &mut crate::tool_stream::ToolCallStream,
-        tx: &tokio::sync::mpsc::UnboundedSender<ProviderEvent>,
+        tx: &tokio::sync::mpsc::Sender<ProviderEvent>,
     ) {
         match block["type"].as_str() {
             Some("text") => {
@@ -1075,13 +1087,15 @@ impl AnthropicReplayBlocks {
                 );
             }
             Some("tool_use") => {
-                tool_stream.push(
-                    index,
-                    block["id"].as_str(),
-                    block["name"].as_str(),
-                    None,
-                    tx,
-                );
+                tool_stream
+                    .push(
+                        index,
+                        block["id"].as_str(),
+                        block["name"].as_str(),
+                        None,
+                        tx,
+                    )
+                    .await;
                 self.items.insert(
                     index,
                     AssistantReplayItem::ToolCall {
@@ -1219,13 +1233,13 @@ impl AnthropicReplayBlocks {
     }
 }
 
-fn finish_anthropic_stream(
+async fn finish_anthropic_stream(
     mut tool_stream: crate::tool_stream::ToolCallStream,
     replay_blocks: AnthropicReplayBlocks,
     finish_reason: Option<FinishReason>,
     config: &ResolvedModel,
     api: &mut crate::api_log::ApiCall,
-    tx: &tokio::sync::mpsc::UnboundedSender<ProviderEvent>,
+    tx: &tokio::sync::mpsc::Sender<ProviderEvent>,
 ) -> Result<(), CallError> {
     let Some(reason) = finish_reason else {
         let detail = "Anthropic stream ended without a stop reason".to_string();
@@ -1233,9 +1247,9 @@ fn finish_anthropic_stream(
         return Err(CoreError::Internal { detail }.into());
     };
     let replay = AssistantReplay::new(config, replay_blocks.into_items(&tool_stream));
-    let _ = tx.send(ProviderEvent::AssistantReplay(replay));
+    let _ = tx.send(ProviderEvent::AssistantReplay(replay)).await;
     api.finish(reason.as_str(), tool_stream.calls());
-    tool_stream.finish(tx, reason);
+    tool_stream.finish(tx, reason).await;
     Ok(())
 }
 
@@ -1317,6 +1331,12 @@ mod tests {
     use super::{StreamUsage, to_anthropic_messages};
     use crate::chat::{ChatDocument, ChatImage, ChatMsg};
 
+    macro_rules! start {
+        ($blocks:expr, $($args:tt)*) => {
+            ($blocks).start($($args)*).await
+        };
+    }
+
     /// Spec-compliant Anthropic: input/cache in message_start, output in
     /// message_delta (which carries no input fields)
     #[test]
@@ -1386,12 +1406,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn replay_blocks_keep_signatures_redaction_and_order() {
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    #[tokio::test]
+    async fn replay_blocks_keep_signatures_redaction_and_order() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(256);
         let mut tool_stream = crate::tool_stream::ToolCallStream::new();
         let mut blocks = super::AnthropicReplayBlocks::default();
-        blocks.start(
+        start!(
+            blocks,
             0,
             &serde_json::json!({"type": "thinking", "thinking": "a"}),
             &mut tool_stream,
@@ -1400,33 +1421,37 @@ mod tests {
         blocks.thinking(0, "b");
         blocks.signature(0, "sig-");
         blocks.signature(0, "a");
-        blocks.start(
+        start!(
+            blocks,
             1,
             &serde_json::json!({"type": "text", "text": "ans"}),
             &mut tool_stream,
             &tx,
         );
         blocks.text(1, "wer");
-        blocks.start(
+        start!(
+            blocks,
             2,
             &serde_json::json!({"type": "redacted_thinking", "data": "redacted"}),
             &mut tool_stream,
             &tx,
         );
-        blocks.start(
+        start!(
+            blocks,
             3,
             &serde_json::json!({"type": "thinking", "thinking": "second"}),
             &mut tool_stream,
             &tx,
         );
         blocks.signature(3, "sig-b");
-        blocks.start(
+        start!(
+            blocks,
             4,
             &serde_json::json!({"type": "tool_use", "id": "toolu_1", "name": "Read"}),
             &mut tool_stream,
             &tx,
         );
-        tool_stream.push(4, None, None, Some("{}"), &tx);
+        tool_stream.push(4, None, None, Some("{}"), &tx).await;
         let items = blocks.into_items(&tool_stream);
 
         assert_eq!(items.len(), 5);
@@ -1457,12 +1482,13 @@ mod tests {
         }
     }
 
-    #[test]
-    fn text_block_start_keeps_completed_citations() {
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    #[tokio::test]
+    async fn text_block_start_keeps_completed_citations() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(256);
         let mut tool_stream = crate::tool_stream::ToolCallStream::new();
         let mut blocks = super::AnthropicReplayBlocks::default();
-        blocks.start(
+        start!(
+            blocks,
             0,
             &serde_json::json!({
                 "type": "text",
@@ -1489,9 +1515,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn citations_dedupe_between_block_start_and_delta_events() {
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    #[tokio::test]
+    async fn citations_dedupe_between_block_start_and_delta_events() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(256);
         let mut tool_stream = crate::tool_stream::ToolCallStream::new();
         let mut blocks = super::AnthropicReplayBlocks::default();
         let citation = serde_json::json!({
@@ -1501,7 +1527,8 @@ mod tests {
             "encrypted_index": "index",
             "cited_text": "answer",
         });
-        blocks.start(
+        start!(
+            blocks,
             0,
             &serde_json::json!({"type": "text", "text": "a", "citations": [citation.clone()]}),
             &mut tool_stream,

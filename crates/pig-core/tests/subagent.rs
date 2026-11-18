@@ -531,7 +531,10 @@ async fn subagent_happy_path() {
         2,
         "root and child both use AgentRuntime"
     );
-    assert!(runtime_rows.iter().all(|row| row.1 == "completed"));
+    assert!(
+        runtime_rows.iter().all(|row| row.1 == "completed"),
+        "runtime terminal rows: {runtime_rows:?}"
+    );
     let child = runtime_rows
         .iter()
         .find(|row| row.0 == agent_id)

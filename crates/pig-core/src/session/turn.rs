@@ -131,6 +131,17 @@ impl Session {
             });
         }
         let cancel = control.cancel_token();
+        if let Some(error) = self.durable_history_failure() {
+            self.emit(
+                |session_id| Event::Error {
+                    session_id: Some(session_id),
+                    error,
+                    fatal: true,
+                },
+                tx,
+            );
+            return self.root_result(crate::session::AgentRunStatus::Failed);
+        }
         self.register_run_cancel(cancel);
         // ---- SessionStart hooks (once per Session instance, at the first
         // turn; the turn's cancel token covers the run). Nothing to block at
@@ -364,10 +375,10 @@ impl Session {
             if let Some(reminder) = reminder {
                 user_text = format!("{reminder}\n\n{user_text}");
             }
-            if self.agent.history.len() == 1 {
-                // First message: seed the title (first 30 chars as fallback) and
-                // generate a model title async; if manually renamed (title_custom),
-                // neither overwrites
+            let first_message = self.agent.history.len() == 1;
+            if first_message {
+                // First message: seed the title (first 30 chars as fallback); if
+                // manually renamed (title_custom), do not overwrite it.
                 let title = seed_title(&content);
                 let id = self.agent.id.clone();
                 self.store
@@ -379,7 +390,6 @@ impl Session {
                         }
                         meta.updated_at = now_secs();
                     });
-                spawn_title_generation(&self.store, &self.agent.id, &content, config, tx);
             }
             // Rollout stores the original text only (files go in a separate field;
             // the "referenced files" suffix is gone — the UI renders inline chips
@@ -466,8 +476,6 @@ impl Session {
             } else {
                 image_refs.clone()
             };
-            self.agent.history.push(user_msg);
-            self.user_ixs.push(Some(self.agent.history.len() - 1));
             // The event and the clean rollout fields carry display text; sent_* preserves the model-facing form.
             let nums = crate::rollout::image_nums(&image_refs);
             // The turn's first user message was accepted just before this point;
@@ -483,6 +491,22 @@ impl Session {
                 model_text: Some(model_text),
                 sent_input_image: Some(config.input_image),
             });
+            if let Some(error) = self.durable_history_failure() {
+                self.emit(
+                    |session_id| Event::Error {
+                        session_id: Some(session_id),
+                        error,
+                        fatal: true,
+                    },
+                    tx,
+                );
+                return self.root_result(crate::session::AgentRunStatus::Failed);
+            }
+            self.agent.history.push(user_msg);
+            self.user_ixs.push(Some(self.agent.history.len() - 1));
+            if first_message {
+                spawn_title_generation(&self.store, &self.agent.id, &content, config, tx);
+            }
             self.emit(
                 |session_id| Event::UserMessage {
                     session_id,
@@ -507,6 +531,17 @@ impl Session {
         // The user message, prompt snapshot and hook contexts must be durable
         // (real sync, not flush) before any model request sees them.
         self.sync_rollout();
+        if let Some(error) = self.durable_history_failure() {
+            self.emit(
+                |session_id| Event::Error {
+                    session_id: Some(session_id),
+                    error,
+                    fatal: true,
+                },
+                tx,
+            );
+            return self.root_result(crate::session::AgentRunStatus::Failed);
+        }
         self.report_rollout_failure(tx);
 
         let mut step = 0usize;
@@ -602,6 +637,7 @@ impl Session {
                     self.sync_rollout();
                     self.report_rollout_failure(tx);
                     let run = self.run_envelope();
+                    let outcome = self.root_result(crate::session::AgentRunStatus::Completed);
                     self.emit(
                         |session_id| Event::TurnComplete {
                             session_id,
@@ -613,7 +649,7 @@ impl Session {
                         tx,
                     );
                     self.touch_index();
-                    return self.root_result(crate::session::AgentRunStatus::Completed);
+                    return outcome;
                 }
                 StepOutcome::Paused => {
                     if pause_continuations >= MAX_PAUSE_CONTINUATIONS {
@@ -2243,7 +2279,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&outside);
         std::fs::create_dir_all(&outside).unwrap();
         let outside_str = outside.display().to_string().replace("\\", "/");
-        let (task_notify, _t) = tokio::sync::mpsc::unbounded_channel();
+        let (task_notify, _t) = async_channel::bounded(1024);
         let state =
             crate::task::SessionToolState::new("mask-out".to_string(), task_notify, vec![], vec![]);
         let tools = tool::all();
@@ -2302,7 +2338,7 @@ mod tests {
                 arguments: "{}".to_string(),
             })
             .collect();
-        let (task_notify, _t_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (task_notify, _t_rx) = async_channel::bounded(1024);
         let state = crate::task::SessionToolState::new(
             "mask-test".to_string(),
             task_notify,
@@ -2528,7 +2564,7 @@ mod tests {
         let store = Arc::new(Mutex::new(
             crate::store::Store::open(&data_dir).expect("store"),
         ));
-        let (task_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let (task_tx, _) = async_channel::bounded(1024);
         let meta = SessionMeta {
             id: "s-plugin".into(),
             title: String::new(),

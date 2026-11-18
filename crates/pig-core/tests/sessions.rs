@@ -44,10 +44,10 @@ fn write_agent_context(path: &std::path::Path, meta_id: &str, text: &str) {
 
 fn subagent_read_error(event: &Event) -> Option<&str> {
     match event {
-        Event::Error {
-            error: CoreError::SubagentRead { detail },
-            ..
-        } => Some(detail),
+        Event::Error { error, .. } => match error.semantic_error() {
+            CoreError::SubagentRead { detail } => Some(detail.as_str()),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -2194,10 +2194,8 @@ async fn pending_deletion_survives_restart_and_retries_failed_artifacts() {
     recv_until(&recovered.events, Duration::from_secs(10), |event| {
         matches!(
             event,
-            Event::Error {
-                error: CoreError::TaskStore { detail },
-                ..
-            } if detail.contains("Failed to remove")
+            Event::Error { error, .. }
+                if matches!(error.semantic_error(), CoreError::TaskStore { detail } if detail.contains("Failed to remove"))
         )
     })
     .await;
@@ -2277,10 +2275,8 @@ async fn pending_deletion_retries_a_failed_store_commit() {
     recv_until(&recovered.events, Duration::from_secs(10), |event| {
         matches!(
             event,
-            Event::Error {
-                error: CoreError::TaskStore { detail },
-                ..
-            } if detail.contains("injected session commit failure")
+            Event::Error { error, .. }
+                if matches!(error.semantic_error(), CoreError::TaskStore { detail } if detail.contains("injected session commit failure"))
         )
     })
     .await;
@@ -2365,10 +2361,8 @@ async fn deletion_request_failure_does_not_stop_a_live_session() {
     let events = recv_until(&agent.events, Duration::from_secs(10), |event| {
         matches!(
             event,
-            Event::Error {
-                error: CoreError::TaskStore { detail },
-                ..
-            } if detail.contains("injected deletion request failure")
+            Event::Error { error, .. }
+                if matches!(error.semantic_error(), CoreError::TaskStore { detail } if detail.contains("injected deletion request failure"))
         )
     })
     .await;

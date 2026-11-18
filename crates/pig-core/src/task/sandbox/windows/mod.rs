@@ -397,7 +397,7 @@ mod tests {
     }
 
     fn policy(cwd: &Path) -> SandboxPolicy {
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = async_channel::bounded(1024);
         let state =
             crate::task::SessionToolState::new("windows-sandbox-test".into(), tx, vec![], vec![]);
         SandboxPolicy::for_session(cwd, &state, crate::task::SandboxProfile::WorkspaceWrite)

@@ -59,6 +59,7 @@ const TEST_CONTEXT_WINDOW: u64 = 128_000;
 
 fn append_test_message(path: &Path, msg: &mut ChatMsg) -> Result<(), String> {
     append_agent_message(path, msg, TEST_CONTEXT_WINDOW)
+        .map_err(|error| pig_provider::core_error_en(&error))
 }
 
 fn append_test_tool_result(
@@ -74,6 +75,7 @@ fn append_test_tool_result(
         TEST_CONTEXT_WINDOW,
         AgentMsgMeta::default(),
     )
+    .map_err(|error| pig_provider::core_error_en(&error))
 }
 
 #[allow(clippy::too_many_arguments)]

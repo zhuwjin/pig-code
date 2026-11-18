@@ -1352,6 +1352,7 @@ async fn worker_crash_resumes_a_durable_pending_input_in_a_new_run() {
     .expect("resume the durable session in a new run");
     let mut pending_visible = 0;
     let mut completions = 0;
+    let mut completion_identities = Vec::new();
     let result = timeout(Duration::from_secs(30), async {
         loop {
             match resumed.next().await.expect("resumed worker update") {
@@ -1363,8 +1364,9 @@ async fn worker_crash_resumes_a_durable_pending_input_in_a_new_run() {
                     ) {
                         pending_visible += 1;
                     }
-                    if matches!(event, pig_protocol::Event::TurnComplete { .. }) {
+                    if let pig_protocol::Event::TurnComplete { run, .. } = &event {
                         completions += 1;
+                        completion_identities.push(run.clone());
                     }
                 }
                 AgentExecutionUpdate::Settled { result, .. } => break result,
@@ -1375,7 +1377,10 @@ async fn worker_crash_resumes_a_durable_pending_input_in_a_new_run() {
     .await
     .expect("resume pending input");
     assert_eq!(pending_visible, 1);
-    assert_eq!(completions, 2);
+    assert_eq!(
+        completions, 2,
+        "completion identities: {completion_identities:#?}"
+    );
     assert_eq!(result.status, pig_protocol::AgentRunStatus::Completed);
     resumed.release().await.expect("release resumed run");
     ipc_release(address, &old_identity, false)

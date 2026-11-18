@@ -714,7 +714,7 @@ mod tests {
     use super::*;
 
     fn state(read_roots: Vec<PathBuf>, rw_roots: Vec<PathBuf>) -> SessionToolState {
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = async_channel::bounded(1024);
         SessionToolState::new("sandbox-policy-test".to_string(), tx, read_roots, rw_roots)
     }
 

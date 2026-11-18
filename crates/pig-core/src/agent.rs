@@ -82,6 +82,7 @@ mod mailbox;
 mod parse;
 mod profiles;
 mod records;
+pub(crate) use records::try_append_agent_conversation_record;
 pub mod runtime;
 mod scheduler;
 mod store;

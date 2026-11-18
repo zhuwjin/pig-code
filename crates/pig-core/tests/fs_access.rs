@@ -817,7 +817,7 @@ async fn plan_mode_blocks_writes() {
 
 /// Session state with extra read-only roots (for the data_dir/sessions allowlist test)
 fn state_with_extra_roots(roots: Vec<std::path::PathBuf>) -> SessionToolState {
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, _rx) = async_channel::bounded(1024);
     SessionToolState::new("test".to_string(), tx, roots, vec![])
 }
 

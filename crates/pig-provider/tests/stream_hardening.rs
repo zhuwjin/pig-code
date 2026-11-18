@@ -46,7 +46,7 @@ fn formats() -> [ApiFormat; 3] {
 }
 
 async fn run(config: ResolvedModel, content: &str, control: CallControl) -> Vec<ProviderEvent> {
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(256);
     let task = tokio::spawn(stream_chat(
         config,
         vec![ChatMsg::user(content.to_string())],

@@ -3,7 +3,6 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use pig_protocol::{TaskKind, TaskStatus};
-use tokio::sync::mpsc::UnboundedSender;
 
 use crate::rollout::now_secs;
 
@@ -22,7 +21,7 @@ pub(crate) use tree::{ManagedChild, ProcessTask, spawn};
 /// and run_foreground's timeout-to-background path.
 fn spawn_watcher(
     registry: TaskRegistry,
-    notify: UnboundedSender<TaskChange>,
+    notify: async_channel::Sender<TaskChange>,
     session_id: String,
     task_id: String,
     mut child: ManagedChild,
@@ -76,7 +75,7 @@ fn spawn_watcher(
                 })
         };
         if let Some(change) = change {
-            let _ = notify.send(change);
+            super::notification::publish_change(&notify, change);
         }
     });
 }
@@ -316,7 +315,7 @@ async fn cleanup_cancelled_foreground(
             .map(|entry| super::notification::snapshot_change(&state.session_id, entry))
     });
     if let Some(change) = change {
-        let _ = state.task_notify.send(change);
+        super::notification::publish_change(&state.task_notify, change);
     }
 }
 
@@ -607,7 +606,7 @@ pub(crate) struct TaskStopRequest {
 pub(crate) fn request_task_stop_with_agents(
     registry: &TaskRegistry,
     task_id: &str,
-    notify: &UnboundedSender<TaskChange>,
+    notify: &async_channel::Sender<TaskChange>,
     session_id: &str,
     agents: Option<&crate::agent::AgentExecutionRegistry>,
 ) -> Result<TaskStopRequest, String> {
@@ -656,7 +655,7 @@ pub(crate) fn request_task_stop_with_agents(
             "Process {pid} has no managed ProcessTree; quiescence cannot be proven"
         ));
     }
-    let _ = notify.send(change);
+    super::notification::publish_change(notify, change);
     Ok(TaskStopRequest {
         process,
         termination_error,
@@ -666,7 +665,7 @@ pub(crate) fn request_task_stop_with_agents(
 pub async fn stop_task(
     registry: &TaskRegistry,
     task_id: &str,
-    notify: &UnboundedSender<TaskChange>,
+    notify: &async_channel::Sender<TaskChange>,
     session_id: &str,
 ) -> Result<String, String> {
     stop_task_with_agents(registry, task_id, notify, session_id, None).await
@@ -675,7 +674,7 @@ pub async fn stop_task(
 pub(crate) async fn stop_task_with_agents(
     registry: &TaskRegistry,
     task_id: &str,
-    notify: &UnboundedSender<TaskChange>,
+    notify: &async_channel::Sender<TaskChange>,
     session_id: &str,
     agents: Option<&crate::agent::AgentExecutionRegistry>,
 ) -> Result<String, String> {
@@ -727,7 +726,7 @@ pub(crate) async fn stop_task_with_agents(
             })
     };
     if let Some(change) = change {
-        let _ = notify.send(change);
+        super::notification::publish_change(notify, change);
     }
     Err(failure)
 }

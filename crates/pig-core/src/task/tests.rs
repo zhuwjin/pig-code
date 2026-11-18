@@ -41,7 +41,7 @@ fn queued_registration_marks_pending() {
 
 #[test]
 fn nested_notification_is_handed_off_only_when_the_parent_did_not_consume_it() {
-    let (task_tx, mut task_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (task_tx, task_rx) = async_channel::bounded(1024);
     let mut state = SessionToolState::new("s-nested".into(), task_tx, vec![], vec![]);
     state.owner_agent_id = Some("parent".into());
     let task_id = register_agent_run_queued(
@@ -396,6 +396,46 @@ fn nul_redirect_rewrite() {
         rewrite_nul_redirects("echo NUL is a word"),
         "echo NUL is a word"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn full_notification_queue_waits_without_holding_the_registry_lock() {
+    let (task_tx, task_rx) = async_channel::bounded(1);
+    let state = SessionToolState::new("s-backpressure".into(), task_tx.clone(), vec![], vec![]);
+    let task_id = register_agent_task_queued(
+        &state,
+        "subagent explore: backpressure".into(),
+        tokio_util::sync::CancellationToken::new(),
+        "a1".into(),
+    );
+    while task_rx.try_recv().is_ok() {}
+    task_tx
+        .send(super::notification::TaskChange::Snapshot {
+            session_id: "s-backpressure".into(),
+            task: None,
+        })
+        .await
+        .expect("fill the only slot");
+    let blocked = state.clone();
+    let blocked_task = task_id.clone();
+    let sender = tokio::spawn(async move { blocked.notify_task(&blocked_task) });
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    assert!(!sender.is_finished());
+    assert!(
+        state.tasks.try_lock().is_some(),
+        "the registry stays usable"
+    );
+    task_rx.recv().await.expect("release one slot");
+    let delivered = tokio::time::timeout(std::time::Duration::from_secs(2), task_rx.recv())
+        .await
+        .expect("blocked sender completes")
+        .expect("pending change");
+    assert!(matches!(
+        delivered,
+        super::notification::TaskChange::Snapshot { task: Some(task), .. }
+            if task.summary.id == task_id
+    ));
+    sender.await.expect("sender task");
 }
 
 /// Unix shell detection: pick the first existing bash candidate path; fall back to sh when none exist.

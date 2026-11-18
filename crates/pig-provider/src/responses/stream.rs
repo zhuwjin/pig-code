@@ -47,9 +47,9 @@ pub(crate) fn usage_fields(
 /// One SSE data frame -> streaming side effects. Returns Ok(true) at a
 /// terminal frame; the caller validates that it carried a real finish reason.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn handle_frame(
+pub(super) async fn handle_frame(
     data: &str,
-    tx: &tokio::sync::mpsc::UnboundedSender<ProviderEvent>,
+    tx: &tokio::sync::mpsc::Sender<ProviderEvent>,
     tool_stream: &mut crate::tool_stream::ToolCallStream,
     replay_items: &mut Vec<(usize, AssistantReplayItem)>,
     live: &mut LiveResponsesText,
@@ -89,7 +89,9 @@ pub(super) fn handle_frame(
         && !id.is_empty()
     {
         response_metadata.response_id = Some(id.to_string());
-        let _ = tx.send(ProviderEvent::ResponseMetadata(response_metadata.clone()));
+        let _ = tx
+            .send(ProviderEvent::ResponseMetadata(response_metadata.clone()))
+            .await;
     }
     match value["type"].as_str().unwrap_or("") {
         "response.output_text.delta" => {
@@ -102,7 +104,7 @@ pub(super) fn handle_frame(
                     delta,
                 );
                 api.text(delta);
-                let _ = tx.send(ProviderEvent::Text(delta.to_string()));
+                let _ = tx.send(ProviderEvent::Text(delta.to_string())).await;
             }
         }
         "response.output_text.annotation.added" => {
@@ -124,7 +126,7 @@ pub(super) fn handle_frame(
                     delta,
                 );
                 api.reasoning(delta);
-                let _ = tx.send(ProviderEvent::Reasoning(delta.to_string()));
+                let _ = tx.send(ProviderEvent::Reasoning(delta.to_string())).await;
             }
         }
         "response.reasoning_text.delta" => {
@@ -137,29 +139,33 @@ pub(super) fn handle_frame(
                     delta,
                 );
                 api.reasoning(delta);
-                let _ = tx.send(ProviderEvent::Reasoning(delta.to_string()));
+                let _ = tx.send(ProviderEvent::Reasoning(delta.to_string())).await;
             }
         }
         "response.output_item.added" => {
             let item = &value["item"];
             if item["type"] == "function_call" {
-                tool_stream.push(
-                    value["output_index"].as_u64().unwrap_or(0) as usize,
-                    item["call_id"].as_str(),
-                    item["name"].as_str(),
-                    None,
-                    tx,
-                );
+                tool_stream
+                    .push(
+                        value["output_index"].as_u64().unwrap_or(0) as usize,
+                        item["call_id"].as_str(),
+                        item["name"].as_str(),
+                        None,
+                        tx,
+                    )
+                    .await;
             }
         }
         "response.function_call_arguments.delta" => {
-            tool_stream.push(
-                value["output_index"].as_u64().unwrap_or(0) as usize,
-                None,
-                None,
-                value["delta"].as_str(),
-                tx,
-            );
+            tool_stream
+                .push(
+                    value["output_index"].as_u64().unwrap_or(0) as usize,
+                    None,
+                    None,
+                    value["delta"].as_str(),
+                    tx,
+                )
+                .await;
         }
         "response.output_item.done" => {
             let item = &value["item"];
@@ -188,7 +194,7 @@ pub(super) fn handle_frame(
                         *index == output_index
                             && matches!(item, AssistantReplayItem::ToolCall { .. })
                     });
-                    let call = tool_stream.finalize(output_index, call, tx);
+                    let call = tool_stream.finalize(output_index, call, tx).await;
                     if !already_replayed && !call.name.trim().is_empty() {
                         replay_items.push((
                             output_index,
@@ -267,14 +273,16 @@ pub(super) fn handle_frame(
                 usage.and_then(|u| usage_fields(u, config.context_window))
             {
                 api.usage(input, cache_read, output, used, total, reasoning_output);
-                let _ = tx.send(ProviderEvent::Usage {
-                    input,
-                    cache_read,
-                    output,
-                    used,
-                    total,
-                    reasoning_output,
-                });
+                let _ = tx
+                    .send(ProviderEvent::Usage {
+                        input,
+                        cache_read,
+                        output,
+                        used,
+                        total,
+                        reasoning_output,
+                    })
+                    .await;
             }
             *completed_output = value["response"]["output"].as_array().cloned();
             *finish_reason = Some(reason);
@@ -325,7 +333,7 @@ pub(crate) async fn stream_responses(
     config: &ResolvedModel,
     messages: Vec<ChatMsg>,
     tools: Vec<serde_json::Value>,
-    tx: &tokio::sync::mpsc::UnboundedSender<ProviderEvent>,
+    tx: &tokio::sync::mpsc::Sender<ProviderEvent>,
     control: &CallControl,
 ) -> Result<(), CallError> {
     let mut body =
@@ -363,7 +371,9 @@ pub(crate) async fn stream_responses(
     };
 
     let mut response_metadata = crate::ProviderResponseMetadata::from_response(&response);
-    let _ = tx.send(ProviderEvent::ResponseMetadata(response_metadata.clone()));
+    let _ = tx
+        .send(ProviderEvent::ResponseMetadata(response_metadata.clone()))
+        .await;
     let status = response.status();
     let idle = control.idle_timeout();
     if !status.is_success() {
@@ -427,7 +437,9 @@ pub(crate) async fn stream_responses(
                 &mut api,
                 &mut response_metadata,
                 &mut completed_output,
-            )? {
+            )
+            .await?
+            {
                 if control.is_cancelled() {
                     api.finish("cancelled", tool_stream.calls());
                     return Ok(());
@@ -441,7 +453,8 @@ pub(crate) async fn stream_responses(
                     config,
                     &mut api,
                     tx,
-                );
+                )
+                .await;
             }
         }
     }
@@ -460,10 +473,11 @@ pub(crate) async fn stream_responses(
         &mut api,
         tx,
     )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn finish_responses_stream(
+pub(super) async fn finish_responses_stream(
     mut tool_stream: crate::tool_stream::ToolCallStream,
     mut replay_items: Vec<(usize, AssistantReplayItem)>,
     live: LiveResponsesText,
@@ -471,7 +485,7 @@ pub(super) fn finish_responses_stream(
     completed_output: Option<Vec<serde_json::Value>>,
     config: &ResolvedModel,
     api: &mut api_log::ApiCall,
-    tx: &tokio::sync::mpsc::UnboundedSender<ProviderEvent>,
+    tx: &tokio::sync::mpsc::Sender<ProviderEvent>,
 ) -> Result<(), CallError> {
     let Some(reason) = finish_reason else {
         let detail = "Responses stream ended without a terminal response".to_string();
@@ -509,8 +523,8 @@ pub(super) fn finish_responses_stream(
             .map(|(_, item)| item)
             .collect::<Vec<_>>(),
     );
-    let _ = tx.send(ProviderEvent::AssistantReplay(replay));
+    let _ = tx.send(ProviderEvent::AssistantReplay(replay)).await;
     api.finish(reason.as_str(), tool_stream.calls());
-    tool_stream.finish(tx, reason);
+    tool_stream.finish(tx, reason).await;
     Ok(())
 }

@@ -18,7 +18,7 @@ async fn collect(
     messages: Vec<crate::ChatMsg>,
     control: CallControl,
 ) -> Vec<ProviderEvent> {
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(256);
     stream_chat(model, messages, Vec::new(), tx, control).await;
     let mut events = Vec::new();
     while let Some(event) = rx.recv().await {
@@ -124,7 +124,7 @@ async fn run_contract(format: ApiFormat) {
     assert!(schema_registered, "structured requests: {requests:#?}");
     drop(requests);
 
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(256);
     let cancel = CancellationToken::new();
     let task = tokio::spawn(stream_chat(
         model.clone(),
@@ -281,5 +281,28 @@ fn retry_payload(format: ApiFormat) -> String {
             "data: {\"type\":\"message_stop\"}\n\n"
         )
         .into(),
+    }
+}
+
+#[cfg(test)]
+mod backpressure_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn provider_events_wait_for_bounded_capacity() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let permit = tx.reserve().await.expect("reserve the only slot");
+        let sender = tx.clone();
+        let pending = tokio::spawn(async move {
+            crate::chat::finish(&sender, Vec::new(), pig_protocol::FinishReason::Stop).await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(!pending.is_finished(), "the event bypassed a full queue");
+        drop(permit);
+        assert!(matches!(
+            rx.recv().await,
+            Some(ProviderEvent::Finished(pig_protocol::FinishReason::Stop))
+        ));
+        pending.await.expect("event sent after capacity");
     }
 }

@@ -185,6 +185,17 @@ pub(crate) async fn run_step(
 ) -> StepOutcome {
     session.prepare_step(rt, step, tx, cancel).await;
     'attempt: loop {
+        if let Some(error) = session.durable_history_failure() {
+            session.emit(
+                |session_id| Event::Error {
+                    session_id: Some(session_id),
+                    error,
+                    fatal: true,
+                },
+                tx,
+            );
+            return StepOutcome::Failed;
+        }
         if session.preflight_step(rt, step, tx, cancel).await {
             return StepOutcome::Cancelled;
         }
@@ -472,7 +483,7 @@ pub(crate) struct AttemptOutcome {
 /// Drain one provider request. The caller owns spawning/aborting
 /// `stream_chat`; this engine owns the event semantics.
 pub(crate) async fn stream_attempt<S: AttemptSink + ?Sized>(
-    rx: &mut tokio::sync::mpsc::UnboundedReceiver<ProviderEvent>,
+    rx: &mut tokio::sync::mpsc::Receiver<ProviderEvent>,
     cancel: &CancellationToken,
     api_tracker: &mut ApiCallTracker,
     sink: &mut S,
@@ -643,7 +654,7 @@ mod tests {
 
     #[tokio::test]
     async fn one_attempt_accumulates_and_forwards_the_shared_stream() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(256);
         let call = ToolCall {
             id: "call-1".into(),
             name: "Read".into(),
@@ -678,7 +689,7 @@ mod tests {
             ProviderEvent::ToolCalls(vec![call.clone()]),
             ProviderEvent::Finished(FinishReason::ToolCalls),
         ] {
-            tx.send(event).expect("send");
+            tx.send(event).await.expect("send");
         }
         drop(tx);
 

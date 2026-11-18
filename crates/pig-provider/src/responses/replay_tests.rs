@@ -5,7 +5,7 @@ fn finish_frames(
     frames: Vec<serde_json::Value>,
 ) -> (ResolvedModel, AssistantReplay, Vec<ToolCall>) {
     let config = crate::chat::test_model(pig_protocol::ApiFormat::OpenAiResponses);
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(256);
     let mut tool_stream = crate::tool_stream::ToolCallStream::new();
     let mut replay_items = Vec::new();
     let mut live = super::live::LiveResponsesText::default();
@@ -13,32 +13,39 @@ fn finish_frames(
     let mut api = crate::api_log::ApiCall::new("test", "test", "test");
     let mut metadata = crate::ProviderResponseMetadata::default();
     let mut completed_output = None;
-    for frame in frames {
-        super::stream::handle_frame(
-            &frame.to_string(),
-            &tx,
-            &mut tool_stream,
-            &mut replay_items,
-            &mut live,
-            &mut finish_reason,
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("test runtime");
+    runtime.block_on(async {
+        for frame in frames {
+            super::stream::handle_frame(
+                &frame.to_string(),
+                &tx,
+                &mut tool_stream,
+                &mut replay_items,
+                &mut live,
+                &mut finish_reason,
+                &config,
+                &mut api,
+                &mut metadata,
+                &mut completed_output,
+            )
+            .await
+            .expect("frame accepted");
+        }
+        super::stream::finish_responses_stream(
+            tool_stream,
+            replay_items,
+            live,
+            finish_reason,
+            completed_output,
             &config,
             &mut api,
-            &mut metadata,
-            &mut completed_output,
+            &tx,
         )
-        .expect("frame accepted");
-    }
-    super::stream::finish_responses_stream(
-        tool_stream,
-        replay_items,
-        live,
-        finish_reason,
-        completed_output,
-        &config,
-        &mut api,
-        &tx,
-    )
-    .expect("stream finishes");
+        .await
+        .expect("stream finishes");
+    });
 
     let mut replay = None;
     let mut calls = Vec::new();
@@ -197,10 +204,10 @@ fn model_or_credential_change_degrades_native_replay() {
     assert!(degraded.iter().any(|item| item["type"] == "message"));
 }
 
-#[test]
-fn authoritative_items_preserve_order_and_metadata() {
+#[tokio::test]
+async fn authoritative_items_preserve_order_and_metadata() {
     let config = crate::chat::test_model(pig_protocol::ApiFormat::OpenAiResponses);
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(256);
     let mut tool_stream = crate::tool_stream::ToolCallStream::new();
     let mut replay_items = Vec::new();
     let mut live = super::live::LiveResponsesText::default();
@@ -236,6 +243,7 @@ fn authoritative_items_preserve_order_and_metadata() {
             &mut metadata,
             &mut completed_output,
         )
+        .await
         .expect("frame accepted");
     }
     super::stream::finish_responses_stream(
@@ -248,6 +256,7 @@ fn authoritative_items_preserve_order_and_metadata() {
         &mut api,
         &tx,
     )
+    .await
     .expect("stream finishes");
 
     let replay = loop {

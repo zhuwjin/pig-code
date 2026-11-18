@@ -382,7 +382,7 @@ impl LocalAgentExecutionHandle {
         }
         let state = session.state.clone();
         let cancel = request.cancel.clone();
-        let (events, output) = async_channel::unbounded();
+        let (events, output) = async_channel::bounded(256);
         request.events = events.clone();
         let scheduler = state.scheduler.clone();
         let run = Box::pin(async move { session.run_subagent_task(&events, &cancel).await });

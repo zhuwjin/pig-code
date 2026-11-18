@@ -279,7 +279,8 @@ pub fn spawn_agent_with_data_dir_and_credentials(
             .build()
             .expect("agent runtime");
         runtime.block_on(async {
-            tokio::join!(
+            let publication = tokio::spawn(publisher.run());
+            let (_, publication_result) = tokio::join!(
                 session::agent_loop(
                     op_rx,
                     event_tx,
@@ -288,8 +289,11 @@ pub fn spawn_agent_with_data_dir_and_credentials(
                     data_dir,
                     agent_credentials,
                 ),
-                publisher.run(),
+                publication,
             );
+            if let Err(error) = publication_result {
+                tracing::error!(%error, "event publisher task failed");
+            }
         });
     });
     AgentHandle {

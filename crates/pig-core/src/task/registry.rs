@@ -4,7 +4,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use pig_protocol::{TaskKind, TaskStatus, TaskSummary};
-use tokio::sync::mpsc::UnboundedSender;
 
 use crate::rollout::now_secs;
 use crate::store::BackgroundTask;
@@ -195,6 +194,16 @@ impl TaskRegistry {
             })
     }
 
+    #[cfg(test)]
+    pub(crate) fn try_lock(&self) -> Option<RegistryGuard<'_>> {
+        let guard = self.entries.try_lock().ok()?;
+        Some(RegistryGuard {
+            guard,
+            revision: &self.revision,
+            changed: false,
+        })
+    }
+
     pub fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
         self.revision.subscribe()
     }
@@ -332,7 +341,7 @@ impl Drop for TaskWaitInterest {
                 .collect()
         };
         for change in changes {
-            let _ = self.state.task_notify.send(change);
+            super::notification::publish_change(&self.state.task_notify, change);
         }
     }
 }
@@ -403,7 +412,7 @@ pub(crate) fn release_agent_mailbox(state: &SessionToolState, owner: &str) {
             .collect()
     };
     for change in changes {
-        let _ = state.task_notify.send(change);
+        super::notification::publish_change(&state.task_notify, change);
     }
 }
 
@@ -415,7 +424,7 @@ pub struct SessionToolState {
     pub todos: TodoHandle,
     pub tasks: TaskRegistry,
     /// Task snapshots and terminal notifications share one channel to the manager.
-    pub task_notify: UnboundedSender<super::notification::TaskChange>,
+    pub task_notify: async_channel::Sender<super::notification::TaskChange>,
     pub session_id: String,
     /// The subagent that owns tasks spawned through this state; None for the
     /// root session (its background tasks notify it directly).
@@ -488,7 +497,7 @@ impl Clone for SessionToolState {
 impl SessionToolState {
     pub fn new(
         session_id: String,
-        task_notify: UnboundedSender<super::notification::TaskChange>,
+        task_notify: async_channel::Sender<super::notification::TaskChange>,
         extra_read_roots: Vec<PathBuf>,
         extra_rw_roots: Vec<PathBuf>,
     ) -> Self {
@@ -656,24 +665,28 @@ impl SessionToolState {
     }
 
     pub fn notify_task(&self, task_id: &str) {
-        let tasks = self.tasks.lock().expect("task registry lock");
-        if let Some(change) = tasks
-            .iter()
-            .find(|entry| entry.id == task_id)
-            .map(|entry| super::notification::snapshot_change(&self.session_id, entry))
-        {
-            let _ = self.task_notify.send(change);
+        let change = {
+            let tasks = self.tasks.lock().expect("task registry lock");
+            tasks
+                .iter()
+                .find(|entry| entry.id == task_id)
+                .map(|entry| super::notification::snapshot_change(&self.session_id, entry))
+        };
+        if let Some(change) = change {
+            super::notification::publish_change(&self.task_notify, change);
         }
     }
 
     pub fn notify_terminal(&self, task_id: &str) {
-        let tasks = self.tasks.lock().expect("task registry lock");
-        if let Some(change) = tasks
-            .iter()
-            .find(|entry| entry.id == task_id)
-            .map(|entry| super::notification::terminal_change(&self.session_id, entry))
-        {
-            let _ = self.task_notify.send(change);
+        let change = {
+            let tasks = self.tasks.lock().expect("task registry lock");
+            tasks
+                .iter()
+                .find(|entry| entry.id == task_id)
+                .map(|entry| super::notification::terminal_change(&self.session_id, entry))
+        };
+        if let Some(change) = change {
+            super::notification::publish_change(&self.task_notify, change);
         }
     }
 
@@ -705,7 +718,7 @@ impl SessionToolState {
     /// behavior is unchanged).
     pub fn for_test() -> Self {
         static TEST_SEQ: AtomicUsize = AtomicUsize::new(0);
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = async_channel::bounded(1024);
         let data_dir = std::env::temp_dir().join(format!(
             "pig-task-state-{}-{}",
             std::process::id(),

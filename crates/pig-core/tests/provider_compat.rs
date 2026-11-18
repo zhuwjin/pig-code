@@ -42,10 +42,8 @@ async fn business_error_in_200_stream_surfaces() {
     assert!(
         events.iter().any(|e| matches!(
             e,
-            Event::Error {
-                error: CoreError::Internal { detail },
-                ..
-            } if detail.contains(mock::BUSINESS_ERROR_MARKER)
+            Event::Error { error, .. }
+                if matches!(error.semantic_error(), CoreError::Internal { detail } if detail.contains(mock::BUSINESS_ERROR_MARKER))
         )),
         "the business error detail should surface: {events:#?}"
     );

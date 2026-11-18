@@ -168,8 +168,8 @@ fn child_context_write_failure_is_sticky_and_carries_resume_guidance() {
             .as_ref()
             .expect("child")
             .persist_failure
-            .as_deref()
-            == Some(first.as_str()),
+            .as_ref()
+            == Some(&first),
         "the failure is remembered"
     );
     let second = persist_child_message(&mut drive, &mut ChatMsg::user("second".into()))
@@ -492,7 +492,7 @@ async fn uncooperative_local_run_is_dropped_after_stop_grace() {
 /// notification through the Drop fallback.
 #[tokio::test]
 async fn background_driver_panic_before_run_notifies_once() {
-    let (task_tx, mut task_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (task_tx, task_rx) = async_channel::bounded(1024);
     let state = crate::task::SessionToolState::new(
         "s-test".into(),
         task_tx,

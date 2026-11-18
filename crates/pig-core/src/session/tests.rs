@@ -418,7 +418,7 @@ impl TrustFixture {
             permissions: PermissionSettings::default(),
             plan_enabled: false,
         };
-        let (task_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let (task_tx, _) = async_channel::bounded(1024);
         Session::create(
             meta,
             Arc::new(Mutex::new(HashMap::new())),
@@ -434,7 +434,7 @@ impl TrustFixture {
     }
 
     fn load(&self, runtime: Option<Arc<crate::config::RuntimeConfig>>) -> Session {
-        let (task_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let (task_tx, _) = async_channel::bounded(1024);
         Session::load(
             "s1",
             &self.sessions_dir,
@@ -719,5 +719,77 @@ fn root_prompt_cache_key_is_stable_per_session() {
     assert_eq!(resumed.root_prompt_cache_key(), "pig:s1");
     resumed.agent.id = "s2".into();
     assert_eq!(resumed.root_prompt_cache_key(), "pig:s2");
+    let _ = std::fs::remove_dir_all(&fixture.dir);
+}
+
+#[tokio::test]
+async fn exhausted_history_stops_before_model_execution_and_preserves_the_rollout() {
+    let fixture = TrustFixture::new("history-quota-turn");
+    let mut session = fixture.create(None);
+    let path = fixture.sessions_dir.join("s1.jsonl");
+    drop(session.rollout.take());
+    session.rollout = Some(
+        Rollout::open_append_with_limit(&fixture.sessions_dir, "s1", 256).expect("bounded rollout"),
+    );
+    let original = std::fs::read(&path).expect("original history");
+    let model = ResolvedModel {
+        base_url: "http://127.0.0.1:1".into(),
+        api_key: "unused".into(),
+        model: "unused".into(),
+        context_window: 128_000,
+        max_output_tokens: 100,
+        api_format: pig_protocol::ApiFormat::OpenAiChat,
+        reasoning_params: None,
+        cap_structured: false,
+        cap_strict_tools: false,
+        cap_web_search: false,
+        web_search_tool: None,
+        input_image: false,
+        input_pdf: false,
+        anthropic_cache_control: false,
+        replay_native_search: false,
+        prompt_cache_key: None,
+        provider_name: "unused".into(),
+        tool_settings: Default::default(),
+    };
+    let (tx, rx) = async_channel::unbounded();
+    let result = session
+        .run_turn(
+            "x".repeat(4096),
+            Vec::new(),
+            Vec::new(),
+            &model,
+            &tx,
+            pig_provider::CallControl::new(CancellationToken::new()),
+            Default::default(),
+            Default::default(),
+            false,
+        )
+        .await;
+    assert_eq!(result.status, AgentRunStatus::Failed);
+    assert!(matches!(session.agent.history.as_slice(), [message] if message.role == "system"));
+    assert!(matches!(
+        session
+            .rollout_failure
+            .as_ref()
+            .map(CoreError::semantic_error),
+        Some(CoreError::HistoryLimitExceeded { .. })
+    ));
+    assert_eq!(std::fs::read(&path).expect("preserved history"), original);
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(event);
+    }
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::Error { error, fatal: true, .. }
+            if matches!(error.semantic_error(), CoreError::HistoryLimitExceeded { .. })
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        Event::UserMessage { .. } | Event::TurnComplete { .. }
+    )));
+    drop(session);
+    assert_eq!(Rollout::load(&path).expect("replay old history").len(), 1);
     let _ = std::fs::remove_dir_all(&fixture.dir);
 }

@@ -478,10 +478,9 @@ pub struct AppConfig {
     /// Appearance override: "light", "dark", or "system"; None = system.
     #[serde(default)]
     pub theme_mode: Option<String>,
-    /// Model-io trace full retention (diagnostic mode): skip the tool-result
-    /// length cap and the per-session trace file size cap — every request's
-    /// input is recorded whole, so long sessions can produce very large
-    /// `{session}.model-io.jsonl` files
+    /// Model-io trace full-input mode (diagnostic mode): skip the tool-result
+    /// length cap so each retained request's input is recorded whole. The
+    /// per-session trace file size cap still applies and may reset old traces.
     #[serde(default)]
     pub model_io_full_retention: bool,
     /// Default delivery intent for messages sent while a turn is running

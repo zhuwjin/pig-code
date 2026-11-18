@@ -46,6 +46,14 @@ impl Session {
         }
     }
 
+    pub(super) fn durable_history_failure(&self) -> Option<CoreError> {
+        self.rollout_failure.clone().or_else(|| {
+            self.subagent
+                .as_ref()
+                .and_then(|subagent| subagent.persist_failure.clone())
+        })
+    }
+
     pub(super) fn record(&mut self, record: &RolloutRecord) {
         let tool_result = matches!(record, RolloutRecord::ToolCall { .. });
         if self.rollout_failure.is_some() {

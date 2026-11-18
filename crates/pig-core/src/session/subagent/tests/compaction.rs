@@ -111,7 +111,7 @@ async fn foreground_resume_compacts_a_long_child_and_restart_replays_it() {
     let store = Arc::new(Mutex::new(
         crate::store::Store::open(&data_dir).expect("restart store"),
     ));
-    let (task_tx, _task_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (task_tx, _task_rx) = async_channel::bounded(1024);
     let (mut session, _records) = Session::load(
         "s-child-compact-foreground",
         &data_dir.join("sessions"),

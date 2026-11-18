@@ -345,11 +345,8 @@ max_output_tokens = 8192
     assert!(
         collected.iter().any(|event| matches!(
             event,
-            Event::Error {
-                error: pig_protocol::CoreError::ProviderConfig { detail },
-                fatal: false,
-                ..
-            } if detail.contains("credential not found")
+            Event::Error { error, fatal: false, .. }
+                if matches!(error.semantic_error(), pig_protocol::CoreError::ProviderConfig { detail } if detail.contains("credential not found"))
         )),
         "the missing credential is named without exposing a value: {collected:#?}"
     );

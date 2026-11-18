@@ -259,9 +259,9 @@
       "id": "R15",
       "area": "Structured errors, observability and bounded retention",
       "references": [{"project": "deepseek-harness", "path": "packages/core/agent-loop/src/"}, {"project": "codex", "path": "codex-rs/protocol/src/error.rs"}],
-      "existing_evidence": ["crates/pig-core/src/model_io.rs", "crates/pig-core/src/usage.rs", "crates/pig-core/src/api_usage.rs", "crates/pig-core/src/journal.rs", "crates/pig-protocol/src/error.rs", "crates/pig-core/tests/sessions.rs", "crates/pig-core/src/task/process.rs", "crates/pig-core/src/task/spill.rs", "crates/pig-core/src/models_registry.rs"],
-      "missing_proof": ["Bound provider streaming queues and retained history with retryable cleanup"],
-      "status": "implemented"
+      "existing_evidence": ["crates/pig-core/src/model_io.rs", "crates/pig-core/src/usage.rs", "crates/pig-core/src/api_usage.rs", "crates/pig-core/src/journal.rs", "crates/pig-protocol/src/error.rs", "crates/pig-core/tests/sessions.rs", "crates/pig-core/src/task/process.rs", "crates/pig-core/src/task/spill.rs", "crates/pig-core/src/models_registry.rs", "crates/pig-core/src/rollout/mod.rs", "crates/pig-core/src/agent/records/conversation.rs", "crates/pig-provider/src/contract.rs", "crates/pig-core/src/task/tests.rs", "src/agent.rs"],
+      "missing_proof": [],
+      "status": "tested"
     },
     {
       "id": "R16",
@@ -275,9 +275,9 @@
       "id": "R17",
       "area": "Automated architecture conformance gates",
       "references": [{"project": "kimi-code", "path": "packages/agent-core-v2/test/environment/architectureBoundaries.test.ts"}, {"project": "deepseek-harness", "path": "scripts/"}],
-      "existing_evidence": ["crates/pig-core/tests/architecture.rs"],
-      "missing_proof": ["Bound provider and session streaming/notification queues", "Reject unregistered projections and ignored core errors in CI"],
-      "status": "implemented"
+      "existing_evidence": ["crates/pig-core/tests/architecture.rs", "crates/pig-core/tests/runtime_extensions.rs", "crates/pig-core/src/journal.rs", "src/agent.rs", "crates/pig-core/src/task/notification.rs"],
+      "missing_proof": [],
+      "status": "tested"
     },
     {
       "id": "R18",
@@ -297,12 +297,12 @@
     }
   ],
   "final": {
-    "status": "unimplemented",
+    "status": "tested",
     "commit": null,
     "local_commands": {
-      "cargo check --all-targets": null,
-      "cargo test --workspace": null,
-      "nsh check && nsh test": null
+      "cargo check --all-targets": "exit 0",
+      "cargo test --workspace": "exit 0",
+      "nsh check && nsh test": "exit 0"
     },
     "ci": {
       "macos": null,

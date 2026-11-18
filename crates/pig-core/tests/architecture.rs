@@ -71,26 +71,36 @@ fn is_commit(value: &str) -> bool {
 }
 
 fn production_sources(workspace: &Path) -> Vec<(String, String)> {
-    fn visit(root: &Path, directory: &Path, output: &mut Vec<(String, String)>) {
+    fn visit(workspace: &Path, directory: &Path, output: &mut Vec<(String, String)>) {
         for entry in fs::read_dir(directory).expect("read source directory") {
             let path = entry.expect("source entry").path();
             if path.is_dir() {
-                if path.file_name().and_then(|name| name.to_str()) != Some("tests") {
-                    visit(root, &path, output);
+                if !matches!(
+                    path.file_name().and_then(|name| name.to_str()),
+                    Some("tests" | "mock")
+                ) {
+                    visit(workspace, &path, output);
                 }
                 continue;
             }
             if path.extension().and_then(|extension| extension.to_str()) != Some("rs") {
                 continue;
             }
+            let file_name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default();
+            if file_name == "tests.rs"
+                || file_name.ends_with("_tests.rs")
+                || file_name.ends_with("_test.rs")
+            {
+                continue;
+            }
             let relative = path
-                .strip_prefix(root)
+                .strip_prefix(workspace)
                 .expect("workspace-relative source")
                 .to_string_lossy()
                 .replace('\\', "/");
-            if relative.ends_with("/tests.rs") {
-                continue;
-            }
             let source = fs::read_to_string(&path).expect("read Rust source");
             let production = source
                 .split("\n#[cfg(test)]")
@@ -100,10 +110,22 @@ fn production_sources(workspace: &Path) -> Vec<(String, String)> {
             output.push((relative, production));
         }
     }
-    let root = workspace.join("crates/pig-core/src");
     let mut sources = Vec::new();
-    visit(&root, &root, &mut sources);
+    for crate_name in ["pig-core", "pig-provider"] {
+        let root = workspace.join("crates").join(crate_name).join("src");
+        visit(workspace, &root, &mut sources);
+    }
     sources
+}
+
+fn core_production_sources(workspace: &Path) -> Vec<(String, String)> {
+    production_sources(workspace)
+        .into_iter()
+        .filter_map(|(path, source)| {
+            path.strip_prefix("crates/pig-core/src/")
+                .map(|path| (path.to_string(), source))
+        })
+        .collect()
 }
 
 fn top_level_entry(path: &str) -> String {
@@ -319,7 +341,7 @@ fn legacy_execute_control_plane_stays_removed() {
 #[test]
 fn production_tools_cannot_bypass_the_permission_gate() {
     let (workspace, _) = load_matrix();
-    for (path, source) in production_sources(&workspace) {
+    for (path, source) in core_production_sources(&workspace) {
         if path == "session/gate.rs" {
             continue;
         }
@@ -340,7 +362,7 @@ fn production_tools_cannot_bypass_the_permission_gate() {
 #[test]
 fn session_has_no_backend_or_provider_special_cases() {
     let (workspace, _) = load_matrix();
-    for (path, source) in production_sources(&workspace) {
+    for (path, source) in core_production_sources(&workspace) {
         if !path.starts_with("session/") {
             continue;
         }
@@ -361,7 +383,7 @@ fn session_has_no_backend_or_provider_special_cases() {
 #[test]
 fn domain_modules_cannot_own_runtime_control_state() {
     let (workspace, _) = load_matrix();
-    for (path, source) in production_sources(&workspace) {
+    for (path, source) in core_production_sources(&workspace) {
         if !(path.starts_with("plugins/")
             || path.starts_with("hooks/")
             || path == "tool.rs"
@@ -381,7 +403,7 @@ fn domain_modules_cannot_own_runtime_control_state() {
 #[test]
 fn runtime_command_capacity_is_bounded() {
     let (workspace, _) = load_matrix();
-    for (path, source) in production_sources(&workspace) {
+    for (path, source) in core_production_sources(&workspace) {
         if !path.starts_with("agent/runtime/") {
             continue;
         }
@@ -408,4 +430,60 @@ fn catalog_recovery_uses_the_runtime_authority() {
     assert!(!source.contains("std::fs::read_dir"));
     assert!(!source.contains("read_agent("));
     assert!(!source.contains("recover_lost_child("));
+}
+
+#[test]
+fn provider_event_queues_are_bounded_in_production() {
+    let (workspace, _) = load_matrix();
+    let mut checked = 0;
+    for (path, source) in production_sources(&workspace) {
+        if !path.starts_with("crates/pig-provider/src/") {
+            continue;
+        }
+        checked += 1;
+        assert!(
+            !source.contains("mpsc::unbounded_channel")
+                && !source.contains("async_channel::unbounded"),
+            "{path} introduces an unbounded provider event queue"
+        );
+    }
+    assert!(checked > 0, "provider production sources must be scanned");
+}
+
+#[test]
+fn task_notification_failures_are_observable() {
+    let (workspace, _) = load_matrix();
+    for (path, source) in core_production_sources(&workspace) {
+        if path.starts_with("task/") {
+            for forbidden in [
+                "let _ = self.task_notify.send_blocking",
+                "let _ = self.state.task_notify.send_blocking",
+                "let _ = state.task_notify.send_blocking",
+                "let _ = notify.send_blocking",
+            ] {
+                assert!(
+                    !source.contains(forbidden),
+                    "{path} silently ignores task notification failure"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn durable_history_has_a_shared_non_destructive_quota() {
+    let (workspace, _) = load_matrix();
+    for path in [
+        "crates/pig-core/src/rollout/mod.rs",
+        "crates/pig-core/src/agent/records/conversation.rs",
+        "crates/pig-core/src/session/persistence.rs",
+    ] {
+        let source = fs::read_to_string(workspace.join(path)).expect("history source");
+        assert!(
+            source.contains("HistoryLimitExceeded")
+                || source.contains("ensure_history_capacity")
+                || source.contains("durable_history_failure"),
+            "{path} must participate in the bounded-history contract"
+        );
+    }
 }

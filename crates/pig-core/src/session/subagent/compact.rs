@@ -171,13 +171,14 @@ pub(super) async fn compact_child_context(
         used_before: Some(used_before),
         used_after: Some(installed.used_after),
     };
-    if let Err(error) = crate::agent::append_agent_conversation_record(
+    if let Err(error) = crate::agent::try_append_agent_conversation_record(
         &session.subagent.as_ref().expect("child session").jsonl,
         &record,
     ) {
         tracing::error!(
             agent_id = %session.agent.id,
-            "failed to persist the subagent compaction marker; keeping the previous context: {error}"
+            error = ?error,
+            "failed to persist the subagent compaction marker; keeping the previous context"
         );
         // The failed append is sticky: the driver must not continue appending
         // messages to a context file that may hold a torn marker line. Live
@@ -192,15 +193,21 @@ pub(super) async fn compact_child_context(
     }
     // The marker is the child's durable compaction boundary: flush it before
     // the in-memory rewrite can be followed by more messages.
-    if let Err(error) = std::fs::OpenOptions::new()
-        .write(true)
-        .open(&session.subagent.as_ref().expect("child session").jsonl)
-        .and_then(|file| file.sync_all())
-    {
+    let mut store = crate::agent::AgentConversationStore::new(
+        &session.subagent.as_ref().expect("child session").jsonl,
+    );
+    if let Err(error) = crate::rollout::ConversationStore::sync(&mut store) {
         tracing::warn!(
             agent_id = %session.agent.id,
-            "failed to sync the subagent compaction marker: {error}"
+            error = ?error,
+            "failed to sync the subagent compaction marker"
         );
+        session
+            .subagent
+            .as_mut()
+            .expect("child session")
+            .persist_failure = Some(error);
+        return ChildCompactReport::skipped(pause_pin);
     }
     let pin_after = installed.pin_after(pause_pin);
     session.agent.history = installed.history;

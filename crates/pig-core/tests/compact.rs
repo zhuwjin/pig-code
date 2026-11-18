@@ -740,21 +740,16 @@ async fn manual_compact_without_a_model_keeps_history() {
     let collected = recv_until(&events, Duration::from_secs(10), |e| {
         matches!(
             e,
-            Event::Error {
-                error: pig_protocol::CoreError::NoModelConfigured,
-                ..
-            }
+            Event::Error { error, .. }
+                if matches!(error.semantic_error(), pig_protocol::CoreError::NoModelConfigured)
         )
     })
     .await;
     assert!(
         collected.iter().any(|e| matches!(
             e,
-            Event::Error {
-                error: pig_protocol::CoreError::NoModelConfigured,
-                fatal: false,
-                ..
-            }
+            Event::Error { error, fatal: false, .. }
+                if matches!(error.semantic_error(), pig_protocol::CoreError::NoModelConfigured)
         )),
         "the rejection is typed and nonfatal: {collected:#?}"
     );
