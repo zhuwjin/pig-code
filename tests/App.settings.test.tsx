@@ -171,6 +171,7 @@ test("stores and clears provider keys without exposing them in the page", async 
   await app.press("id:provider-toggle-mask");
   await app.press("id:provider-toggle-mask");
   await app.type("id:provider-api-key", "selftest-secret");
+  await app.wait(600);
   await app.waitUntil(() => app.value("id:provider-api-key") === "", { timeout: 20000 });
   expect(app.texts()).not.toContain("selftest-secret");
 

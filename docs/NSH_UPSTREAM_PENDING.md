@@ -1,6 +1,6 @@
 # NSH 新版本待办
 
-当前项目的 `nsh-core`、`nsh-base`、`nsh-engine` 和 `nsh-testing` 均使用 `0.5.1`（见 `Cargo.toml`）。
+当前项目的 `nsh-core`、`nsh-base`、`nsh-engine`、`nsh-platform-windows` 和 `nsh-testing` 均使用 `0.6.0`（见 `Cargo.toml`）。
 
 本文只记录尚未完成的、依赖 NSH 新版本的事项，不记录 Pig Code 自己的功能 TODO，也不记录已经接入的历史。已完成的历史记录见 [NSH_UPSTREAM_HISTORY.md](./NSH_UPSTREAM_HISTORY.md)。NSH main 中存在某项实现，不代表它已经发布，也不代表可以直接替换当前版本；升级时必须重新检查公开 API 和兼容性。
 
@@ -10,7 +10,9 @@
 
 **现状**
 
-`docs/PLUGIN_SYSTEM.md` 已明确：NSH 尚未公开按 Engine 查询真实内存与 CPU 的接口。当前资源预算只能作为上限，不能伪装成实际用量。
+`docs/PLUGIN_SYSTEM.md` 已明确：NSH 尚未公开按 Engine 查询真实总内存与 CPU 用量的接口。当前资源预算只能作为上限，不能伪装成实际用量。
+
+0.6.0 复核：`nsh_engine::perf::PerfMonitor` 可以按 Engine 提供 JS 堆、JS 对象、节点和 Engine 线程忙碌时间；`ProcessSampler` 的 CPU 与实际内存则是整个宿主进程的数据，不能归因给某个插件 Engine。因此这些接口仍不满足本项的完整验收条件。
 
 **升级后的处理**
 
@@ -56,7 +58,9 @@ nsh run examples/repros/InputScrollRepro.tsx --target macos --window-size 900x70
 
 **上游参考**
 
-2026-11-02 检查 NSH `main@142565666c786e33b1c8dfec339121eea1178dd1`，尚未发现针对此问题的修复：`COMMIT_MS = 140`、`REST_WAIT = 1000`、图层滚动和延迟提交 bounds 的机制均保留。该结论只表示此提交时的代码状态，后续升级必须重新检查并实际运行复现页。
+2026-11-02 检查 NSH `main@142565666c786e33b1c8dfec339121eea1178dd1`，尚未发现针对此问题的修复：`COMMIT_MS = 140`、`REST_WAIT = 1000`、图层滚动和延迟提交 bounds 的机制均保留。
+
+0.6.0 已加入针对性改动：`scroll.rs` 的 `apply_offset` 在滚动子树包含原生 Input 时（`input_count != 0`）逐帧调用 `commit_bounds`，让 AppKit 的可见区域跟随实时偏移，不再对这些 Input 使用图层位移加延迟提交。`COMMIT_MS` 和 `REST_WAIT` 仍用于不含 Input 的普通滚动。该改动直接对应文字空白的原因，但当前升级环境是 Windows，仍须在 macOS 上运行同一复现页并完成下方验收后才能关闭本项。
 
 **升级后的处理**
 
@@ -74,7 +78,7 @@ nsh run examples/repros/InputScrollRepro.tsx --target macos --window-size 900x70
 
 **现状**
 
-NSH 0.5.0 的 `crates/nsh-base/src/term/vt.rs` 在 `csi_dispatch` 中把 `'u'` 直接交给 `restore()`，没有检查 `intermediates`。Claude Code 等 TUI 会发送 `ESC[<u`（kitty keyboard protocol 查询）；模拟器把 `CSI < u` 当成 `CSI u`（恢复光标），在 TUI 退出时把光标恢复到较早保存的位置，PowerShell 随后把新提示符打印到 TUI 内容上方。
+NSH 0.6.0 的 `crates/nsh-base/src/term/vt.rs` 仍在 `csi_dispatch` 中通过 `'u' if !private` 把 `CSI < u` 交给 `restore()`，没有要求 `intermediates.is_empty()`。Claude Code 等 TUI 会发送 `ESC[<u`（kitty keyboard protocol 查询）；模拟器把 `CSI < u` 当成 `CSI u`（恢复光标），在 TUI 退出时把光标恢复到较早保存的位置，PowerShell 随后把新提示符打印到 TUI 内容上方。
 
 **复现**
 
@@ -92,22 +96,6 @@ NSH 0.5.0 的 `crates/nsh-base/src/term/vt.rs` 在 `csi_dispatch` 中把 `'u'` �
 **当前规避**
 
 `src/terminal.rs` 的 `filter_kitty_keyboard` 在 PTY 输出进入官方 Terminal 前丢弃带 `<`、`>` 或 `=` 中间字节、以 `u` 结尾的 CSI 序列，并用 `filter_carry` 处理跨读取块的拆分。`terminal::tests` 覆盖完整序列、拆分序列和真正的 `CSI u` 恢复光标。上游修复后应删除此过滤。
-
-### 4. 分批挂载导致嵌套虚拟列表出现空白
-
-**现状**
-
-活动明细改为最高 420 点的 `Scroll` 内嵌 `List viewport="parent"` 后，Windows 实际界面中静态展开包含 13 个工具记录的活动，曾只绘制前 7 项，剩余区域空白。JSONL 中的数据完整，不依赖流式追加。使用同一主会话和内容宽度进行自动化截图尚未稳定复现，因此当前现象与下述上游问题高度吻合，但尚未完全确认。
-
-**上游参考**
-
-NSH 0.5.0 的 [longbridge/nsh#1783](https://github.com/longbridge/nsh/issues/1783) 记录了 view pacing 的缺陷：一轮已创建至少 64 个视图后，`Scroll` 内虚拟 List 的被延迟单元格可能已经创建，却始终收不到 `Frame`，直到再次布局才恢复。节点仍可被自动化查询，因此 `shows()` / `waitFor()` 通过不代表实际绘制正常；继续滚动也可能触发布局并掩盖问题。
-
-**升级后的处理**
-
-- 检查该 issue 的修复是否已进入当前使用的 NSH 版本，并重新验证嵌套虚拟列表。
-- 使用 `nsh run --target windows` 和真实静态会话展开工作区与活动，检查所有可见行均实际绘制，内部滚动可以到达最后一项且底部无异常空白。
-- 不只依赖节点存在性断言或滚动后的截图；需要覆盖首次展开时的真实渲染。
 
 ## 升级检查
 

@@ -1549,6 +1549,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "env_filter"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "900d271a03799a1ee8d1ca9b19893b48ca674a9284fefcfb85f05e74ed314217"
+dependencies = [
+ "log",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3330,9 +3339,9 @@ dependencies = [
 
 [[package]]
 name = "nsh-base"
-version = "0.5.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2cadcf71a3a758271ee9ab5d4768de9054d1a97091eece01fa1a174b394ef53e"
+checksum = "cf403f8cf3a973fef8f9234e2a769b6fad4cf01bcc14aff108e02af80399bdc7"
 dependencies = [
  "chrono",
  "html5ever 0.27.0",
@@ -3355,9 +3364,9 @@ dependencies = [
 
 [[package]]
 name = "nsh-bundler"
-version = "0.5.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab952ee3e558ce245d18e602d3dbc40d9499d90d7c2f88ec30765c3dc267ad3a"
+checksum = "544ddd68cda896f53dd95e476388df2bd5a9800d14e31c9b5f2f46c3b1d2c4ff"
 dependencies = [
  "anyhow",
  "dunce",
@@ -3382,11 +3391,12 @@ dependencies = [
 
 [[package]]
 name = "nsh-core"
-version = "0.5.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7283cdcd0a6703ecdcd2fc9f621705a3f4efbd3c88376219a6194a2f126b7573"
+checksum = "1ee5ae33b9d77bb6d2fb31defa94fc7a7b3d5d0125fd9854dcb996e7454ea5bd"
 dependencies = [
  "cap-std",
+ "chrono",
  "crc32fast",
  "flate2",
  "futures-util",
@@ -3417,16 +3427,15 @@ dependencies = [
  "unicode-properties",
  "ureq",
  "url",
- "webpki-roots 1.0.11",
  "windows-sys 0.61.2",
  "wuff",
 ]
 
 [[package]]
 name = "nsh-dev"
-version = "0.5.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a9b2ebf4e4108cdc5fea48c44d2aa2f905f3d77b00ca2976877329d0ac6e2a80"
+checksum = "25f28155f06ee8e7542cf551232323a687bcbe470cd686074b6e244bf5cf36e8"
 dependencies = [
  "base64 0.22.1",
  "dunce",
@@ -3438,11 +3447,12 @@ dependencies = [
 
 [[package]]
 name = "nsh-engine"
-version = "0.5.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "24a7d05151d74e2c1c24800c009016ea17d82268c5ccb821118a06188456db89"
+checksum = "1f7e66fcd78c3b3814f9f7af94ed9221e210c045867c421510a1877c566eecab"
 dependencies = [
  "crossbeam-channel",
+ "env_filter",
  "libc",
  "log",
  "nsh-core",
@@ -3460,9 +3470,9 @@ dependencies = [
 
 [[package]]
 name = "nsh-i18n"
-version = "0.5.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8452a60c20035f87e8003cb6daf98c01294b8d886e9a90503669a0c67e19ca9"
+checksum = "01fb5dd304d3e5818b7252bdd80c36c59433f6b3086829d39312263dc6adacd3"
 dependencies = [
  "rust-i18n-support",
  "serde_json",
@@ -3470,9 +3480,9 @@ dependencies = [
 
 [[package]]
 name = "nsh-js"
-version = "0.5.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b10bc11cccccc4dc5d1be5f853e927bb5326028f2bd53c5a805d42178cc0b2d8"
+checksum = "e928b5bf9894fecf7680770f2aa8f2cf5556b5957337a4278eb4c59618992030"
 dependencies = [
  "futures-util",
  "getrandom 0.4.3",
@@ -3494,9 +3504,9 @@ dependencies = [
 
 [[package]]
 name = "nsh-macros"
-version = "0.5.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db9d9d6eaf1942d10ccb5e328cbff1aeb7f0e27f945d3d0226c5943714a2e50e"
+checksum = "f84c52cf7b3a8b3f99c805a7e7ba6f5872cf3ac91b8d8d9bfe7f67b44c0dbe00"
 dependencies = [
  "imagesize 0.15.0",
  "proc-macro2",
@@ -3508,9 +3518,9 @@ dependencies = [
 
 [[package]]
 name = "nsh-package"
-version = "0.5.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "612a2e3e9811992a5671443cbeeef7cfaac3e5530f5a6da40a8be19827215fda"
+checksum = "9c168d02ddace9a102b31499481ee6e1e4f00f9f5910afd9f2eb2e1ebdc22007"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek 2.2.0",
@@ -3524,9 +3534,9 @@ dependencies = [
 
 [[package]]
 name = "nsh-platform-windows"
-version = "0.5.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d927d3e0d58f8db6f16c76d62d45c80070a66654817acbc209f309159cdc9884"
+checksum = "6a3ad71007bf7456f58dbb9511421e1c9a2fccb97094c3fff44792a5a497e591"
 dependencies = [
  "crossbeam-channel",
  "image",
@@ -3538,7 +3548,6 @@ dependencies = [
  "serde_json",
  "ttf-parser",
  "url",
- "webview2-com",
  "windows 0.62.2",
  "windows-core 0.62.2",
  "windows-numerics",
@@ -3546,9 +3555,9 @@ dependencies = [
 
 [[package]]
 name = "nsh-testing"
-version = "0.5.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef76812dd35b2020574b8ef0f74835984329e758c37ed1f6f40db5f11f1bb441"
+checksum = "6dc4baa74ca9fb30a197498e57a33efee63229702b759e13cad9a442df6b5ed8"
 dependencies = [
  "base64 0.22.1",
  "crossbeam-channel",
@@ -3565,13 +3574,14 @@ dependencies = [
  "serde_json",
  "tokio",
  "ureq",
+ "url",
 ]
 
 [[package]]
 name = "nsh-updater"
-version = "0.5.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0a3598aa7721a64222c75d6c5948e720595d11916ec28a620e5ccec175221334"
+checksum = "f17ee0a94f58d7cf5795c29ee118c04707d59b7c665ab7012db3dfc2769cd045"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek 2.2.0",
@@ -7799,40 +7809,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f5f280bbb2b287bc8e7de7e3852945a0ff50d1bbcb5ed42b6c7a568c546df171"
 dependencies = [
  "rustls-pki-types",
-]
-
-[[package]]
-name = "webview2-com"
-version = "0.39.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f89fca7a704cee10dcb3654c1dbb8941d1783132f1917358af75bec37a7d7e6"
-dependencies = [
- "webview2-com-macros",
- "webview2-com-sys",
- "windows 0.62.2",
- "windows-core 0.62.2",
-]
-
-[[package]]
-name = "webview2-com-macros"
-version = "0.8.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67a921c1b6914c367b2b823cd4cde6f96beec77d30a939c8199bb377cf9b9b54"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "webview2-com-sys"
-version = "0.39.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b3a07132775117d6065853d9d1178157b8c90e228de47129d6bce2c7edebedfb"
-dependencies = [
- "thiserror 2.0.21",
- "windows 0.62.2",
- "windows-core 0.62.2",
 ]
 
 [[package]]
