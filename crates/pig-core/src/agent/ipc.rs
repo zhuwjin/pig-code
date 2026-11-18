@@ -14,7 +14,7 @@ use super::runtime::new_runtime_id;
 use super::{
     AgentBackendError, AgentBackendResult, AgentExecutionCapability, AgentExecutionCursor,
     AgentExecutionHandle, AgentExecutionIdentity, AgentExecutionInput, AgentExecutionReceipt,
-    AgentExecutionRelease, AgentExecutionStop, AgentExecutionUpdate, AgentRunIdentity,
+    AgentExecutionRelease, AgentExecutionStop, AgentExecutionUpdate,
 };
 use crate::AgentHandle;
 
@@ -48,6 +48,7 @@ pub struct IpcRunSpec {
     pub cwd: PathBuf,
     pub data_dir: PathBuf,
     pub prompt: String,
+    pub resume_from_run_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -382,6 +383,25 @@ impl WorkerState {
         {
             return Err(format!("IPC run {run_id} already exists"));
         }
+        if spec.prompt.trim().is_empty() {
+            return Err("IPC run requires a non-empty prompt".to_string());
+        }
+        let resume_session_id = if let Some(source_id) = &spec.resume_from_run_id {
+            if source_id == &run_id {
+                return Err("IPC run cannot resume from itself".to_string());
+            }
+            let source = self.run(source_id)?;
+            if source.output().terminal.is_none() {
+                return Err(format!("IPC source run {source_id} is still active"));
+            }
+            let source_agent = source.agent.lock().await.take();
+            if let Some(source_agent) = source_agent {
+                source_agent.close().await?;
+            }
+            Some(source.session_id.clone())
+        } else {
+            None
+        };
         let credentials = if std::env::var_os("PIG_SELFTEST").is_some() {
             Arc::new(crate::credentials::CredentialManager::mock())
         } else {
@@ -396,26 +416,49 @@ impl WorkerState {
             spec.data_dir.clone(),
             credentials,
         );
-        agent
-            .ops
-            .send(Op::NewSession {
-                cwd,
-                provider_id: None,
-                model_id: None,
-                reasoning_level: None,
-                permissions: Some(pig_protocol::PermissionSettings::default()),
-                plan_enabled: None,
-            })
-            .await
-            .map_err(|error| error.to_string())?;
-        let events = agent.events.clone();
+        if let Some(session_id) = &resume_session_id {
+            agent
+                .ops
+                .send(Op::OpenSession {
+                    session_id: session_id.clone(),
+                })
+                .await
+                .map_err(|error| error.to_string())?;
+        } else {
+            agent
+                .ops
+                .send(Op::NewSession {
+                    cwd,
+                    provider_id: None,
+                    model_id: None,
+                    reasoning_level: None,
+                    permissions: Some(pig_protocol::PermissionSettings::default()),
+                    plan_enabled: None,
+                })
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        let startup_events = agent.events.clone();
         let session_id = tokio::time::timeout(std::time::Duration::from_secs(30), async {
             loop {
-                match events.recv().await.map_err(|error| error.to_string())? {
-                    Event::SessionConfigured { session_id, .. } => return Ok(session_id),
-                    Event::Error {
-                        error, fatal: true, ..
-                    } => {
+                match startup_events
+                    .recv()
+                    .await
+                    .map_err(|error| error.to_string())?
+                {
+                    Event::SessionReplayComplete { session_id }
+                        if resume_session_id.as_ref() == Some(&session_id) =>
+                    {
+                        return Ok(session_id);
+                    }
+                    Event::SessionConfigured { session_id, .. } if resume_session_id.is_none() => {
+                        return Ok(session_id);
+                    }
+                    Event::SessionReplayComplete { .. } => {
+                        return Err("IPC worker opened an unexpected session".to_string());
+                    }
+                    Event::SessionConfigured { .. } => {}
+                    Event::Error { error, .. } => {
                         return Err(pig_provider::core_error_en(&error));
                     }
                     _ => {}
@@ -424,6 +467,8 @@ impl WorkerState {
         })
         .await
         .map_err(|_| "timed out waiting for IPC worker session".to_string())??;
+        drop(startup_events);
+        let events = agent.events.clone();
         let run = Arc::new(WorkerRun::new(
             session_id.clone(),
             agent.ops.clone(),
@@ -448,12 +493,19 @@ impl WorkerState {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(run_id.clone(), run.clone());
         tokio::spawn(collect_events(events, run.clone()));
+        if resume_session_id.is_some() {
+            run.ops
+                .send(Op::ResumeQueue {
+                    session_id: session_id.clone(),
+                })
+                .await
+                .map_err(|error| error.to_string())?;
+        }
         run.ops
-            .send(Op::SendMessage {
+            .send(Op::SendExecutionMessage {
                 session_id,
+                message_id: format!("{run_id}:initial"),
                 content: spec.prompt.clone(),
-                files: Vec::new(),
-                images: Vec::new(),
                 permissions: pig_protocol::PermissionSettings::default(),
                 delivery: MessageDelivery::Queue,
             })
@@ -1285,6 +1337,7 @@ impl super::AgentExecutionBackend for IpcAgentExecutionBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::AgentRunIdentity;
 
     #[test]
     fn failed_journal_write_does_not_publish_or_advance_cursor() {

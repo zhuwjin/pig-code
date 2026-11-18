@@ -316,6 +316,12 @@ impl Manager {
                     }
                 }
             }
+            emit(
+                &event_tx,
+                Event::SessionReplayComplete {
+                    session_id: session_id.clone(),
+                },
+            );
             return;
         }
         let resume_cwd = store
@@ -561,6 +567,12 @@ impl Manager {
                         },
                     );
                 }
+                emit(
+                    &event_tx,
+                    Event::SessionReplayComplete {
+                        session_id: session_id.clone(),
+                    },
+                );
             }
             Err(error) => emit(
                 &event_tx,

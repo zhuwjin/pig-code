@@ -67,6 +67,29 @@ fn batch(note: &pig_protocol::TaskNotification) -> RolloutRecord {
 }
 
 #[test]
+fn root_task_wait_defers_automatic_delivery_until_the_wait_finishes() {
+    let fixture = TrustFixture::new("root-task-wait-interest");
+    let note = notification("b1");
+    let mut session = fixture.create(None);
+    schedule(&fixture, &note);
+    let (tx, _rx) = async_channel::unbounded();
+    let wait = crate::task::TaskWaitInterest::register(
+        &session.state,
+        "s1",
+        &std::collections::HashSet::from(["b1".to_string()]),
+    );
+    assert_eq!(
+        session.drain_ready_notifications(&mailbox(&note.id), &tx),
+        0
+    );
+    drop(wait);
+    assert_eq!(
+        session.drain_ready_notifications(&mailbox(&note.id), &tx),
+        1
+    );
+}
+
+#[test]
 fn automatic_delivery_syncs_once_and_survives_reopen() {
     let fixture = TrustFixture::new("notification-once");
     let note = notification("b1");

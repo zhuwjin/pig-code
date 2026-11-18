@@ -376,6 +376,7 @@ impl Manager {
                     held: false,
                     recovered: false,
                 });
+            persist_pending(&store, &session_id, &entry.pending);
             let queue_items = queue_snapshot(&entry.pending);
             emit(
                 &event_tx,
@@ -394,7 +395,6 @@ impl Manager {
                     },
                 );
             }
-            persist_pending(&store, &session_id, &entry.pending);
             return;
         }
         let mut message = PendingMessage {

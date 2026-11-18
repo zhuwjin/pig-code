@@ -19,7 +19,10 @@ pub(super) fn sync_notification_mailbox(
         .delivery_receipts
         .lock()
         .expect("notification receipt lock");
-    notifications.retain(|notification| !receipts.contains_key(&notification.id));
+    notifications.retain(|notification| {
+        !receipts.contains_key(&notification.id)
+            && !crate::task::task_wait_is_pending(&entry.state, &notification.task_id)
+    });
     drop(receipts);
     *entry.notifications.lock().expect("notification lock") = notifications
         .iter()
@@ -103,7 +106,7 @@ impl Manager {
                 if let Some(owner) = owner_agent_id {
                     let entry = self.sessions.get(&session_id);
                     let wait_delivered = entry.is_some_and(|entry| {
-                        crate::task::task_wait_delivered(&entry.state, &owner, &task.summary.id)
+                        crate::task::task_wait_pending(&entry.state, &owner, &task.summary.id)
                     });
                     let owner_running =
                         entry.is_some_and(|entry| entry.state.agents.is_active(&owner));

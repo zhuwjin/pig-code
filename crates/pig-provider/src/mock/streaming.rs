@@ -1044,7 +1044,7 @@ pub(super) fn responses_chunks(body: &str, tool_results: usize) -> Vec<String> {
                 &mut out,
                 "call_task_wait",
                 "TaskWait",
-                &serde_json::json!({"timeout_ms": 2_000}).to_string(),
+                &serde_json::json!({"timeout_ms": 30_000}).to_string(),
             );
         } else {
             responses_tool_call(
@@ -1904,7 +1904,7 @@ pub(super) fn anthropic_chunks(body: &str, tool_results: usize) -> Vec<String> {
                 1,
                 "call_task_wait",
                 "TaskWait",
-                &serde_json::json!({"timeout_ms": 2_000}).to_string(),
+                &serde_json::json!({"timeout_ms": 30_000}).to_string(),
             );
         } else {
             anthropic_tool_call(

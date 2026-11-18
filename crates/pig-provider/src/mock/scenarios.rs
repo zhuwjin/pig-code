@@ -1137,7 +1137,7 @@ pub(super) fn task_wait_scenario_response(body: &str) -> Vec<String> {
         return tool_call_chunks(
             "call_task_wait",
             "TaskWait",
-            &serde_json::json!({"timeout_ms": 2_000}).to_string(),
+            &serde_json::json!({"timeout_ms": 30_000}).to_string(),
             None,
         );
     }

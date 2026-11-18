@@ -219,9 +219,9 @@ impl std::ops::DerefMut for RegistryGuard<'_> {
     }
 }
 
-/// Registration of one subagent's explicit TaskWait interest. The ids stay in
-/// the shared set after a successful wait so the runner does not queue the
-/// same terminal notification as a steer; timeout/error drops the registration.
+/// Registration of a root or delegated agent's explicit TaskWait interest.
+/// Successfully delivered ids stay registered to prevent duplicate delivery;
+/// timeout, cancellation and errors release the pending registration.
 pub(crate) struct TaskWaitInterest {
     waits: Arc<Mutex<HashMap<String, HashSet<String>>>>,
     state: SessionToolState,
@@ -236,16 +236,17 @@ impl TaskWaitInterest {
         owner: &str,
         task_ids: &HashSet<String>,
     ) -> Self {
-        let task_ids: Vec<String> = task_ids.iter().cloned().collect();
-        if !task_ids.is_empty() {
-            state
-                .agent_task_waits
-                .lock()
-                .expect("agent task waits lock")
-                .entry(owner.to_string())
-                .or_default()
-                .extend(task_ids.iter().cloned());
+        let mut task_ids: Vec<String> = task_ids.iter().cloned().collect();
+        if task_ids.is_empty() {
+            task_ids.push("*".to_string());
         }
+        state
+            .agent_task_waits
+            .lock()
+            .expect("agent task waits lock")
+            .entry(owner.to_string())
+            .or_default()
+            .extend(task_ids.iter().cloned());
         Self {
             waits: state.agent_task_waits.clone(),
             state: state.clone(),
@@ -306,18 +307,43 @@ impl Drop for TaskWaitInterest {
                 waits.remove(&self.owner);
             }
         }
+        drop(waits);
+        let changes: Vec<super::notification::TaskChange> = {
+            let tasks = self.state.tasks.lock().expect("task registry lock");
+            tasks
+                .iter()
+                .filter(|entry| {
+                    entry.status.is_terminal()
+                        && !entry.terminal_notification_suppressed
+                        && (self.task_ids.contains(&entry.id)
+                            || self.task_ids.iter().any(|id| id == "*"))
+                })
+                .map(|entry| super::notification::terminal_change(&self.state.session_id, entry))
+                .collect()
+        };
+        for change in changes {
+            let _ = self.state.task_notify.send(change);
+        }
     }
 }
 
-/// Whether `owner` successfully received `task_id` through TaskWait; the
-/// terminal notification must not be queued as a steer a second time.
-pub(crate) fn task_wait_delivered(state: &SessionToolState, owner: &str, task_id: &str) -> bool {
+/// Whether `owner` has an active or delivered TaskWait claim for `task_id`.
+pub(crate) fn task_wait_pending(state: &SessionToolState, owner: &str, task_id: &str) -> bool {
     state
         .agent_task_waits
         .lock()
         .expect("agent task waits lock")
         .get(owner)
-        .is_some_and(|ids| ids.contains(task_id))
+        .is_some_and(|ids| ids.contains(task_id) || ids.contains("*"))
+}
+
+pub(crate) fn task_wait_is_pending(state: &SessionToolState, task_id: &str) -> bool {
+    state
+        .agent_task_waits
+        .lock()
+        .expect("agent task waits lock")
+        .values()
+        .any(|ids| ids.contains(task_id) || ids.contains("*"))
 }
 
 pub(crate) fn mark_agent_notification_delivered(
@@ -338,7 +364,8 @@ pub(crate) fn mark_agent_notification_delivered(
     if changed {
         state.notify_task(task_id);
     }
-    if let Some(notification_id) = notification_id
+    if state.owner_agent_id.is_some()
+        && let Some(notification_id) = notification_id
         && let Err(error) = state.agents.consume_notification(notification_id)
     {
         tracing::warn!(%task_id, %notification_id, %error, "notification mailbox consumption failed");

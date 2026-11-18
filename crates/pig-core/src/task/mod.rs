@@ -38,7 +38,8 @@ pub use registry::{
 pub(crate) use output::kill_process_tree;
 pub(crate) use process::{run_foreground_with_profile, spawn_background_with_profile};
 pub(crate) use registry::{
-    TaskWaitInterest, mark_agent_notification_delivered, release_agent_mailbox, task_wait_delivered,
+    TaskWaitInterest, mark_agent_notification_delivered, release_agent_mailbox,
+    task_wait_is_pending, task_wait_pending,
 };
 
 pub use sandbox::AdditionalPermissions;

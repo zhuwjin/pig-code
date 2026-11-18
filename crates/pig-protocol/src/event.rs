@@ -338,6 +338,10 @@ pub enum Event {
         #[serde(default)]
         plan_enabled: bool,
     },
+    /// A resumed session has completed its history and persisted-state replay.
+    SessionReplayComplete {
+        session_id: String,
+    },
     SessionList {
         sessions: Vec<SessionMeta>,
     },
@@ -913,6 +917,7 @@ impl Event {
     pub fn session_id(&self) -> Option<&str> {
         match self {
             Self::SessionConfigured { session_id, .. }
+            | Self::SessionReplayComplete { session_id, .. }
             | Self::SessionTitleChanged { session_id, .. }
             | Self::McpServerList { session_id, .. }
             | Self::FileSearchResults { session_id, .. }

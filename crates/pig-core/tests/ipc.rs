@@ -3,9 +3,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use pig_core::agent::ipc::{
-    IpcAgentBackendFactory, IpcAgentExecutionHandle, IpcCapability, IpcEventBatch, IpcRunResult,
-    IpcRunSpec, ipc_events, ipc_reconnect, ipc_release, ipc_start, ipc_start_with_requirements,
-    ipc_stop,
+    IPC_PROTOCOL_VERSION, IpcAgentBackendFactory, IpcAgentExecutionHandle, IpcCapability,
+    IpcEventBatch, IpcRunResult, IpcRunSpec, ipc_events, ipc_reconnect, ipc_release, ipc_start,
+    ipc_start_with_requirements, ipc_stop,
 };
 use pig_core::agent::runtime::{
     AgentInitiator, AgentRuntime, RuntimeConnectionState, RuntimeError, RuntimeRunStatus, StartRun,
@@ -17,7 +17,7 @@ use pig_core::agent::{
 };
 use pig_core::store::Store;
 use pig_provider::mock;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
@@ -115,6 +115,7 @@ async fn real_worker_completes_and_reconnects_after_parent_restart() {
         address,
         worker_identity("ipc-unsupported", 1),
         IpcRunSpec {
+            resume_from_run_id: None,
             config_path: Some(config_path.clone()),
             cwd: cwd.clone(),
             data_dir: root.join("worker-unsupported"),
@@ -138,6 +139,7 @@ async fn real_worker_completes_and_reconnects_after_parent_restart() {
         address,
         worker_identity(&completed_run.run_id, 1),
         IpcRunSpec {
+            resume_from_run_id: None,
             config_path: Some(config_path.clone()),
             cwd: cwd.clone(),
             data_dir: root.join("worker-completed"),
@@ -213,6 +215,7 @@ async fn real_worker_completes_and_reconnects_after_parent_restart() {
         address,
         worker_identity(&active_run.run_id, 1),
         IpcRunSpec {
+            resume_from_run_id: None,
             config_path: Some(config_path),
             cwd,
             data_dir: root.join("worker-reconnect"),
@@ -377,6 +380,7 @@ async fn backend_registry_executes_real_ipc_and_releases_idempotently() {
         .start(
             "ipc",
             IpcRunSpec {
+                resume_from_run_id: None,
                 config_path: Some(config_path),
                 cwd,
                 data_dir: root.join("worker-registry"),
@@ -443,6 +447,7 @@ async fn execution_handle_reconnects_stops_and_releases_real_worker() {
         .register("ipc", IpcAgentBackendFactory::new(address))
         .expect("register IPC backend");
     let spec = IpcRunSpec {
+        resume_from_run_id: None,
         config_path: Some(config_path),
         cwd,
         data_dir: root.join("worker-handle"),
@@ -607,6 +612,7 @@ async fn worker_restart_replays_a_completed_run_without_duplicates() {
         address,
         worker_identity(run_id, 1),
         IpcRunSpec {
+            resume_from_run_id: None,
             config_path: Some(config_path),
             cwd,
             data_dir: root.join("worker-data"),
@@ -661,6 +667,7 @@ async fn worker_restart_recovers_an_unsettled_run_as_failed_and_releasable() {
         address,
         worker_identity(run_id, 1),
         IpcRunSpec {
+            resume_from_run_id: None,
             config_path: Some(config_path),
             cwd,
             data_dir: root.join("worker-data"),
@@ -772,6 +779,7 @@ async fn execution_handle_steers_and_reconnects_after_a_real_transport_disconnec
         proxy_address,
         worker_identity(run_id, 1),
         IpcRunSpec {
+            resume_from_run_id: None,
             config_path: Some(config_path),
             cwd,
             data_dir: root.join("worker-data"),
@@ -908,6 +916,7 @@ async fn execution_handle_deduplicates_consumed_input_and_waits_for_queued_turn(
         address,
         worker_identity(run_id, 1),
         IpcRunSpec {
+            resume_from_run_id: None,
             config_path: Some(config_path),
             cwd,
             data_dir: root.join("worker-data"),
@@ -998,6 +1007,7 @@ async fn stale_execution_handle_cannot_control_or_release_a_reconnected_run() {
         address,
         worker_identity(run_id, 1),
         IpcRunSpec {
+            resume_from_run_id: None,
             config_path: Some(config_path),
             cwd,
             data_dir: root.join("worker-data"),
@@ -1102,6 +1112,275 @@ async fn stale_execution_handle_cannot_control_or_release_a_reconnected_run() {
             .contains("stale")
     );
     third.release().await.expect("latest attempt release");
+    restarted.kill().await.expect("stop restarted worker");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn lost_send_response_is_reconciled_without_replaying_the_input() {
+    let (config_path, cwd, root) = crate::common::setup("ipc-lost-send-response");
+    let (address, mut worker) = start_worker(&root.join("worker-state")).await;
+    let run_id = "ipc-lost-send-response";
+    let first_identity = worker_identity(run_id, 1);
+    let mut first = IpcAgentExecutionHandle::start(
+        address,
+        first_identity.clone(),
+        IpcRunSpec {
+            resume_from_run_id: None,
+            config_path: Some(config_path),
+            cwd,
+            data_dir: root.join("worker-data"),
+            prompt: "read the mock file and summarize".to_string(),
+        },
+    )
+    .await
+    .expect("start worker run");
+    timeout(Duration::from_secs(10), async {
+        loop {
+            match first.next().await.expect("initial worker update") {
+                AgentExecutionUpdate::Output {
+                    event: pig_protocol::Event::ToolCallBegin { .. },
+                    ..
+                } => break,
+                AgentExecutionUpdate::Output { .. } => {}
+                AgentExecutionUpdate::Settled { .. } => panic!("settled before lost response"),
+                AgentExecutionUpdate::Disconnected { detail, .. } => panic!("{detail}"),
+            }
+        }
+    })
+    .await
+    .expect("initial tool call");
+
+    let input = AgentExecutionInput {
+        message_id: "ipc-lost-response-input-1".into(),
+        payload: serde_json::json!({
+            "text": "IPC response loss input",
+            "delivery": "queue",
+        }),
+    };
+    let mut connection = tokio::net::TcpStream::connect(address)
+        .await
+        .expect("connect for response loss");
+    let request = serde_json::json!({
+        "id": "lost-send-response",
+        "protocol": IPC_PROTOCOL_VERSION,
+        "method": "send",
+        "params": {
+            "run_id": run_id,
+            "execution": first_identity,
+            "input": input.clone(),
+        },
+    });
+    let mut encoded = serde_json::to_vec(&request).expect("encode send request");
+    encoded.push(b'\n');
+    connection.write_all(&encoded).await.expect("write request");
+    connection
+        .shutdown()
+        .await
+        .expect("close request write side");
+    drop(connection);
+
+    timeout(Duration::from_secs(10), async {
+        loop {
+            let batch = ipc_events(address, run_id, 0)
+                .await
+                .expect("inspect mailbox");
+            if batch.events.iter().any(|record| {
+                matches!(
+                    &record.event,
+                    pig_protocol::Event::QueueChanged { items, .. }
+                        if items.iter().any(|item| item.id == input.message_id)
+                )
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("request executed although its response was lost");
+    drop(first);
+    let mut recovered = IpcAgentExecutionHandle::reconnect(
+        address,
+        worker_identity(run_id, 2),
+        AgentExecutionCursor {
+            attempt: 1,
+            backend_epoch: "worker-restart-epoch-1".into(),
+            sequence: 0,
+        },
+    )
+    .await
+    .expect("reconnect after response loss");
+    recovered
+        .send(input.clone())
+        .await
+        .expect("retry unknown send outcome");
+
+    let mut visible_inputs = 0;
+    let mut completions = 0;
+    let (_, result) = timeout(Duration::from_secs(30), async {
+        let mut sequences = Vec::new();
+        loop {
+            match recovered.next().await.expect("reconciled worker update") {
+                AgentExecutionUpdate::Output { sequence, event } => {
+                    assert!(!sequences.contains(&sequence));
+                    sequences.push(sequence);
+                    if matches!(
+                        event,
+                        pig_protocol::Event::UserMessage { ref text, .. }
+                            if text == "IPC response loss input"
+                    ) {
+                        visible_inputs += 1;
+                    }
+                    if matches!(event, pig_protocol::Event::TurnComplete { .. }) {
+                        completions += 1;
+                    }
+                }
+                AgentExecutionUpdate::Settled { result, .. } => break (sequences, result),
+                AgentExecutionUpdate::Disconnected { detail, .. } => panic!("{detail}"),
+            }
+        }
+    })
+    .await
+    .expect("settle after unknown send outcome");
+    assert_eq!(visible_inputs, 1);
+    assert_eq!(completions, 2);
+    assert_eq!(result.status, pig_protocol::AgentRunStatus::Completed);
+    recovered.release().await.expect("release reconciled run");
+    worker.kill().await.expect("stop worker");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn worker_crash_resumes_a_durable_pending_input_in_a_new_run() {
+    let (config_path, cwd, root) = crate::common::setup("ipc-crash-pending-input");
+    let state = root.join("worker-state");
+    let data_dir = root.join("worker-data");
+    let address = worker_address();
+    let (_, mut worker) = start_worker_at(&state, address).await;
+    let old_run_id = "ipc-crash-pending-old";
+    let old_identity = worker_identity(old_run_id, 1);
+    let mut old = IpcAgentExecutionHandle::start(
+        address,
+        old_identity.clone(),
+        IpcRunSpec {
+            resume_from_run_id: None,
+            config_path: Some(config_path.clone()),
+            cwd: cwd.clone(),
+            data_dir: data_dir.clone(),
+            prompt: mock::SCENARIO_SLOW_TRIGGER.to_string(),
+        },
+    )
+    .await
+    .expect("start run before crash");
+    timeout(Duration::from_secs(10), async {
+        loop {
+            match old.next().await.expect("pre-crash update") {
+                AgentExecutionUpdate::Output {
+                    event: pig_protocol::Event::ToolCallBegin { .. },
+                    ..
+                } => break,
+                AgentExecutionUpdate::Output { .. } => {}
+                AgentExecutionUpdate::Settled { .. } => panic!("settled before crash"),
+                AgentExecutionUpdate::Disconnected { detail, .. } => panic!("{detail}"),
+            }
+        }
+    })
+    .await
+    .expect("active tool before crash");
+    old.send(AgentExecutionInput {
+        message_id: "ipc-crash-pending-input-1".into(),
+        payload: serde_json::json!({
+            "text": "IPC crash pending input",
+            "delivery": "queue",
+        }),
+    })
+    .await
+    .expect("queue durable input");
+    timeout(Duration::from_secs(10), async {
+        loop {
+            let batch = ipc_events(address, old_run_id, 0)
+                .await
+                .expect("pending event");
+            if batch.events.iter().any(|record| {
+                matches!(
+                    &record.event,
+                    pig_protocol::Event::QueueChanged { items, .. }
+                        if items.iter().any(|item| item.id == "ipc-crash-pending-input-1")
+                )
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("durable pending admission before crash");
+    old.stop(AgentExecutionStop::Graceful {
+        reason: "pause pending input before worker crash".into(),
+    })
+    .await
+    .expect("stop with pending input");
+    let (_, stopped) = collect_handle_events(&mut old).await;
+    assert_eq!(stopped.status, pig_protocol::AgentRunStatus::Cancelled);
+    worker
+        .kill()
+        .await
+        .expect("crash worker with pending input");
+    drop(old);
+    let (_, mut restarted) = start_worker_at(&state, address).await;
+    let previous = ipc_reconnect(address, old_run_id)
+        .await
+        .expect("restore old run")
+        .terminal
+        .expect("stopped old run remains settled");
+    assert_eq!(previous.status, "cancelled");
+
+    let new_run_id = "ipc-crash-pending-new";
+    let mut resumed = IpcAgentExecutionHandle::start(
+        address,
+        worker_identity(new_run_id, 1),
+        IpcRunSpec {
+            resume_from_run_id: Some(old_run_id.into()),
+            config_path: Some(config_path),
+            cwd,
+            data_dir,
+            prompt: "IPC resume follow-up".to_string(),
+        },
+    )
+    .await
+    .expect("resume the durable session in a new run");
+    let mut pending_visible = 0;
+    let mut completions = 0;
+    let result = timeout(Duration::from_secs(30), async {
+        loop {
+            match resumed.next().await.expect("resumed worker update") {
+                AgentExecutionUpdate::Output { event, .. } => {
+                    if matches!(
+                        event,
+                        pig_protocol::Event::UserMessage { ref text, .. }
+                            if text == "IPC crash pending input"
+                    ) {
+                        pending_visible += 1;
+                    }
+                    if matches!(event, pig_protocol::Event::TurnComplete { .. }) {
+                        completions += 1;
+                    }
+                }
+                AgentExecutionUpdate::Settled { result, .. } => break result,
+                AgentExecutionUpdate::Disconnected { detail, .. } => panic!("{detail}"),
+            }
+        }
+    })
+    .await
+    .expect("resume pending input");
+    assert_eq!(pending_visible, 1);
+    assert_eq!(completions, 2);
+    assert_eq!(result.status, pig_protocol::AgentRunStatus::Completed);
+    resumed.release().await.expect("release resumed run");
+    ipc_release(address, &old_identity, false)
+        .await
+        .expect("release old run record");
     restarted.kill().await.expect("stop restarted worker");
     let _ = std::fs::remove_dir_all(root);
 }
