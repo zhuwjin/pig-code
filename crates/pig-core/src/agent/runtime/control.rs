@@ -39,9 +39,10 @@ pub struct AgentRuntime {
     commands: mpsc::UnboundedSender<Command>,
     events: broadcast::Sender<RuntimeControlEvent>,
     backends: Arc<super::super::AgentBackendRegistry>,
+    pub(super) executions: super::execution::ExecutionTable,
 }
 
-struct RuntimeState {
+pub(super) struct RuntimeState {
     session_id: String,
     store: Arc<Mutex<Store>>,
     agents: BTreeMap<String, RuntimeAgent>,
@@ -122,6 +123,7 @@ impl AgentRuntime {
             commands,
             events,
             backends,
+            executions: Default::default(),
         })
     }
 
@@ -166,7 +168,7 @@ impl AgentRuntime {
         self.events.subscribe()
     }
 
-    async fn dispatch<R>(
+    pub(super) async fn dispatch<R>(
         &self,
         operation: impl FnOnce(&mut RuntimeState) -> Result<R, RuntimeError> + Send + 'static,
     ) -> Result<R, RuntimeError>
@@ -475,6 +477,15 @@ impl AgentRuntime {
             Ok(())
         })
         .expect("disable watchdog ticks");
+    }
+
+    #[cfg(test)]
+    fn check_watchdogs_at_blocking(&self, now_ms: u64) {
+        self.dispatch_blocking(move |state| {
+            state.check_watchdogs(now_ms);
+            Ok(())
+        })
+        .expect("check watchdogs at injected time");
     }
 
     pub fn check_watchdogs_blocking(&self) -> Result<(), RuntimeError> {
@@ -906,7 +917,7 @@ impl RuntimeState {
         Ok(attempt)
     }
 
-    fn set_connection_state(
+    pub(super) fn set_connection_state(
         &mut self,
         run_id: &str,
         state: RuntimeConnectionState,
@@ -1353,6 +1364,34 @@ impl RuntimeState {
         Ok(run)
     }
 
+    pub(super) fn run_is_active(&self, run_id: &str) -> bool {
+        self.runs
+            .get(run_id)
+            .is_some_and(|run| run.status.is_active())
+    }
+
+    pub(super) fn execution_identity(
+        &self,
+        run_id: &str,
+    ) -> Result<crate::agent::AgentExecutionIdentity, RuntimeError> {
+        let run = self
+            .runs
+            .get(run_id)
+            .ok_or_else(|| RuntimeError::NotFound(format!("Run {run_id} is not registered")))?;
+        let attempt = self.attempts.get(run_id).ok_or_else(|| {
+            RuntimeError::NotFound(format!("Run {run_id} has no execution attempt"))
+        })?;
+        Ok(crate::agent::AgentExecutionIdentity {
+            run: crate::agent::AgentRunIdentity {
+                session_id: run.session_id.clone(),
+                agent_id: run.agent_id.clone(),
+                run_id: run.run_id.clone(),
+            },
+            attempt: attempt.attempt,
+            backend_epoch: attempt.backend_epoch.clone(),
+        })
+    }
+
     fn current_attempt(
         &self,
         run_id: &str,
@@ -1372,7 +1411,7 @@ impl RuntimeState {
         Ok(current.clone())
     }
 
-    fn release_execution(
+    pub(super) fn release_execution(
         &mut self,
         run_id: &str,
         attempt: u64,
@@ -1396,7 +1435,7 @@ impl RuntimeState {
         self.commit_execution_attempt(released, RuntimeEventKind::ExecutionReleased)
     }
 
-    fn request_stop(
+    pub(super) fn request_stop(
         &mut self,
         run_id: &str,
         attempt: u64,
@@ -1445,7 +1484,7 @@ impl RuntimeState {
         Ok(run)
     }
 
-    fn settle_run(
+    pub(super) fn settle_run(
         &mut self,
         run_id: &str,
         attempt: u64,
@@ -2105,18 +2144,18 @@ mod tests {
         let mut request = start("s8", "watchdog-heartbeat");
         request.watchdog = watchdog(None, Some(60), super::super::RunWatchdogAction::Observe);
         let (run, _) = runtime.start_run(request).await.expect("run");
-        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        let started_at = runtime.snapshot_blocking().expect("snapshot").runs[0].last_activity_at_ms;
+        runtime.check_watchdogs_at_blocking(started_at + 30);
         runtime
             .record_run_activity_blocking(run.run_id.clone())
             .expect("activity");
-        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
-        runtime.check_watchdogs_blocking().expect("active run");
+        let activity = runtime.snapshot_blocking().expect("snapshot").runs[0].last_activity_at_ms;
+        runtime.check_watchdogs_at_blocking(activity + 59);
         assert!(
             runtime.snapshot_blocking().expect("snapshot").runs[0]
                 .watchdog_alerts
                 .is_empty()
         );
-        let activity = runtime.snapshot_blocking().expect("snapshot").runs[0].last_activity_at_ms;
         runtime.shutdown().await.expect("shutdown");
 
         let restored = AgentRuntime::spawn("s8".to_string(), store).expect("restored");

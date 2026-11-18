@@ -147,7 +147,7 @@
       "id": "R01",
       "area": "Single Agent control authority",
       "references": [{"project": "codex", "path": "codex-rs/core/src/agent/api.rs"}, {"project": "deepseek-harness", "path": "packages/subagent/subagent/src/manager.ts"}],
-      "existing_evidence": ["crates/pig-core/src/agent/runtime/control.rs", "crates/pig-core/tests/agent.rs", "crates/pig-core/tests/subagent.rs"],
+      "existing_evidence": ["crates/pig-core/src/agent/runtime/control.rs", "crates/pig-core/src/agent/runtime/execution.rs", "crates/pig-core/tests/agent.rs", "crates/pig-core/tests/subagent.rs"],
       "missing_proof": ["Remove competing AgentNode and Session control authority", "Prove atomic admission and settlement for every root/child/foreground/background/swarm path", "Delete legacy control and recovery branches"],
       "status": "implemented"
     },
@@ -155,8 +155,8 @@
       "id": "R02",
       "area": "Agent, Run, Attempt and ExecutionHandle semantics",
       "references": [{"project": "deepseek-harness", "path": "packages/subagent/subagent/src/types.ts"}, {"project": "codex", "path": "codex-rs/core/src/agent/control/execution.rs"}],
-      "existing_evidence": ["crates/pig-core/src/agent/execution.rs", "crates/pig-core/src/agent/backend.rs", "crates/pig-core/src/agent/execution_handle.rs", "crates/pig-core/src/agent/ipc.rs", "crates/pig-core/src/session/subagent/lifecycle.rs", "crates/pig-core/tests/ipc.rs", "crates/pig-core/tests/agent.rs", "crates/pig-core/src/agent/runtime/model.rs"],
-      "missing_proof": ["Store and fence ExecutionHandle ownership in AgentRuntime; registry and both backends are migrated", "Prove settlement and release independence with attempt fencing"],
+      "existing_evidence": ["crates/pig-core/src/agent/execution.rs", "crates/pig-core/src/agent/backend.rs", "crates/pig-core/src/agent/execution_handle.rs", "crates/pig-core/src/agent/ipc.rs", "crates/pig-core/src/agent/runtime/execution.rs", "crates/pig-core/src/session/subagent/lifecycle.rs", "crates/pig-core/tests/ipc.rs", "crates/pig-core/tests/agent.rs", "crates/pig-core/src/agent/runtime/model.rs"],
+      "missing_proof": ["Route production Local/IPC handles through Runtime's fenced execution table; ownership and fencing are covered by control tests", "Prove fencing and release ordering across real Local/IPC restarts"],
       "status": "implemented"
     },
     {
