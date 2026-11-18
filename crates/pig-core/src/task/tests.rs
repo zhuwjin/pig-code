@@ -140,6 +140,7 @@ fn task_snapshot_carries_the_session_data_dir_spill_path() {
             started_at: 1,
             ended_at: None,
             pid: None,
+            process: None,
             output: "tail".to_string(),
             spill: Some(super::spill::Spill::new(path.clone())),
             cancel: None,

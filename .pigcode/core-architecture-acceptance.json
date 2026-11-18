@@ -219,9 +219,9 @@
       "id": "R10",
       "area": "Shell task and subprocess lifecycle",
       "references": [{"project": "codex", "path": "codex-rs/core/src/tasks/"}, {"project": "deepseek-harness", "path": "packages/subprocess/"}],
-      "existing_evidence": ["crates/pig-core/tests/background_tasks.rs", "crates/pig-core/src/task/tests.rs", "crates/pig-core/src/task/process.rs"],
-      "missing_proof": ["Separate shell task and AgentRun authority", "Prove bounded output and recoverable spill", "Prove process-tree quiescence and restart Lost semantics"],
-      "status": "implemented"
+      "existing_evidence": ["crates/pig-core/tests/background_tasks.rs", "crates/pig-core/tests/bash.rs", "crates/pig-core/src/task/tests.rs", "crates/pig-core/src/task/process.rs", "crates/pig-core/src/task/process/tree.rs", "crates/pig-core/src/session/tests/notifications.rs", "crates/pig-core/src/store/tasks.rs"],
+      "missing_proof": ["Complete three-platform ProcessTree and sandbox CI verification"],
+      "status": "tested"
     },
     {
       "id": "R11",

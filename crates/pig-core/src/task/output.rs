@@ -3,9 +3,6 @@ use std::sync::{Arc, Mutex};
 
 use pig_protocol::TaskStatus;
 
-use crate::NoConsoleExt as _;
-use crate::rollout::now_secs;
-
 /// Total accumulated output cap per task (stdout+stderr combined): exceeding it
 /// force-stops the task — guards against "output-spewing commands" filling the
 /// foreground sink memory within the timeout window, or running forever after
@@ -35,7 +32,7 @@ impl OutputMeter {
 /// notice to output (the rolling window keeps the tail, so the notice ends up
 /// last), and kill the process tree.
 fn cap_kill(registry: &TaskRegistry, task_id: &str) {
-    let pid = {
+    let (pid, process) = {
         let mut tasks = registry.lock().expect("task registry lock");
         let Some(entry) = tasks.iter_mut().find(|t| t.id == task_id) else {
             return;
@@ -44,34 +41,26 @@ fn cap_kill(registry: &TaskRegistry, task_id: &str) {
             entry.status = TaskStatus::Killed;
             entry.reason =
                 Some("Output exceeded the 16MiB limit; the task was force-stopped".to_string());
-            entry.ended_at = Some(now_secs());
+            entry.ended_at = None;
         }
         entry
             .output
             .push_str("\n[Output exceeded the 16MiB limit; the task was force-stopped. Redirect large output to a file (e.g. command > out.txt) and process it with Read/Grep]");
-        entry.pid
+        (entry.pid, entry.process.clone())
     };
-    if let Some(pid) = pid {
-        kill_process_tree(pid);
-    }
-}
-
-/// Kill the process tree: Windows taskkill /T (children included); unix kills
-/// the process group first, then the pid as a fallback (spawn_shell's
-/// process_group(0) makes the child its own group leader).
-pub(crate) fn kill_process_tree(pid: u32) {
-    if cfg!(target_os = "windows") {
-        let _ = std::process::Command::new("taskkill")
-            .no_console()
-            .args(["/PID", &pid.to_string(), "/F", "/T"])
-            .output();
+    let result = if let Some(process) = process {
+        process.terminate()
+    } else if let Some(pid) = pid {
+        Err(format!("process {pid} has no managed ProcessTree"))
     } else {
-        let _ = std::process::Command::new("kill")
-            .args(["-9", "--", &format!("-{pid}")])
-            .output();
-        let _ = std::process::Command::new("kill")
-            .args(["-9", &pid.to_string()])
-            .output();
+        return;
+    };
+    if let Err(error) = result {
+        super::registry::note_output(
+            registry,
+            task_id,
+            &format!("\n[Failed to terminate the output-capped process tree: {error}]"),
+        );
     }
 }
 

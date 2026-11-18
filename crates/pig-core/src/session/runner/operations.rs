@@ -1,7 +1,7 @@
 use super::*;
 
 use super::entry::{SessionEntry, model_label, resolve_entry};
-use super::queue::{queue_snapshot, steer_snapshot, stop_session_tasks};
+use super::queue::{queue_snapshot, steer_snapshot, stop_session_tasks_until_idle};
 use super::runtime::layered_runtime;
 
 use crate::session::{estimate, meta_to_selection, restore_pending, restored_queue_seq};
@@ -749,12 +749,11 @@ impl Manager {
             .sessions
             .get(&session_id)
             .is_some_and(|entry| entry.session.is_none());
-        let registry = self.sessions.remove(&session_id).map(|entry| {
-            stop_session_tasks(&entry);
+        let removed = self.sessions.remove(&session_id).map(|entry| {
             if let Some(cancel) = &entry.cancel {
                 cancel.cancel();
             }
-            entry.state.agents.clone()
+            entry
         });
         super::reject_session_approvals(&pending, &session_id);
         super::drop_session_questions(&pending_questions, &session_id);
@@ -765,12 +764,21 @@ impl Manager {
             .entry(session_id.clone())
             .or_insert(super::PendingDeletion {
                 executions_idle: false,
+                tasks_idle: removed.is_none(),
                 turn_finished: !turn_in_flight,
             });
-        if let Some(registry) = registry {
+        if let Some(entry) = removed {
+            let registry = entry.state.agents.clone();
             let deletion_tx = self.deletion_tx.clone();
             let deletion_events = event_tx.clone();
             let id = session_id.clone();
+            let task_tx = deletion_tx.clone();
+            let task_events = deletion_events.clone();
+            let task_id = id.clone();
+            tokio::spawn(async move {
+                stop_session_tasks_until_idle(entry, task_events).await;
+                let _ = task_tx.send(super::DeletionProgress::TasksIdle(task_id));
+            });
             tokio::spawn(async move {
                 if tokio::time::timeout(super::SESSION_DELETE_GRACE, registry.wait_for_idle())
                     .await
@@ -788,7 +796,7 @@ impl Manager {
                     );
                 }
                 registry.wait_for_idle().await;
-                let _ = deletion_tx.send(id);
+                let _ = deletion_tx.send(super::DeletionProgress::ExecutionsIdle(id));
             });
         } else if !pending_already
             && let Some(deletion) = self.pending_deletions.get_mut(&session_id)
@@ -806,7 +814,9 @@ impl Manager {
         let ready = self
             .pending_deletions
             .get(&session_id)
-            .is_some_and(|deletion| deletion.executions_idle && deletion.turn_finished);
+            .is_some_and(|deletion| {
+                deletion.executions_idle && deletion.tasks_idle && deletion.turn_finished
+            });
         if !ready {
             return;
         }

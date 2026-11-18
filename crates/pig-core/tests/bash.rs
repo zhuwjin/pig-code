@@ -115,6 +115,16 @@ async fn bash(
     state: &SessionToolState,
     args: serde_json::Value,
 ) -> (String, bool) {
+    bash_with_profile(dir, tracker, state, args, Default::default()).await
+}
+
+async fn bash_with_profile(
+    dir: &std::path::Path,
+    tracker: &mut ChangeTracker,
+    state: &SessionToolState,
+    args: serde_json::Value,
+    sandbox_profile: pig_core::task::SandboxProfile,
+) -> (String, bool) {
     let (out, is_error, _, _, _) = tool::execute(
         &call("ExecCommand", args),
         ToolContext {
@@ -123,7 +133,7 @@ async fn bash(
             state,
             fs_grant: None,
             sandbox_override: Default::default(),
-            sandbox_profile: Default::default(),
+            sandbox_profile,
             additional_permissions: Default::default(),
         },
     )
@@ -559,18 +569,49 @@ async fn spills_do_not_collide_across_sessions_in_one_workspace() {
     let _ = std::fs::remove_dir_all(&data_dir);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stop_kills_process_group() {
+async fn assert_stop_kills_process_group(profile: pig_core::task::SandboxProfile) {
     let dir = temp_dir("pgroup");
     let mut tracker = ChangeTracker::default();
     let state = SessionToolState::for_test();
 
-    // Run "a child shell spawning a grandchild process" in the background: sleep 60 is a child of sh
-    let (out, is_error) = bash(
+    let started = dir.join("grandchild-started");
+    let late = dir.join("grandchild-late-write");
+    let command_path = |path: &std::path::Path| {
+        let text = path.display().to_string();
+        text.strip_prefix(r"\\?\").unwrap_or(&text).to_string()
+    };
+    let script = dir.join("grandchild.cmd");
+    std::fs::write(
+        &script,
+        format!(
+            "@echo off\r\necho started > \"{}\"\r\nping -n 2 127.0.0.1 >nul\r\necho late > \"{}\"\r\n",
+            command_path(&started),
+            command_path(&late)
+        ),
+    )
+    .expect("grandchild fixture");
+    let shell_path = |path: &std::path::Path| command_path(path).replace('\\', "/");
+    let command = match dialect() {
+        Dialect::Bash => format!(
+            "(touch \"{}\"; sleep 1; printf late > \"{}\") & wait",
+            shell_path(&started),
+            shell_path(&late)
+        ),
+        Dialect::PowerShell => format!(
+            "& $env:COMSPEC /c '{}'",
+            command_path(&script).replace('\'', "''")
+        ),
+        Dialect::Cmd => format!(
+            "start \"pig-grandchild\" /b cmd /c \"{}\" & ping -n 30 127.0.0.1 >nul",
+            command_path(&script)
+        ),
+    };
+    let (out, is_error) = bash_with_profile(
         &dir,
         &mut tracker,
         &state,
-        serde_json::json!({"command": "sleep 60 & wait", "run_in_background": true}),
+        serde_json::json!({"command": command, "run_in_background": true}),
+        profile,
     )
     .await;
     assert!(!is_error, "{out}");
@@ -579,6 +620,23 @@ async fn stop_kills_process_group() {
         .and_then(|rest| rest.split('.').next())
         .expect("background message contains task_id")
         .to_string();
+    let child_started = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !started.exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        child_started.is_ok(),
+        "grandchild did not start: {:?}",
+        state
+            .tasks
+            .lock()
+            .expect("tasks")
+            .iter()
+            .map(|task| (task.status, task.reason.clone(), task.output.clone()))
+            .collect::<Vec<_>>()
+    );
 
     let (out, is_error) = task_ctl(&dir, &mut tracker, &state, "TaskStop", &task_id).await;
     assert!(!is_error, "{out}");
@@ -592,6 +650,24 @@ async fn stop_kills_process_group() {
         "expected Killed: {:?}",
         entry.status
     );
+    assert!(entry.ended_at.is_some(), "stop returned before settlement");
+    drop(tasks);
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    assert!(
+        !late.exists(),
+        "a grandchild survived TaskStop and wrote after it returned"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_kills_process_group() {
+    assert_stop_kills_process_group(Default::default()).await;
+}
+
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_kills_process_group_without_sandbox() {
+    assert_stop_kills_process_group(pig_core::task::SandboxProfile::Unrestricted).await;
 }
 
 // ---------- 4.3 Destructive command blocklist ----------

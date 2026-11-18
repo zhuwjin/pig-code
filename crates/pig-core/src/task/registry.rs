@@ -57,6 +57,7 @@ pub struct TaskEntry {
     pub started_at: u64,
     pub ended_at: Option<u64>,
     pub pid: Option<u32>,
+    pub(super) process: Option<super::process::ProcessTask>,
     pub output: String,
     /// Full-output spill (lazily created under the session's data-dir tool-results dir)
     pub(super) spill: Option<spill::Spill>,
@@ -81,6 +82,14 @@ pub struct TaskEntry {
 }
 
 impl TaskEntry {
+    pub(crate) fn needs_stop(&self) -> bool {
+        matches!(self.status, TaskStatus::Running | TaskStatus::Queued)
+            || self
+                .process
+                .as_ref()
+                .is_some_and(|process| !process.is_quiescent())
+    }
+
     pub fn recovered_agent(
         id: String,
         command: String,
@@ -100,6 +109,7 @@ impl TaskEntry {
             started_at: created_at,
             ended_at: Some(now_secs()),
             pid: None,
+            process: None,
             output: String::new(),
             spill: None,
             cancel: None,
@@ -776,6 +786,7 @@ impl TaskRegistry {
                 started_at: summary.started_at_ms / 1_000,
                 ended_at: summary.ended_at_ms.map(|value| value / 1_000),
                 pid: None,
+                process: None,
                 output: summary.output_tail,
                 spill: summary.spill_path.map(spill::Spill::restored),
                 cancel: None,
@@ -886,6 +897,7 @@ fn register_agent_task_with_status(
             started_at: now_secs(),
             ended_at: None,
             pid: None,
+            process: None,
             output: String::new(),
             spill: None,
             cancel: Some(cancel),

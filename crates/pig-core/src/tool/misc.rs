@@ -473,7 +473,8 @@ impl Tool for TaskStop {
                 &ctx.state.task_notify,
                 &ctx.state.session_id,
                 Some(&ctx.state.agents),
-            )?;
+            )
+            .await?;
             Ok(ToolEffect::plain(result))
         })
     }
@@ -1676,8 +1677,8 @@ mod task_wait_tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn queued_stop_cancels_and_produces_killed() {
+    #[tokio::test]
+    async fn queued_stop_cancels_and_produces_killed() {
         let (state, _store, root) = fixture("stop");
         let task_id = register(&state, true);
         let cancel = state.tasks.lock().expect("tasks")[0]
@@ -1690,6 +1691,7 @@ mod task_wait_tests {
             &state.task_notify,
             &state.session_id,
         )
+        .await
         .expect("stop queued");
         assert!(cancel.is_cancelled());
         assert_eq!(

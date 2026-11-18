@@ -23,7 +23,13 @@ use trust::persist_workspace_trust;
 #[derive(Default)]
 pub(super) struct PendingDeletion {
     executions_idle: bool,
+    tasks_idle: bool,
     turn_finished: bool,
+}
+
+pub(super) enum DeletionProgress {
+    ExecutionsIdle(String),
+    TasksIdle(String),
 }
 
 const SESSION_DELETE_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
@@ -42,8 +48,8 @@ pub(super) struct Manager {
     sessions: HashMap<String, SessionEntry>,
     deleted_sessions: std::collections::HashSet<String>,
     pending_deletions: HashMap<String, PendingDeletion>,
-    deletion_tx: tokio::sync::mpsc::UnboundedSender<String>,
-    deletion_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    deletion_tx: tokio::sync::mpsc::UnboundedSender<DeletionProgress>,
+    deletion_rx: tokio::sync::mpsc::UnboundedReceiver<DeletionProgress>,
     pending_terminal: Vec<(
         String,
         crate::store::BackgroundTask,
@@ -639,6 +645,7 @@ pub async fn agent_loop(
                     session_id.clone(),
                     PendingDeletion {
                         executions_idle: true,
+                        tasks_idle: true,
                         turn_finished: true,
                     },
                 );
@@ -661,7 +668,7 @@ pub async fn agent_loop(
             Op(Op),
             TaskNotify(crate::task::TaskChange),
             Turn(String, Session, TurnOutcome),
-            DeletionIdle(String),
+            DeletionIdle(DeletionProgress),
             RetryTerminal,
             Tick,
         }
@@ -679,7 +686,7 @@ pub async fn agent_loop(
                     Err(_) => break,
                 },
                 Some(change) = task_notify_rx.recv() => Incoming::TaskNotify(change),
-                Some(session_id) = deletion_rx.recv() => Incoming::DeletionIdle(session_id),
+                Some(progress) = deletion_rx.recv() => Incoming::DeletionIdle(progress),
                 Some((session_id, session, outcome)) = turns.next(), if !turns.is_empty() => {
                     Incoming::Turn(session_id, session, outcome)
                 }
@@ -701,10 +708,21 @@ pub async fn agent_loop(
             Incoming::Turn(session_id, session, outcome) => {
                 manager.turn_finished(event_tx.clone(), session_id, session, outcome, &mut turns)
             }
-            Incoming::DeletionIdle(session_id) => {
-                if let Some(deletion) = manager.pending_deletions.get_mut(&session_id) {
-                    deletion.executions_idle = true;
-                }
+            Incoming::DeletionIdle(progress) => {
+                let session_id = match progress {
+                    DeletionProgress::ExecutionsIdle(session_id) => {
+                        if let Some(deletion) = manager.pending_deletions.get_mut(&session_id) {
+                            deletion.executions_idle = true;
+                        }
+                        session_id
+                    }
+                    DeletionProgress::TasksIdle(session_id) => {
+                        if let Some(deletion) = manager.pending_deletions.get_mut(&session_id) {
+                            deletion.tasks_idle = true;
+                        }
+                        session_id
+                    }
+                };
                 manager.finish_delete_if_idle(event_tx.clone(), session_id);
             }
             Incoming::RetryTerminal => {

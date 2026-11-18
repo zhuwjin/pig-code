@@ -43,7 +43,11 @@ async fn shell_notification_reaches_model_once_for_every_wire_format() {
 
         let note = automatic_notification(&agent, "b1", pig_protocol::TaskStatus::Completed).await;
         assert_eq!(note.kind, pig_protocol::TaskKind::Shell);
-        assert_eq!(note.status, pig_protocol::TaskStatus::Completed);
+        assert_eq!(
+            note.status,
+            pig_protocol::TaskStatus::Completed,
+            "background command failed: {note:?}"
+        );
         assert_eq!(note.exit_code, Some(0));
         let Some(pig_protocol::TaskNotificationOutput::Preview { text, .. }) = &note.output else {
             panic!("{name}: small command output should be a preview")
