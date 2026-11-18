@@ -2220,10 +2220,7 @@ mod tests {
         let ws = std::env::temp_dir().join(format!("ws-{marker}"));
         let _ = std::fs::remove_dir_all(&ws);
         std::fs::create_dir_all(&ws).unwrap();
-        let outside = std::env::temp_dir()
-            .parent()
-            .unwrap()
-            .join(format!("outside-{marker}"));
+        let outside = std::env::temp_dir().join(format!("outside-{marker}"));
         let _ = std::fs::remove_dir_all(&outside);
         std::fs::create_dir_all(&outside).unwrap();
         let outside_str = outside.display().to_string().replace("\\", "/");
