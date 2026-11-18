@@ -2422,3 +2422,43 @@ async fn unknown_write_outcome_is_visible_without_replaying_the_side_effect() {
     );
     recovered.close().await.expect("close recovered agent");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn execution_errors_keep_their_runtime_identity() {
+    let (config_path, cwd, data_dir) = setup("execution-error-context");
+    let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir);
+    let session_id = new_session(&agent, cwd).await;
+    agent
+        .ops
+        .send(Op::SendMessage {
+            session_id: session_id.clone(),
+            content: mock::MALFORMED_STREAM_TRIGGER.into(),
+            files: vec![],
+            images: vec![],
+            permissions: ExecMode::Auto.permissions(),
+            delivery: pig_protocol::MessageDelivery::Queue,
+        })
+        .await
+        .expect("send malformed stream scenario");
+    let events = recv_until(&agent.events, Duration::from_secs(20), |event| {
+        matches!(event, Event::Error { fatal: true, .. })
+    })
+    .await;
+    let error = events
+        .iter()
+        .find_map(|event| match event {
+            Event::Error { error, .. } => Some(error),
+            _ => None,
+        })
+        .expect("structured execution error");
+    let context = error.context().expect("execution context");
+    assert_eq!(context.session_id, session_id);
+    assert_eq!(context.agent_id, session_id);
+    assert!(context.run_id.is_some());
+    assert_eq!(context.attempt, Some(1));
+    assert!(
+        matches!(error.semantic_error(), CoreError::Internal { detail } if detail.contains("Invalid JSON")),
+        "unexpected semantic error: {error:?}"
+    );
+    agent.close().await.expect("close after execution error");
+}

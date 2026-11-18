@@ -1839,6 +1839,7 @@ impl Session {
                     let mut message =
                         ChatMsg::tool_result_with_images(&card.call.id, output.clone(), images)
                             .with_error(is_error);
+                    message.stopped = stopped;
                     message.documents = documents;
                     self.agent.history.push(message);
                     self.record(&RolloutRecord::ToolCall {

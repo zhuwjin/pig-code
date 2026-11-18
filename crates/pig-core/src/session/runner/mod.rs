@@ -65,6 +65,24 @@ pub(super) struct Manager {
 }
 
 pub(super) fn emit(event_tx: &async_channel::Sender<Event>, event: Event) {
+    let event = match event {
+        Event::Error {
+            session_id: Some(session_id),
+            error,
+            fatal,
+        } => Event::Error {
+            error: error.with_context(pig_protocol::CoreErrorContext {
+                agent_id: session_id.clone(),
+                session_id: session_id.clone(),
+                run_id: None,
+                attempt: None,
+                call_id: None,
+            }),
+            session_id: Some(session_id),
+            fatal,
+        },
+        other => other,
+    };
     let _ = event_tx.send_blocking(event);
 }
 

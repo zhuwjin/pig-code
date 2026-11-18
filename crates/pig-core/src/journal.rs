@@ -82,9 +82,9 @@ impl EventJournal {
         Self,
         EventPublisher,
     ) {
-        let (input, input_events) = async_channel::unbounded();
-        let (raw_events, raw) = async_channel::unbounded();
-        let (journal_events, events) = async_channel::unbounded();
+        let (input, input_events) = async_channel::bounded(JOURNAL_HISTORY);
+        let (raw_events, raw) = async_channel::bounded(JOURNAL_HISTORY);
+        let (journal_events, events) = async_channel::bounded(JOURNAL_HISTORY);
         let journal = Self {
             events,
             state: Arc::new(Mutex::new(JournalState {
@@ -270,6 +270,16 @@ fn run_identity(event: &Event) -> (Option<String>, Option<String>) {
 mod tests {
     use super::*;
 
+    fn drain_channels(
+        raw: async_channel::Receiver<Event>,
+        journal: &EventJournal,
+    ) -> (tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>) {
+        let raw = tokio::spawn(async move { while raw.recv().await.is_ok() {} });
+        let journal = journal.clone();
+        let events = tokio::spawn(async move { while journal.recv().await.is_ok() {} });
+        (raw, events)
+    }
+
     #[tokio::test]
     async fn journal_orders_events_and_replays_from_a_cursor() {
         let (input, raw, journal, publisher) = EventJournal::channel();
@@ -335,8 +345,9 @@ mod tests {
 
     #[tokio::test]
     async fn journal_bounds_its_replay_window_and_requires_resync() {
-        let (input, _raw, journal, publisher) = EventJournal::channel();
+        let (input, raw, journal, publisher) = EventJournal::channel();
         let publish = tokio::spawn(publisher.run());
+        let drains = drain_channels(raw, &journal);
         for _ in 0..1_100 {
             input
                 .send(Event::SessionList {
@@ -347,6 +358,8 @@ mod tests {
         }
         drop(input);
         publish.await.expect("publisher");
+        drains.0.await.expect("raw drain");
+        drains.1.await.expect("journal drain");
 
         let latest = 1_100;
         let oldest_retained_cursor = latest - JOURNAL_HISTORY as u64;
@@ -372,8 +385,9 @@ mod tests {
 
     #[tokio::test]
     async fn snapshots_are_consistent_under_publication_and_replace_expired_cursors() {
-        let (input, _raw, journal, publisher) = EventJournal::channel();
+        let (input, raw, journal, publisher) = EventJournal::channel();
         let publish = tokio::spawn(publisher.run());
+        let drains = drain_channels(raw, &journal);
         for _ in 0..1_100 {
             input
                 .send(Event::SessionList {
@@ -389,6 +403,8 @@ mod tests {
         }
         drop(input);
         publish.await.expect("publisher");
+        drains.0.await.expect("raw drain");
+        drains.1.await.expect("journal drain");
 
         let snapshot = journal
             .replay_or_snapshot(journal.epoch(), 0)
@@ -412,5 +428,18 @@ mod tests {
             .expect_err("stale epoch needs a snapshot");
         assert_eq!(stale.cursor, snapshot.cursor);
         assert_eq!(stale.epoch, snapshot.epoch);
+    }
+}
+
+#[cfg(test)]
+mod capacity_tests {
+    use super::*;
+
+    #[test]
+    fn journal_channels_have_bounded_capacity() {
+        let (input, raw, journal, _publisher) = EventJournal::channel();
+        assert_eq!(input.capacity(), Some(JOURNAL_HISTORY));
+        assert_eq!(raw.capacity(), Some(JOURNAL_HISTORY));
+        assert_eq!(journal.events.capacity(), Some(JOURNAL_HISTORY));
     }
 }

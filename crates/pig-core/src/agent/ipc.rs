@@ -307,7 +307,7 @@ impl WorkerState {
                 ));
             }
         }
-        let (ops, _) = async_channel::unbounded();
+        let (ops, _) = async_channel::bounded(256);
         let run = Arc::new(WorkerRun::new(
             record.session_id,
             ops,

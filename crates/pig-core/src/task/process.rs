@@ -33,8 +33,9 @@ fn spawn_watcher(
     process.watch();
     tokio::spawn(async move {
         let status = child.wait().await;
-        let _ = read_out.await;
-        let _ = read_err.await;
+        let output_error = [read_out.await, read_err.await]
+            .into_iter()
+            .find_map(Result::err);
         let quiescence = process.wait_empty().await;
         let code = status.ok().and_then(|s| s.code()).unwrap_or(-1);
         let change = {
@@ -43,25 +44,33 @@ fn spawn_watcher(
                 .iter_mut()
                 .find(|entry| entry.id == task_id)
                 .map(|entry| {
+                    let mut failures = output_error
+                        .map(|error| format!("Task output reader failed: {error}"))
+                        .into_iter()
+                        .collect::<Vec<_>>();
                     if let Err(error) = &quiescence {
                         process.stop_watching();
-                        entry.status = TaskStatus::Failed;
-                        entry.reason = Some(format!(
+                        failures.push(format!(
                             "The command exited, but process-tree quiescence could not be proven: {error}"
                         ));
-                        entry.ended_at = Some(now_secs());
                     } else {
                         process.mark_quiescent();
                         entry.ended_at.get_or_insert_with(now_secs);
+                    }
+                    if !failures.is_empty() {
+                        entry.reason = Some(failures.join("; "));
                         if matches!(entry.status, TaskStatus::Running) {
-                            entry.status = if code == 0 {
-                                TaskStatus::Completed
-                            } else {
-                                TaskStatus::Failed
-                            };
-                            entry.exit_code = Some(code);
-                            entry.ended_at = Some(now_secs());
+                            entry.status = TaskStatus::Failed;
                         }
+                        entry.ended_at.get_or_insert_with(now_secs);
+                    } else if matches!(entry.status, TaskStatus::Running) {
+                        entry.status = if code == 0 {
+                            TaskStatus::Completed
+                        } else {
+                            TaskStatus::Failed
+                        };
+                        entry.exit_code = Some(code);
+                        entry.ended_at = Some(now_secs());
                     }
                     terminal_change(&session_id, entry)
                 })
@@ -240,11 +249,15 @@ async fn cleanup_cancelled_foreground(
     termination: Option<String>,
 ) {
     let status = child.wait().await;
-    if let Some(read) = read_out {
-        let _ = read.await;
+    if let Some(read) = read_out
+        && let Err(error) = read.await
+    {
+        tracing::warn!(task_id, %error, "cancelled foreground stdout reader failed");
     }
-    if let Some(read) = read_err {
-        let _ = read.await;
+    if let Some(read) = read_err
+        && let Err(error) = read.await
+    {
+        tracing::warn!(task_id, %error, "cancelled foreground stderr reader failed");
     }
     let quiescence = process.wait_empty().await;
     if let Err(error) = status {
@@ -476,16 +489,20 @@ pub(crate) async fn run_foreground_with_profile(
         Ok(status) => {
             let mut code = status.ok().and_then(|s| s.code()).unwrap_or(-1);
             // Join the readers first to drain the pipes, then take the full text and remove the registry entry
-            let _ = cancel_guard
-                .read_out
-                .take()
-                .expect("foreground stdout reader")
-                .await;
-            let _ = cancel_guard
-                .read_err
-                .take()
-                .expect("foreground stderr reader")
-                .await;
+            let output_error = [
+                cancel_guard
+                    .read_out
+                    .take()
+                    .expect("foreground stdout reader")
+                    .await,
+                cancel_guard
+                    .read_err
+                    .take()
+                    .expect("foreground stderr reader")
+                    .await,
+            ]
+            .into_iter()
+            .find_map(Result::err);
             let quiescence = process.wait_empty().await;
             if quiescence.is_ok() {
                 process.mark_quiescent();
@@ -526,6 +543,10 @@ pub(crate) async fn run_foreground_with_profile(
                 output.push_str(
                     "\n\n[Output exceeded the 16MiB limit; the command was force-stopped. Redirect large output to a file (e.g. command > out.txt) and process it with Read/Grep]",
                 );
+            }
+            if let Some(error) = output_error {
+                code = -1;
+                output.push_str(&format!("\n\n[Task output reader failed: {error}]"));
             }
             if let Err(error) = quiescence {
                 code = -1;

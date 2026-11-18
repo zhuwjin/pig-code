@@ -7,7 +7,43 @@ impl Session {
         tx: &async_channel::Sender<Event>,
     ) {
         self.state.agents.touch_activity(&self.agent.id);
-        emit_bg(self.event_session_id(), tx, build);
+        let event = build(self.event_session_id().to_string());
+        let event = match event {
+            Event::Error {
+                session_id,
+                error,
+                fatal,
+            } => Event::Error {
+                session_id,
+                error: error.with_context(self.error_context()),
+                fatal,
+            },
+            other => other,
+        };
+        emit_bg(self.event_session_id(), tx, |_| event);
+    }
+
+    fn error_context(&self) -> pig_protocol::CoreErrorContext {
+        let run_id = self.agent.run.as_ref().and_then(|run| run.run_id.clone());
+        let attempt = run_id.as_ref().and_then(|run_id| {
+            self.state
+                .agents
+                .runtime_snapshot()
+                .and_then(|snapshot| {
+                    snapshot
+                        .attempts
+                        .into_iter()
+                        .find(|attempt| &attempt.run_id == run_id)
+                })
+                .map(|attempt| attempt.attempt)
+        });
+        pig_protocol::CoreErrorContext {
+            session_id: self.event_session_id().to_string(),
+            agent_id: self.agent.id.clone(),
+            run_id,
+            attempt,
+            call_id: None,
+        }
     }
 
     pub(super) fn record(&mut self, record: &RolloutRecord) {

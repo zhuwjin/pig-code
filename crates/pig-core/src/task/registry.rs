@@ -833,8 +833,11 @@ pub(super) fn append_output(registry: &TaskRegistry, task_id: &str, raw: &[u8], 
         }
         entry.output.drain(..start);
     }
-    if let Some(spill) = &mut entry.spill {
-        spill.append(raw);
+    if let Some(spill) = &mut entry.spill
+        && let Err(error) = spill.append(raw)
+    {
+        tracing::warn!(task_id = %entry.id, %error, "task spill persistence failed");
+        entry.reason = Some(error);
     }
 }
 

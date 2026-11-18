@@ -259,8 +259,8 @@
       "id": "R15",
       "area": "Structured errors, observability and bounded retention",
       "references": [{"project": "deepseek-harness", "path": "packages/core/agent-loop/src/"}, {"project": "codex", "path": "codex-rs/protocol/src/error.rs"}],
-      "existing_evidence": ["crates/pig-core/src/model_io.rs", "crates/pig-core/src/usage.rs", "crates/pig-core/src/api_usage.rs", "crates/pig-core/src/journal.rs"],
-      "missing_proof": ["Propagate structured identities through all core errors", "Eliminate silent core failure paths", "Bound logs, queues, journals and retained history with retryable cleanup"],
+      "existing_evidence": ["crates/pig-core/src/model_io.rs", "crates/pig-core/src/usage.rs", "crates/pig-core/src/api_usage.rs", "crates/pig-core/src/journal.rs", "crates/pig-protocol/src/error.rs", "crates/pig-core/tests/sessions.rs", "crates/pig-core/src/task/process.rs", "crates/pig-core/src/task/spill.rs", "crates/pig-core/src/models_registry.rs"],
+      "missing_proof": ["Bound provider streaming queues and retained history with retryable cleanup"],
       "status": "implemented"
     },
     {

@@ -412,19 +412,20 @@ async fn parallel_group_cancellation_persists_every_stopped_receipt() {
         matches!(event, Event::TurnComplete { .. })
     })
     .await;
-    let live_results = {
+    let (body, live_results) = {
         let log = log.lock().expect("log");
         let body = log[before..]
             .iter()
             .filter_map(|raw| serde_json::from_str::<Value>(raw).ok())
             .find(|body| body["stream"] == Value::Bool(true))
             .expect("live follow-up request");
-        tool_results(&body)
+        let results = tool_results(&body)
             .into_iter()
             .filter(|block| block["content"] == pig_provider::STOPPED_TOOL_OUTPUT)
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        (body, results)
     };
-    assert_eq!(live_results.len(), 3, "{live_results:#?}");
+    assert_eq!(live_results.len(), 3, "{live_results:#?}; body: {body:#?}");
     agent.shutdown();
 
     let agent = pig_core::spawn_agent_with_data_dir(

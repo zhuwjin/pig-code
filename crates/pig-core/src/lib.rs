@@ -269,7 +269,7 @@ pub fn spawn_agent_with_data_dir_and_credentials(
     data_dir: PathBuf,
     credentials: std::sync::Arc<crate::credentials::CredentialManager>,
 ) -> AgentHandle {
-    let (op_tx, op_rx) = async_channel::unbounded::<Op>();
+    let (op_tx, op_rx) = async_channel::bounded::<Op>(256);
     let (event_tx, event_rx, journal, publisher) = EventJournal::channel();
     let agent_credentials = credentials.clone();
     let thread = std::thread::spawn(move || {

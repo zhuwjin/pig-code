@@ -1118,7 +1118,13 @@ mod tests {
             .iter()
             .find(|task| task.id == task_id)
             .expect("shell task");
-        assert_eq!(task.status, pig_protocol::TaskStatus::Killed);
+        assert_eq!(
+            task.status,
+            pig_protocol::TaskStatus::Killed,
+            "unexpected shell outcome; reason: {:?}; output: {}",
+            task.reason,
+            task.output
+        );
         assert!(task.ended_at.is_some());
         assert!(!task.needs_stop());
         drop(tasks);
