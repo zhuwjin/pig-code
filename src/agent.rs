@@ -668,6 +668,20 @@ mod tests {
     async fn journal_gap_replays_missing_events_through_the_production_projection_path() {
         let (agent, root, session_id) = session_journal_fixture("gap").await;
         let journal = agent.journal.clone();
+        agent
+            .ops
+            .send(Op::ListAgents {
+                session_id: session_id.clone(),
+            })
+            .await
+            .expect("settle the journal fixture");
+        loop {
+            let event = journal.recv().await.expect("journal barrier");
+            if matches!(event.event, Event::AgentCatalogChanged { .. }) {
+                break;
+            }
+        }
+        while journal.try_recv().is_ok() {}
         let mut registry = ProjectionRegistry::new();
         let mut projected = Vec::new();
         let mut observed = Vec::new();
