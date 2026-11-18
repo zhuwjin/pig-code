@@ -11,8 +11,9 @@ use pig_core::agent::runtime::{
     AgentInitiator, AgentRuntime, RuntimeConnectionState, RuntimeError, RuntimeRunStatus, StartRun,
 };
 use pig_core::agent::{
-    AgentEventCursor, AgentExecutionActivation, AgentExecutionHandle, AgentExecutionIdentity,
-    AgentExecutionRequest, AgentExecutionStop, AgentExecutionUpdate, AgentRunIdentity,
+    AgentEventCursor, AgentExecutionActivation, AgentExecutionCursor, AgentExecutionHandle,
+    AgentExecutionIdentity, AgentExecutionInput, AgentExecutionRequest, AgentExecutionStop,
+    AgentExecutionUpdate, AgentRunIdentity,
 };
 use pig_core::store::Store;
 use pig_provider::mock;
@@ -689,10 +690,206 @@ async fn worker_restart_recovers_an_unsettled_run_as_failed_and_releasable() {
     )
     .await
     .expect("recover interrupted run");
-    let (_, result) = collect_handle_events(&mut recovered).await;
+    assert!(matches!(
+        recovered
+            .send(AgentExecutionInput {
+                message_id: "input-after-worker-restart".into(),
+                payload: serde_json::json!({"text": "must not be queued"}),
+            })
+            .await,
+        Err(pig_core::agent::AgentBackendError::Disconnected(_))
+    ));
+    let (events, result) = collect_handle_events(&mut recovered).await;
+    assert!(!events.is_empty());
     assert_eq!(result.status, pig_protocol::AgentRunStatus::Failed);
     assert!(result.stop_reason.contains("worker restarted"));
     recovered.release().await.expect("release interrupted run");
     restarted.kill().await.expect("stop restarted worker");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+struct TcpProxy {
+    address: SocketAddr,
+    shutdown: CancellationToken,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl TcpProxy {
+    async fn start(target: SocketAddr, bind: SocketAddr) -> Self {
+        let listener = tokio::net::TcpListener::bind(bind)
+            .await
+            .expect("bind TCP proxy");
+        let address = listener.local_addr().expect("proxy address");
+        let shutdown = CancellationToken::new();
+        let cancelled = shutdown.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                let accepted = tokio::select! {
+                    () = cancelled.cancelled() => break,
+                    accepted = listener.accept() => accepted,
+                };
+                let Ok((client, _)) = accepted else { break };
+                let connection_cancelled = cancelled.clone();
+                tokio::spawn(async move {
+                    let Ok(mut worker) = tokio::net::TcpStream::connect(target).await else {
+                        return;
+                    };
+                    let mut client = client;
+                    tokio::select! {
+                        () = connection_cancelled.cancelled() => {}
+                        _ = tokio::io::copy_bidirectional(&mut client, &mut worker) => {}
+                    }
+                });
+            }
+        });
+        Self {
+            address,
+            shutdown,
+            task,
+        }
+    }
+
+    async fn stop(self) {
+        self.shutdown.cancel();
+        let _ = timeout(Duration::from_secs(5), self.task).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn execution_handle_steers_and_reconnects_after_a_real_transport_disconnect() {
+    let (config_path, cwd, root) = crate::common::setup("ipc-transport-disconnect");
+    let (worker_address, mut worker) = start_worker(&root.join("worker-state")).await;
+    let proxy_address = self::worker_address();
+    let proxy = TcpProxy::start(worker_address, proxy_address).await;
+    assert_eq!(proxy.address, proxy_address);
+    let run_id = "ipc-network-reconnect";
+    let mut handle = IpcAgentExecutionHandle::start(
+        proxy_address,
+        worker_identity(run_id, 1),
+        IpcRunSpec {
+            config_path: Some(config_path),
+            cwd,
+            data_dir: root.join("worker-data"),
+            prompt: mock::SCENARIO_SLOW_TRIGGER.to_string(),
+        },
+    )
+    .await
+    .expect("start through TCP proxy");
+    timeout(Duration::from_secs(10), async {
+        loop {
+            match handle.next().await.expect("proxied execution update") {
+                AgentExecutionUpdate::Output {
+                    event: pig_protocol::Event::ToolCallBegin { .. },
+                    ..
+                } => break,
+                AgentExecutionUpdate::Output { .. } => {}
+                AgentExecutionUpdate::Settled { .. } => panic!("run settled before disconnect"),
+                AgentExecutionUpdate::Disconnected { detail, .. } => panic!("{detail}"),
+            }
+        }
+    })
+    .await
+    .expect("tool boundary before disconnect");
+    proxy.stop().await;
+    let cursor = timeout(Duration::from_secs(5), async {
+        loop {
+            match handle.next().await.expect("transport failure update") {
+                AgentExecutionUpdate::Disconnected { cursor, .. } => break cursor,
+                AgentExecutionUpdate::Output { .. } => {}
+                AgentExecutionUpdate::Settled { .. } => panic!("run settled before disconnect"),
+            }
+        }
+    })
+    .await
+    .expect("handle observed real network failure");
+    drop(handle);
+    assert!(ipc_reconnect(proxy_address, run_id).await.is_err());
+    assert!(
+        ipc_reconnect(worker_address, run_id)
+            .await
+            .expect("worker survived proxy disconnect")
+            .terminal
+            .is_none()
+    );
+
+    let proxy = TcpProxy::start(worker_address, proxy_address).await;
+    let mut reconnected = IpcAgentExecutionHandle::reconnect(
+        proxy_address,
+        worker_identity(run_id, 2),
+        AgentExecutionCursor {
+            attempt: 1,
+            backend_epoch: "worker-restart-epoch-1".into(),
+            sequence: cursor.sequence,
+        },
+    )
+    .await
+    .expect("reconnect after transport recovery");
+    let input = AgentExecutionInput {
+        message_id: "ipc-steer-1".into(),
+        payload: serde_json::json!({
+            "text": "IPC steer input",
+            "delivery": "steer",
+        }),
+    };
+    let receipt = reconnected
+        .send(input.clone())
+        .await
+        .expect("steer through production handle");
+    assert_eq!(
+        reconnected
+            .send(input)
+            .await
+            .expect("duplicate input receipt"),
+        receipt
+    );
+    let mut sequences = Vec::new();
+    let result = timeout(Duration::from_secs(30), async {
+        loop {
+            match reconnected
+                .next()
+                .await
+                .expect("reconnected execution update")
+            {
+                AgentExecutionUpdate::Output { sequence, event } => {
+                    assert!(sequence > cursor.sequence);
+                    assert!(!sequences.contains(&sequence));
+                    sequences.push(sequence);
+                    if matches!(
+                        event,
+                        pig_protocol::Event::SteerChanged { ref items, .. }
+                            if items.iter().any(|item| item.id == "ipc-steer-1" && item.text == "IPC steer input")
+                    ) {
+                        return true;
+                    }
+                }
+                AgentExecutionUpdate::Settled { .. } => return false,
+                AgentExecutionUpdate::Disconnected { detail, .. } => panic!("{detail}"),
+            }
+        }
+    })
+    .await
+    .expect("steer event after reconnect");
+    assert!(result, "IPC send did not enter the steer mailbox");
+    reconnected
+        .stop(AgentExecutionStop::Graceful {
+            reason: "transport test complete".into(),
+        })
+        .await
+        .expect("stop the still-running worker");
+    let steered_sequence_count = sequences.len();
+    let (tail, result) = collect_handle_events(&mut reconnected).await;
+    assert_eq!(result.status, pig_protocol::AgentRunStatus::Cancelled);
+    assert!(tail.iter().all(|sequence| *sequence > cursor.sequence));
+    let total = steered_sequence_count + tail.len();
+    sequences.extend(tail);
+    sequences.sort_unstable();
+    sequences.dedup();
+    assert_eq!(sequences.len(), total);
+    reconnected
+        .release()
+        .await
+        .expect("release reconnected run");
+    proxy.stop().await;
+    worker.kill().await.expect("stop worker");
     let _ = std::fs::remove_dir_all(root);
 }

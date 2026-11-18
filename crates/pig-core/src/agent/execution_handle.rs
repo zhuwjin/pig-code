@@ -19,7 +19,7 @@ pub struct AgentExecutionCursor {
     pub sequence: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AgentExecutionInput {
     pub message_id: String,
     pub payload: serde_json::Value,

@@ -415,21 +415,40 @@ impl WorkerState {
         self.info(&run_id)
     }
 
-    async fn send(&self, run_id: &str, text: String) -> Result<IpcRunInfo, String> {
+    async fn send(&self, run_id: &str, input: AgentExecutionInput) -> Result<IpcRunInfo, String> {
         let run = self.run(run_id)?;
-        {
-            let mut output = run.output();
-            output.terminal = None;
-            output.text.clear();
+        if run.agent.lock().await.is_none() {
+            return Err(format!(
+                "IPC run {run_id} has no live execution after worker restart"
+            ));
         }
+        if run.output().terminal.is_some() {
+            return Err(format!("IPC run {run_id} has already settled"));
+        }
+        if input.message_id.is_empty() {
+            return Err("IPC execution input requires a non-empty message_id".to_string());
+        }
+        let text = input
+            .payload
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "IPC execution input requires a text field".to_string())?
+            .to_string();
+        let delivery = input
+            .payload
+            .get("delivery")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|error| error.to_string())?
+            .unwrap_or(MessageDelivery::Steer);
         run.ops
-            .send(Op::SendMessage {
+            .send(Op::SendExecutionMessage {
                 session_id: run.session_id.clone(),
+                message_id: input.message_id,
                 content: text,
-                files: Vec::new(),
-                images: Vec::new(),
                 permissions: pig_protocol::PermissionSettings::default(),
-                delivery: MessageDelivery::Queue,
+                delivery,
             })
             .await
             .map_err(|error| error.to_string())?;
@@ -508,11 +527,9 @@ impl WorkerState {
             }
             "send" => {
                 let run_id = params["run_id"].as_str().ok_or("run_id is required")?;
-                let text = params["text"]
-                    .as_str()
-                    .ok_or("text is required")?
-                    .to_string();
-                Ok(serde_json::to_value(self.send(run_id, text).await?)
+                let input: AgentExecutionInput = serde_json::from_value(params["input"].clone())
+                    .map_err(|error| error.to_string())?;
+                Ok(serde_json::to_value(self.send(run_id, input).await?)
                     .map_err(|error| error.to_string())?)
             }
             "events" => {
@@ -704,12 +721,12 @@ pub async fn ipc_start(
 pub async fn ipc_send(
     address: SocketAddr,
     run_id: &str,
-    text: String,
+    input: AgentExecutionInput,
 ) -> Result<IpcRunInfo, String> {
     let value = ipc_call(
         address,
         "send",
-        serde_json::json!({ "run_id": run_id, "text": text }),
+        serde_json::json!({ "run_id": run_id, "input": input }),
     )
     .await?;
     serde_json::from_value(value).map_err(|error| error.to_string())
@@ -897,17 +914,7 @@ impl AgentExecutionHandle for IpcAgentExecutionHandle {
     ) -> BoxFuture<'_, Result<AgentExecutionReceipt, AgentBackendError>> {
         Box::pin(async move {
             self.check_active()?;
-            let text = input
-                .payload
-                .get("text")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| {
-                    AgentBackendError::InvalidContext(
-                        "IPC execution input requires a text field".to_string(),
-                    )
-                })?
-                .to_string();
-            ipc_send(self.address, &self.identity.run.run_id, text)
+            ipc_send(self.address, &self.identity.run.run_id, input)
                 .await
                 .map_err(AgentBackendError::Disconnected)?;
             Ok(self.receipt())

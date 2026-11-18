@@ -300,6 +300,7 @@ impl Manager {
         images: Vec<pig_protocol::PendingImage>,
         permissions: pig_protocol::PermissionSettings,
         delivery: pig_protocol::MessageDelivery,
+        message_id: Option<String>,
         turns: &mut FuturesUnordered<TurnFuture>,
     ) {
         let store = self.store.clone();
@@ -317,7 +318,18 @@ impl Manager {
         };
         // Record the latest permissions: notification-only turns use them (queued case included)
         entry.last_permissions = permissions;
-        let id = next_queue_id(&mut entry.queue_seq);
+        if let Some(id) = &message_id {
+            if entry
+                .pending
+                .lock()
+                .expect("pending lock")
+                .iter()
+                .any(|message| &message.id == id)
+            {
+                return;
+            }
+        }
+        let id = message_id.unwrap_or_else(|| next_queue_id(&mut entry.queue_seq));
         // Turn in progress -> two lanes of one list. Steer
         // (explicit request, steerable chat turn in flight,
         // text-only, within the cap) injects into the running
