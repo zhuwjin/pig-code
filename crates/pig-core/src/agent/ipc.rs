@@ -1,7 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use futures_util::future::BoxFuture;
@@ -99,37 +98,232 @@ struct WorkerRun {
     agent: tokio::sync::Mutex<Option<AgentHandle>>,
     session_id: String,
     ops: async_channel::Sender<Op>,
-    events: Mutex<Vec<IpcRunEvent>>,
-    latest_sequence: AtomicU64,
-    terminal: Mutex<Option<IpcRunResult>>,
-    text: Mutex<String>,
+    output: Mutex<WorkerRunOutput>,
+    journal: PathBuf,
 }
 
 #[derive(Default)]
+struct WorkerRunOutput {
+    events: Vec<IpcRunEvent>,
+    terminal: Option<IpcRunResult>,
+    text: String,
+}
+
+impl WorkerRun {
+    fn new(session_id: String, ops: async_channel::Sender<Op>, journal: PathBuf) -> Self {
+        Self {
+            agent: tokio::sync::Mutex::new(None),
+            session_id,
+            ops,
+            output: Mutex::new(WorkerRunOutput::default()),
+            journal,
+        }
+    }
+
+    fn record_event(&self, event: Event) -> Result<u64, String> {
+        use std::io::Write as _;
+
+        let mut output = self
+            .output
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let sequence = output.events.last().map_or(1, |event| event.sequence + 1);
+        let record = IpcRunEvent { sequence, event };
+        let encoded = serde_json::to_string(&record).map_err(|error| error.to_string())?;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.journal)
+            .map_err(|error| error.to_string())?;
+        writeln!(file, "{encoded}").map_err(|error| error.to_string())?;
+        file.sync_data().map_err(|error| error.to_string())?;
+        output.fold_event(&record.event);
+        output.events.push(record);
+        Ok(sequence)
+    }
+
+    fn output(&self) -> std::sync::MutexGuard<'_, WorkerRunOutput> {
+        self.output
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+impl WorkerRunOutput {
+    fn fold_event(&mut self, event: &Event) {
+        match event {
+            Event::TextDelta { delta, .. } => self.text.push_str(delta),
+            Event::TurnComplete {
+                stats,
+                finish_reason,
+                ..
+            } => {
+                let stats = stats.clone().unwrap_or_default();
+                let stop_reason = finish_reason
+                    .as_ref()
+                    .map_or_else(|| "completed".to_string(), |reason| format!("{reason:?}"));
+                self.terminal = Some(IpcRunResult {
+                    status: "completed".to_string(),
+                    stop_reason,
+                    text: self.text.clone(),
+                    turns: stats.api_steps as usize,
+                    usage: (stats.input, stats.cache_read, stats.output),
+                });
+            }
+            Event::TurnAborted { .. } => {
+                self.terminal = Some(IpcRunResult {
+                    status: "cancelled".to_string(),
+                    stop_reason: "cancelled".to_string(),
+                    text: self.text.clone(),
+                    turns: 0,
+                    usage: (0, 0, 0),
+                });
+            }
+            Event::Error {
+                error, fatal: true, ..
+            } => {
+                self.terminal = Some(IpcRunResult {
+                    status: "failed".to_string(),
+                    stop_reason: pig_provider::core_error_en(error),
+                    text: self.text.clone(),
+                    turns: 0,
+                    usage: (0, 0, 0),
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct WorkerRunRecord {
+    run_id: String,
+    session_id: String,
+    spec: IpcRunSpec,
+}
+
 struct WorkerState {
     runs: Mutex<HashMap<String, Arc<WorkerRun>>>,
+    state_dir: PathBuf,
 }
 
 impl WorkerState {
-    fn run(&self, run_id: &str) -> Result<Arc<WorkerRun>, String> {
+    fn new(state_dir: PathBuf) -> Self {
+        Self {
+            runs: Mutex::new(HashMap::new()),
+            state_dir,
+        }
+    }
+
+    fn record_path(&self, run_id: &str) -> PathBuf {
+        self.run_dir(run_id).join("run.json")
+    }
+
+    fn journal_path(&self, run_id: &str) -> PathBuf {
+        self.run_dir(run_id).join("events.jsonl")
+    }
+
+    fn run_dir(&self, run_id: &str) -> PathBuf {
+        use sha2::{Digest as _, Sha256};
+
+        let key = format!("{:x}", Sha256::digest(run_id.as_bytes()));
+        self.state_dir.join("runs").join(key)
+    }
+}
+
+impl WorkerState {
+    fn persist_record(&self, record: &WorkerRunRecord) -> Result<(), String> {
+        let path = self.record_path(&record.run_id);
+        std::fs::create_dir_all(path.parent().expect("worker run parent"))
+            .map_err(|error| error.to_string())?;
+        let bytes = serde_json::to_vec(record).map_err(|error| error.to_string())?;
+        crate::tool::atomic_write(&path, &bytes)
+    }
+
+    fn restore(&self, run_id: &str) -> Result<Arc<WorkerRun>, String> {
+        let path = self.record_path(run_id);
+        if !path.is_file() {
+            return Err(format!("IPC run {run_id} is not registered"));
+        }
+        let record: WorkerRunRecord =
+            serde_json::from_slice(&std::fs::read(&path).map_err(|error| error.to_string())?)
+                .map_err(|error| error.to_string())?;
+        if record.run_id != run_id {
+            return Err(format!("IPC run record identity mismatch for {run_id}"));
+        }
+        let journal = self.journal_path(run_id);
+        let events = if journal.is_file() {
+            std::fs::read_to_string(&journal)
+                .map_err(|error| error.to_string())?
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(|line| {
+                    serde_json::from_str::<IpcRunEvent>(line).map_err(|error| error.to_string())
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            Vec::new()
+        };
+        for (index, event) in events.iter().enumerate() {
+            if event.sequence != index as u64 + 1 {
+                return Err(format!(
+                    "IPC run {run_id} has a non-contiguous event journal"
+                ));
+            }
+        }
+        let (ops, _) = async_channel::unbounded();
+        let run = Arc::new(WorkerRun::new(record.session_id, ops, journal));
+        {
+            let mut output = run.output();
+            for event in &events {
+                output.fold_event(&event.event);
+            }
+            if output.terminal.is_none() {
+                output.terminal = Some(IpcRunResult {
+                    status: "failed".to_string(),
+                    stop_reason: "worker restarted before the run settled".to_string(),
+                    text: output.text.clone(),
+                    turns: 0,
+                    usage: (0, 0, 0),
+                });
+            }
+            output.events = events;
+        }
         self.runs
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(run_id.to_string(), run.clone());
+        Ok(run)
+    }
+
+    fn remove_records(&self, run_id: &str) -> Result<(), String> {
+        let directory = self.run_dir(run_id);
+        if directory.exists() {
+            std::fs::remove_dir_all(directory).map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    fn run(&self, run_id: &str) -> Result<Arc<WorkerRun>, String> {
+        let existing = self
+            .runs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(run_id)
-            .cloned()
-            .ok_or_else(|| format!("IPC run {run_id} is not registered"))
+            .cloned();
+        match existing {
+            Some(run) => Ok(run),
+            None => self.restore(run_id),
+        }
     }
 
     fn info(&self, run_id: &str) -> Result<IpcRunInfo, String> {
         let run = self.run(run_id)?;
+        let output = run.output();
         Ok(IpcRunInfo {
             session_id: run.session_id.clone(),
-            latest_sequence: run.latest_sequence.load(Ordering::Acquire),
-            terminal: run
-                .terminal
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .clone(),
+            latest_sequence: output.events.last().map_or(0, |event| event.sequence),
+            terminal: output.terminal.clone(),
         })
     }
 
@@ -139,6 +333,7 @@ impl WorkerState {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .contains_key(&run_id)
+            || self.record_path(&run_id).is_file()
         {
             return Err(format!("IPC run {run_id} already exists"));
         }
@@ -151,9 +346,9 @@ impl WorkerState {
         };
         let cwd = spec.cwd.clone();
         let agent = crate::spawn_agent_with_data_dir_and_credentials(
-            spec.config_path,
-            spec.cwd,
-            spec.data_dir,
+            spec.config_path.clone(),
+            spec.cwd.clone(),
+            spec.data_dir.clone(),
             credentials,
         );
         agent
@@ -184,15 +379,23 @@ impl WorkerState {
         })
         .await
         .map_err(|_| "timed out waiting for IPC worker session".to_string())??;
-        let run = Arc::new(WorkerRun {
-            ops: agent.ops.clone(),
-            agent: tokio::sync::Mutex::new(Some(agent)),
+        let run = Arc::new(WorkerRun::new(
+            session_id.clone(),
+            agent.ops.clone(),
+            self.journal_path(&run_id),
+        ));
+        *run.agent.lock().await = Some(agent);
+        if let Err(error) = self.persist_record(&WorkerRunRecord {
+            run_id: run_id.clone(),
             session_id: session_id.clone(),
-            events: Mutex::new(Vec::new()),
-            latest_sequence: AtomicU64::new(0),
-            terminal: Mutex::new(None),
-            text: Mutex::new(String::new()),
-        });
+            spec: spec.clone(),
+        }) {
+            let agent = run.agent.lock().await.take();
+            if let Some(agent) = agent {
+                agent.close().await?;
+            }
+            return Err(error);
+        }
         self.runs
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -201,7 +404,7 @@ impl WorkerState {
         run.ops
             .send(Op::SendMessage {
                 session_id,
-                content: spec.prompt,
+                content: spec.prompt.clone(),
                 files: Vec::new(),
                 images: Vec::new(),
                 permissions: pig_protocol::PermissionSettings::default(),
@@ -214,13 +417,11 @@ impl WorkerState {
 
     async fn send(&self, run_id: &str, text: String) -> Result<IpcRunInfo, String> {
         let run = self.run(run_id)?;
-        *run.terminal
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-        run.text
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clear();
+        {
+            let mut output = run.output();
+            output.terminal = None;
+            output.text.clear();
+        }
         run.ops
             .send(Op::SendMessage {
                 session_id: run.session_id.clone(),
@@ -237,22 +438,17 @@ impl WorkerState {
 
     fn events(&self, run_id: &str, after: u64) -> Result<IpcEventBatch, String> {
         let run = self.run(run_id)?;
-        let events = run
+        let output = run.output();
+        let events = output
             .events
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .iter()
             .filter(|event| event.sequence > after)
             .cloned()
             .collect();
         Ok(IpcEventBatch {
             events,
-            latest_sequence: run.latest_sequence.load(Ordering::Acquire),
-            terminal: run
-                .terminal
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .clone(),
+            latest_sequence: output.events.last().map_or(0, |event| event.sequence),
+            terminal: output.terminal.clone(),
         })
     }
 
@@ -275,29 +471,20 @@ impl WorkerState {
             .get(run_id)
             .cloned();
         let Some(run) = run else {
-            return Ok(());
+            return self.remove_records(run_id);
         };
-        if !force
-            && run
-                .terminal
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .is_none()
-        {
+        if !force && run.output().terminal.is_none() {
             return Err(format!("IPC run {run_id} is still active"));
         }
-        let removed = self
-            .runs
+        let agent = run.agent.lock().await.take();
+        if let Some(agent) = agent {
+            agent.close().await?;
+        }
+        self.runs
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(run_id);
-        if let Some(removed) = removed {
-            let agent = removed.agent.lock().await.take();
-            if let Some(agent) = agent {
-                agent.close().await?;
-            }
-        }
-        Ok(())
+        self.remove_records(run_id)
     }
 
     async fn dispatch(
@@ -356,74 +543,18 @@ impl WorkerState {
 
 async fn collect_events(receiver: async_channel::Receiver<Event>, run: Arc<WorkerRun>) {
     while let Ok(event) = receiver.recv().await {
-        match &event {
-            Event::TextDelta { delta, .. } => run
-                .text
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push_str(delta),
-            Event::TurnComplete {
-                stats,
-                finish_reason,
-                ..
-            } => {
-                let stats = stats.clone().unwrap_or_default();
-                let stop_reason = finish_reason
-                    .as_ref()
-                    .map_or_else(|| "completed".to_string(), |reason| format!("{reason:?}"));
-                *run.terminal
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(IpcRunResult {
-                    status: "completed".to_string(),
-                    stop_reason,
-                    text: run
-                        .text
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .clone(),
-                    turns: stats.api_steps as usize,
-                    usage: (stats.input, stats.cache_read, stats.output),
-                });
-            }
-            Event::TurnAborted { .. } => {
-                *run.terminal
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(IpcRunResult {
-                    status: "cancelled".to_string(),
-                    stop_reason: "cancelled".to_string(),
-                    text: run
-                        .text
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .clone(),
-                    turns: 0,
-                    usage: (0, 0, 0),
-                });
-            }
-            Event::Error {
-                error, fatal: true, ..
-            } => {
-                *run.terminal
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(IpcRunResult {
-                    status: "failed".to_string(),
-                    stop_reason: pig_provider::core_error_en(error),
-                    text: run
-                        .text
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .clone(),
-                    turns: 0,
-                    usage: (0, 0, 0),
-                });
-            }
-            _ => {}
+        if let Err(error) = run.record_event(event) {
+            tracing::warn!(%error, "failed to persist IPC worker event");
+            let mut output = run.output();
+            output.terminal = Some(IpcRunResult {
+                status: "failed".to_string(),
+                stop_reason: format!("failed to persist IPC worker event: {error}"),
+                text: output.text.clone(),
+                turns: 0,
+                usage: (0, 0, 0),
+            });
+            break;
         }
-        let sequence = run.latest_sequence.fetch_add(1, Ordering::AcqRel) + 1;
-        run.events
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push(IpcRunEvent { sequence, event });
     }
 }
 
@@ -469,8 +600,8 @@ async fn read_worker_connection(
     Ok(())
 }
 
-pub async fn serve_ipc_worker(listener: TcpListener) -> Result<(), String> {
-    let state = Arc::new(WorkerState::default());
+pub async fn serve_ipc_worker(listener: TcpListener, state_dir: PathBuf) -> Result<(), String> {
+    let state = Arc::new(WorkerState::new(state_dir));
     loop {
         let (stream, _) = listener.accept().await.map_err(|error| error.to_string())?;
         let state = state.clone();
@@ -1004,5 +1135,33 @@ impl super::AgentExecutionBackend for IpcAgentExecutionBackend {
                 }
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_journal_write_does_not_publish_or_advance_cursor() {
+        let root = std::env::temp_dir().join(new_runtime_id("ipc-journal-fault"));
+        let journal = root.join("events.jsonl");
+        std::fs::create_dir_all(&journal).expect("journal fault injection directory");
+        let (ops, _receiver) = async_channel::unbounded();
+        let run = WorkerRun::new("session".into(), ops, journal);
+        let error = run
+            .record_event(Event::TextDelta {
+                session_id: "session".into(),
+                item_id: "item".into(),
+                delta: "must not become visible".into(),
+            })
+            .expect_err("writing a file over a directory must fail");
+        assert!(!error.is_empty());
+        let output = run.output();
+        assert!(output.events.is_empty());
+        assert!(output.text.is_empty());
+        assert!(output.terminal.is_none());
+        drop(output);
+        std::fs::remove_dir_all(root).expect("remove journal fault injection directory");
     }
 }

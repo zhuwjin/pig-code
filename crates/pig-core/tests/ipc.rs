@@ -3,15 +3,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use pig_core::agent::ipc::{
-    IpcAgentBackendFactory, IpcCapability, IpcEventBatch, IpcRunResult, IpcRunSpec, ipc_events,
-    ipc_reconnect, ipc_release, ipc_start, ipc_start_with_requirements, ipc_stop,
+    IpcAgentBackendFactory, IpcAgentExecutionHandle, IpcCapability, IpcEventBatch, IpcRunResult,
+    IpcRunSpec, ipc_events, ipc_reconnect, ipc_release, ipc_start, ipc_start_with_requirements,
+    ipc_stop,
 };
 use pig_core::agent::runtime::{
     AgentInitiator, AgentRuntime, RuntimeConnectionState, RuntimeError, RuntimeRunStatus, StartRun,
 };
 use pig_core::agent::{
-    AgentEventCursor, AgentExecutionActivation, AgentExecutionIdentity, AgentExecutionRequest,
-    AgentExecutionStop, AgentExecutionUpdate, AgentRunIdentity,
+    AgentEventCursor, AgentExecutionActivation, AgentExecutionHandle, AgentExecutionIdentity,
+    AgentExecutionRequest, AgentExecutionStop, AgentExecutionUpdate, AgentRunIdentity,
 };
 use pig_core::store::Store;
 use pig_provider::mock;
@@ -20,10 +21,15 @@ use tokio::process::{Child, Command};
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
-async fn start_worker() -> (SocketAddr, Child) {
+async fn start_worker(state_dir: &std::path::Path) -> (SocketAddr, Child) {
+    start_worker_at(state_dir, "127.0.0.1:0".parse().expect("loopback address")).await
+}
+
+async fn start_worker_at(state_dir: &std::path::Path, bind: SocketAddr) -> (SocketAddr, Child) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_pig-agent-worker"));
     command
-        .arg("--bind=127.0.0.1:0")
+        .arg(format!("--bind={bind}"))
+        .arg(format!("--state-dir={}", state_dir.display()))
         .env("PIG_SELFTEST", "1")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::inherit())
@@ -98,7 +104,7 @@ async fn wait_terminal(address: SocketAddr, run_id: &str, cursor: &mut u64) -> I
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn real_worker_completes_and_reconnects_after_parent_restart() {
     let (config_path, cwd, root) = crate::common::setup("ipc-real-worker");
-    let (address, mut worker) = start_worker().await;
+    let (address, mut worker) = start_worker(&root.join("worker-state")).await;
     let store = Arc::new(Mutex::new(
         Store::open(&root.join("parent-store")).expect("parent store"),
     ));
@@ -318,7 +324,7 @@ async fn real_worker_completes_and_reconnects_after_parent_restart() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn backend_registry_executes_real_ipc_and_releases_idempotently() {
     let (config_path, cwd, root) = crate::common::setup("ipc-backend-registry");
-    let (address, mut worker) = start_worker().await;
+    let (address, mut worker) = start_worker(&root.join("worker-state")).await;
     let store = Arc::new(Mutex::new(
         Store::open(&root.join("parent-store")).expect("parent store"),
     ));
@@ -420,7 +426,7 @@ async fn backend_registry_executes_real_ipc_and_releases_idempotently() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn execution_handle_reconnects_stops_and_releases_real_worker() {
     let (config_path, cwd, root) = crate::common::setup("ipc-execution-handle");
-    let (address, mut worker) = start_worker().await;
+    let (address, mut worker) = start_worker(&root.join("worker-state")).await;
     let run_id = "ipc-handle-run";
     let identity = |attempt: u64| AgentExecutionIdentity {
         run: AgentRunIdentity {
@@ -547,5 +553,146 @@ async fn execution_handle_reconnects_stops_and_releases_real_worker() {
     assert_eq!(repeated, released);
     assert!(ipc_events(address, run_id, 0).await.is_err());
     worker.kill().await.expect("stop worker");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+async fn collect_handle_events(
+    handle: &mut IpcAgentExecutionHandle,
+) -> (Vec<u64>, pig_core::agent::AgentBackendResult) {
+    timeout(Duration::from_secs(30), async {
+        let mut sequences = Vec::new();
+        loop {
+            match handle.next().await.expect("worker handle update") {
+                AgentExecutionUpdate::Output { sequence, .. } => sequences.push(sequence),
+                AgentExecutionUpdate::Settled { result, .. } => return (sequences, result),
+                AgentExecutionUpdate::Disconnected { detail, .. } => {
+                    panic!("unexpected worker disconnect: {detail}")
+                }
+            }
+        }
+    })
+    .await
+    .expect("worker handle settlement")
+}
+
+fn worker_identity(run_id: &str, attempt: u64) -> AgentExecutionIdentity {
+    AgentExecutionIdentity {
+        run: AgentRunIdentity {
+            session_id: "worker-restart-parent".into(),
+            agent_id: "worker-restart-agent".into(),
+            run_id: run_id.into(),
+        },
+        attempt,
+        backend_epoch: format!("worker-restart-epoch-{attempt}"),
+    }
+}
+
+fn worker_address() -> SocketAddr {
+    let reservation = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve worker port");
+    let address = reservation.local_addr().expect("worker address");
+    drop(reservation);
+    address
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn worker_restart_replays_a_completed_run_without_duplicates() {
+    let (config_path, cwd, root) = crate::common::setup("ipc-worker-completed-restart");
+    let address = worker_address();
+    let state = root.join("worker-state");
+    let run_id = "ipc-worker-completed";
+    let (actual_address, mut worker) = start_worker_at(&state, address).await;
+    assert_eq!(actual_address, address);
+    let mut handle = IpcAgentExecutionHandle::start(
+        address,
+        worker_identity(run_id, 1),
+        IpcRunSpec {
+            config_path: Some(config_path),
+            cwd,
+            data_dir: root.join("worker-data"),
+            prompt: "read the mock file and summarize".to_string(),
+        },
+    )
+    .await
+    .expect("start completed worker run");
+    let (original_events, original_result) = collect_handle_events(&mut handle).await;
+    assert_eq!(
+        original_result.status,
+        pig_protocol::AgentRunStatus::Completed
+    );
+    worker.kill().await.expect("kill original worker");
+    drop(handle);
+
+    let (restarted_address, mut restarted) = start_worker_at(&state, address).await;
+    assert_eq!(restarted_address, address);
+    let mut recovered = IpcAgentExecutionHandle::reconnect(
+        address,
+        worker_identity(run_id, 2),
+        pig_core::agent::AgentExecutionCursor {
+            attempt: 1,
+            backend_epoch: "worker-restart-epoch-1".into(),
+            sequence: 0,
+        },
+    )
+    .await
+    .expect("recover completed run after worker restart");
+    let (replayed_events, recovered_result) = collect_handle_events(&mut recovered).await;
+    assert_eq!(replayed_events, original_events);
+    assert_eq!(recovered_result, original_result);
+    recovered.release().await.expect("release recovered run");
+    assert!(ipc_events(address, run_id, 0).await.is_err());
+    restarted.kill().await.expect("stop restarted worker");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn worker_restart_recovers_an_unsettled_run_as_failed_and_releasable() {
+    let (config_path, cwd, root) = crate::common::setup("ipc-worker-active-restart");
+    let address = worker_address();
+    let state = root.join("worker-state");
+    let run_id = "ipc-worker-active";
+    let (_, mut worker) = start_worker_at(&state, address).await;
+    let mut handle = IpcAgentExecutionHandle::start(
+        address,
+        worker_identity(run_id, 1),
+        IpcRunSpec {
+            config_path: Some(config_path),
+            cwd,
+            data_dir: root.join("worker-data"),
+            prompt: mock::SCENARIO_SLOW_TRIGGER.to_string(),
+        },
+    )
+    .await
+    .expect("start active worker run");
+    timeout(Duration::from_secs(10), async {
+        loop {
+            match handle.next().await.expect("active worker update") {
+                AgentExecutionUpdate::Output { .. } => break,
+                AgentExecutionUpdate::Settled { .. } => panic!("run settled before restart"),
+                AgentExecutionUpdate::Disconnected { detail, .. } => panic!("{detail}"),
+            }
+        }
+    })
+    .await
+    .expect("active run output");
+    worker.kill().await.expect("kill active worker");
+    drop(handle);
+
+    let (_, mut restarted) = start_worker_at(&state, address).await;
+    let mut recovered = IpcAgentExecutionHandle::reconnect(
+        address,
+        worker_identity(run_id, 2),
+        pig_core::agent::AgentExecutionCursor {
+            attempt: 1,
+            backend_epoch: "worker-restart-epoch-1".into(),
+            sequence: 0,
+        },
+    )
+    .await
+    .expect("recover interrupted run");
+    let (_, result) = collect_handle_events(&mut recovered).await;
+    assert_eq!(result.status, pig_protocol::AgentRunStatus::Failed);
+    assert!(result.stop_reason.contains("worker restarted"));
+    recovered.release().await.expect("release interrupted run");
+    restarted.kill().await.expect("stop restarted worker");
     let _ = std::fs::remove_dir_all(root);
 }
