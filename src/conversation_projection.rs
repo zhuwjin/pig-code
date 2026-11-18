@@ -87,6 +87,10 @@ impl ProjectionRegistry {
         }
     }
 
+    pub(crate) fn cursor(&self) -> u64 {
+        self.cursor
+    }
+
     pub(crate) fn project(&mut self, envelope: &EventEnvelope) -> Projected {
         if self
             .epoch

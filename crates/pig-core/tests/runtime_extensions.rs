@@ -1,8 +1,9 @@
 use std::sync::{Arc, Mutex};
 
 use pig_core::agent::runtime::{
-    AgentInitiator, AgentRuntime, MailboxMessageKind, RuntimeControlEvent, RuntimeEventKind,
-    RuntimeMailboxMessage, RuntimeProjectionDefinition, RuntimeSnapshotView, StartRun,
+    AgentInitiator, AgentRuntime, MailboxMessageKind, RuntimeAgent, RuntimeControlEvent,
+    RuntimeEventKind, RuntimeMailboxMessage, RuntimeProjectionDefinition, RuntimeSnapshotView,
+    StartRun,
 };
 use pig_core::store::Store;
 
@@ -91,6 +92,83 @@ async fn schedule_extension_uses_runtime_without_session_changes() {
     runtime
         .consume_mailbox_blocking("wake-1".into())
         .expect("consume wake");
+    runtime.shutdown().await.expect("shutdown");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+struct CatalogProjection;
+
+impl RuntimeProjectionDefinition for CatalogProjection {
+    fn key(&self) -> &str {
+        "test.catalog"
+    }
+
+    fn version(&self) -> u32 {
+        4
+    }
+
+    fn initial(&self, snapshot: &RuntimeSnapshotView) -> serde_json::Value {
+        serde_json::json!({
+            "agents": snapshot.agents.len(),
+            "runs": snapshot.runs.len(),
+            "initialized_at": snapshot.latest_sequence,
+        })
+    }
+
+    fn apply(&self, state: &mut serde_json::Value, event: &RuntimeControlEvent) {
+        if event.kind == RuntimeEventKind::AgentRegistered {
+            state["agents"] = serde_json::json!(state["agents"].as_u64().unwrap_or(0) + 1);
+        }
+    }
+}
+
+#[tokio::test]
+async fn catalog_projection_registers_and_resyncs_without_core_changes() {
+    let root = std::env::temp_dir().join(format!(
+        "pig-catalog-projection-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let store = Arc::new(Mutex::new(Store::open(&root).expect("store")));
+    let runtime = AgentRuntime::spawn_root("catalog-session".into(), store).expect("runtime");
+    runtime
+        .register_projection_blocking(Box::new(CatalogProjection))
+        .expect("register catalog projection");
+    runtime
+        .register_agent(RuntimeAgent {
+            session_id: "catalog-session".into(),
+            agent_id: "catalog-child".into(),
+            parent_agent_id: Some("catalog-session".into()),
+            depth: 1,
+            profile: "explore".into(),
+            conversation_path: None,
+            created_at_ms: 1,
+            closed_at_ms: None,
+        })
+        .await
+        .expect("register catalog child");
+    let snapshot = runtime
+        .projection_snapshot_blocking()
+        .expect("catalog snapshot");
+    assert_eq!(snapshot.values["test.catalog"].version, 4);
+    assert_eq!(snapshot.values["test.catalog"].value["agents"], 2);
+    runtime
+        .resync_projection_blocking("test.catalog".into())
+        .expect("resync catalog projection");
+    let restored = runtime
+        .projection_snapshot_blocking()
+        .expect("restored catalog");
+    assert_eq!(restored.values["test.catalog"].value["agents"], 2);
+    assert_eq!(
+        restored.consistent_sequence,
+        runtime
+            .snapshot_blocking()
+            .expect("runtime snapshot")
+            .latest_sequence
+    );
     runtime.shutdown().await.expect("shutdown");
     let _ = std::fs::remove_dir_all(root);
 }
