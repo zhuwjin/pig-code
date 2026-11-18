@@ -49,6 +49,7 @@ pub(super) struct Manager {
         crate::store::BackgroundTask,
         pig_protocol::TaskNotification,
     )>,
+    pending_replays: Vec<String>,
     id_counter: u64,
     task_notify_tx: tokio::sync::mpsc::UnboundedSender<crate::task::TaskChange>,
     /// Plugin turns waited on by `PluginSessionAction::Wait`.
@@ -132,6 +133,7 @@ impl Manager {
             deletion_tx,
             deletion_rx,
             pending_terminal: Vec::new(),
+            pending_replays: Vec::new(),
             id_counter: 0,
             task_notify_tx,
             plugin_waiters: Vec::new(),
@@ -593,6 +595,10 @@ impl Manager {
             } else {
                 super::persist_pending(&store, &session_id, &entry.pending);
             }
+        }
+        let pending_replays = std::mem::take(&mut self.pending_replays);
+        for session_id in pending_replays {
+            self.replay_loaded_session(&event_tx, session_id);
         }
     }
 }

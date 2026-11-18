@@ -1962,3 +1962,124 @@ async fn agent_handle_close_waits_for_runtime_and_is_idempotent() {
     agent.shutdown();
     let _ = std::fs::remove_dir_all(data_dir);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reopening_a_loaded_session_replays_its_real_history_before_completion() {
+    let (config_path, cwd, data_dir) = setup("loaded-session-replay");
+    let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir);
+    let session_id = new_session(&agent, cwd).await;
+    agent
+        .ops
+        .send(Op::SendMessage {
+            session_id: session_id.clone(),
+            content: "say something".into(),
+            files: vec![],
+            images: vec![],
+            permissions: ExecMode::Auto.permissions(),
+            delivery: pig_protocol::MessageDelivery::Queue,
+        })
+        .await
+        .expect("send initial message");
+    recv_until(&agent.events, Duration::from_secs(20), |event| {
+        matches!(event, Event::TurnComplete { .. })
+    })
+    .await;
+
+    agent
+        .ops
+        .send(Op::OpenSession {
+            session_id: session_id.clone(),
+        })
+        .await
+        .expect("reopen loaded session");
+    let replay = recv_until(&agent.events, Duration::from_secs(10), |event| {
+        matches!(event, Event::SessionReplayComplete { .. })
+    })
+    .await;
+    assert_eq!(
+        replay
+            .iter()
+            .filter(|event| matches!(event, Event::SessionReplayComplete { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        replay
+            .iter()
+            .filter(
+                |event| matches!(event, Event::UserMessage { text, .. } if text == "say something")
+            )
+            .count(),
+        1
+    );
+    assert!(replay.iter().any(|event| matches!(
+        event,
+        Event::TextDone { full_text, .. } if full_text.contains(mock::MOCK_REPLY_MARKER)
+    )));
+    agent.close().await.expect("close agent");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replay_of_a_busy_session_waits_for_the_turn_to_settle() {
+    let (config_path, cwd, data_dir) = setup("busy-session-replay");
+    let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir);
+    let session_id = new_session(&agent, cwd).await;
+    agent
+        .ops
+        .send(Op::SendMessage {
+            session_id: session_id.clone(),
+            content: mock::SCENARIO_SLOW_TRIGGER.into(),
+            files: vec![],
+            images: vec![],
+            permissions: ExecMode::Auto.permissions(),
+            delivery: pig_protocol::MessageDelivery::Queue,
+        })
+        .await
+        .expect("start slow turn");
+    recv_until(&agent.events, Duration::from_secs(10), |event| {
+        matches!(event, Event::ToolCallBegin { .. })
+    })
+    .await;
+    agent
+        .ops
+        .send(Op::OpenSession {
+            session_id: session_id.clone(),
+        })
+        .await
+        .expect("request replay during a running turn");
+    agent
+        .ops
+        .send(Op::GetConfig)
+        .await
+        .expect("sync operations");
+    let before_stop = recv_until(&agent.events, Duration::from_secs(5), |event| {
+        matches!(event, Event::ConfigSnapshot { .. })
+    })
+    .await;
+    assert!(
+        !before_stop
+            .iter()
+            .any(|event| matches!(event, Event::SessionReplayComplete { .. }))
+    );
+    agent
+        .ops
+        .send(Op::Interrupt {
+            session_id: session_id.clone(),
+        })
+        .await
+        .expect("finish running turn");
+    let replay = recv_until(&agent.events, Duration::from_secs(15), |event| {
+        matches!(event, Event::SessionReplayComplete { .. })
+    })
+    .await;
+    assert!(
+        replay
+            .iter()
+            .any(|event| matches!(event, Event::TurnAborted { .. }))
+    );
+    assert!(replay.iter().any(|event| matches!(
+        event,
+        Event::UserMessage { text, .. } if text == mock::SCENARIO_SLOW_TRIGGER
+    )));
+    agent.close().await.expect("close agent");
+}

@@ -208,6 +208,42 @@ impl Manager {
             ),
         }
     }
+    pub(super) fn replay_loaded_session(
+        &mut self,
+        event_tx: &async_channel::Sender<Event>,
+        session_id: String,
+    ) {
+        self.pending_replays.retain(|id| id != &session_id);
+        if self.deleted_sessions.contains(&session_id) {
+            return;
+        }
+        let Some(entry) = self.sessions.get_mut(&session_id) else {
+            return;
+        };
+        let Some(session) = entry.session.as_mut() else {
+            if !self.pending_replays.contains(&session_id) {
+                self.pending_replays.push(session_id);
+            }
+            return;
+        };
+        let path = self.sessions_dir.join(format!("{session_id}.jsonl"));
+        match crate::rollout::Rollout::load(&path) {
+            Ok(records) => session.replay(&records, event_tx),
+            Err(error) => {
+                emit(
+                    event_tx,
+                    Event::Error {
+                        session_id: Some(session_id),
+                        error,
+                        fatal: false,
+                    },
+                );
+                return;
+            }
+        }
+        emit(event_tx, Event::SessionReplayComplete { session_id });
+    }
+
     pub(super) fn open_session(
         &mut self,
         event_tx: async_channel::Sender<Event>,
@@ -316,12 +352,7 @@ impl Manager {
                     }
                 }
             }
-            emit(
-                &event_tx,
-                Event::SessionReplayComplete {
-                    session_id: session_id.clone(),
-                },
-            );
+            self.replay_loaded_session(&event_tx, session_id);
             return;
         }
         let resume_cwd = store
@@ -701,6 +732,7 @@ impl Manager {
         super::reject_session_approvals(&pending, &session_id);
         super::drop_session_questions(&pending_questions, &session_id);
         self.deleted_sessions.insert(session_id.clone());
+        self.pending_replays.retain(|id| id != &session_id);
         let pending_already = self.pending_deletions.contains_key(&session_id);
         self.pending_deletions
             .entry(session_id.clone())

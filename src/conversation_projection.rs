@@ -20,9 +20,15 @@ struct ConversationState {
     next_id: u64,
 }
 
+pub(crate) struct ProjectionResync {
+    pub cursor: u64,
+    pub session_id: Option<String>,
+}
+
 pub(crate) struct Projected {
     pub pass: bool,
     pub events: Vec<Event>,
+    pub resync: Option<ProjectionResync>,
 }
 
 impl Projected {
@@ -30,6 +36,7 @@ impl Projected {
         Self {
             pass: true,
             events: Vec::new(),
+            resync: None,
         }
     }
 
@@ -37,6 +44,15 @@ impl Projected {
         Self {
             pass: false,
             events,
+            resync: None,
+        }
+    }
+
+    fn resync(cursor: u64, session_id: Option<String>) -> Self {
+        Self {
+            pass: false,
+            events: Vec::new(),
+            resync: Some(ProjectionResync { cursor, session_id }),
         }
     }
 }
@@ -58,32 +74,54 @@ pub(crate) struct ConversationProjection {
 /// deduplication only; domain state remains in the individual projection.
 pub(crate) struct ProjectionRegistry {
     conversation: ConversationProjection,
-    cursors: HashMap<(Option<String>, Option<String>, Option<String>), u64>,
+    epoch: Option<String>,
+    cursor: u64,
 }
 
 impl ProjectionRegistry {
     pub(crate) fn new() -> Self {
         Self {
             conversation: ConversationProjection::new(),
-            cursors: HashMap::new(),
+            epoch: None,
+            cursor: 0,
         }
     }
 
     pub(crate) fn project(&mut self, envelope: &EventEnvelope) -> Projected {
-        let stream = (
-            envelope.session_id.clone(),
-            envelope.agent_id.clone(),
-            envelope.run_id.clone(),
-        );
         if self
-            .cursors
-            .get(&stream)
-            .is_some_and(|cursor| envelope.sequence <= *cursor)
+            .epoch
+            .as_deref()
+            .is_some_and(|epoch| epoch != envelope.epoch)
         {
+            return Projected::resync(self.cursor, envelope.session_id.clone());
+        }
+        if envelope.sequence <= self.cursor {
             return Projected::only(Vec::new());
         }
-        self.cursors.insert(stream, envelope.sequence);
+        if envelope.sequence != self.cursor + 1 {
+            return Projected::resync(self.cursor, envelope.session_id.clone());
+        }
+        self.epoch = Some(envelope.epoch.clone());
+        self.cursor = envelope.sequence;
         self.conversation.project(&envelope.event)
+    }
+
+    pub(crate) fn reset_with_snapshot(
+        &mut self,
+        snapshot: &pig_core::JournalSnapshot,
+    ) -> Result<(), String> {
+        self.conversation = ConversationProjection::new();
+        self.epoch = Some(snapshot.epoch.clone());
+        self.cursor = snapshot.oldest.saturating_sub(1);
+        for envelope in &snapshot.events {
+            if self.project(envelope).resync.is_some() {
+                return Err("journal snapshot is not contiguous".to_string());
+            }
+        }
+        if self.cursor != snapshot.cursor {
+            return Err("journal snapshot cursor mismatch".to_string());
+        }
+        Ok(())
     }
 }
 
@@ -99,6 +137,20 @@ impl ConversationProjection {
 
     pub(crate) fn project(&mut self, event: &Event) -> Projected {
         match event {
+            Event::SessionReplayComplete { session_id } => {
+                let Some(state) = self.sessions.get(session_id) else {
+                    return Projected::pass(event);
+                };
+                Projected::only(vec![Event::ConversationSnapshot {
+                    session_id: session_id.clone(),
+                    agent_id: None,
+                    title: None,
+                    subtitle: None,
+                    items: state.items.clone(),
+                    running: state.active_turn.is_some(),
+                    run_id: None,
+                }])
+            }
             Event::SessionConfigured { session_id, .. } => {
                 self.sessions.remove(session_id);
                 self.subagents.remove(session_id);
@@ -1251,5 +1303,75 @@ mod tests {
         assert!(!duplicate.pass);
         assert!(duplicate.events.is_empty());
         assert!(registry.project(&envelope(2)).pass);
+    }
+
+    #[test]
+    fn projection_registry_resumes_from_a_consistent_snapshot_cut() {
+        let mut registry = ProjectionRegistry::new();
+        let envelope = |sequence| EventEnvelope {
+            sequence,
+            session_id: Some("s1".into()),
+            agent_id: None,
+            run_id: None,
+            epoch: "journal-test".into(),
+            event: Event::TaskListChanged {
+                session_id: "s1".into(),
+                tasks: Vec::new(),
+            },
+        };
+        assert!(registry.project(&envelope(1)).pass);
+        let snapshot = pig_core::JournalSnapshot {
+            epoch: "journal-test".into(),
+            cursor: 3,
+            oldest: 3,
+            events: vec![envelope(3)],
+        };
+        registry
+            .reset_with_snapshot(&snapshot)
+            .expect("consistent snapshot");
+        let duplicate = registry.project(&envelope(3));
+        assert!(!duplicate.pass);
+        assert!(duplicate.resync.is_none());
+        assert!(registry.project(&envelope(4)).pass);
+        let gap = registry.project(&envelope(6));
+        assert_eq!(gap.resync.expect("gap requires resync").cursor, 4);
+        let stale = registry.project(&EventEnvelope {
+            epoch: "another-epoch".into(),
+            ..envelope(5)
+        });
+        assert!(stale.resync.is_some());
+    }
+
+    #[test]
+    fn replay_completion_emits_a_full_root_conversation_snapshot() {
+        let mut registry = ProjectionRegistry::new();
+        let user = EventEnvelope {
+            epoch: "journal-test".into(),
+            sequence: 1,
+            session_id: Some("s1".into()),
+            agent_id: None,
+            run_id: None,
+            event: Event::UserMessage {
+                session_id: "s1".into(),
+                text: "persisted user input".into(),
+                files: Vec::new(),
+                image_nums: Vec::new(),
+                sent_at_ms: 42,
+            },
+        };
+        registry.project(&user);
+        let ready = registry.project(&EventEnvelope {
+            sequence: 2,
+            event: Event::SessionReplayComplete {
+                session_id: "s1".into(),
+            },
+            ..user.clone()
+        });
+        assert_eq!(ready.events.len(), 1);
+        assert!(matches!(
+            &ready.events[0],
+            Event::ConversationSnapshot { items, running: false, .. }
+                if items.len() == 1
+        ));
     }
 }

@@ -64,7 +64,7 @@
     "journal.rs": {
       "paths": ["crates/pig-core/src/journal.rs"],
       "acceptance": ["R05", "R15"],
-      "public_surface": ["EventJournal", "JournalReplayError", "JournalResyncReason", "JournalResyncRequired"]
+      "public_surface": ["EventJournal", "JournalReplayError", "JournalResyncReason", "JournalResyncRequired", "JournalSnapshot"]
     },
     "lib.rs": {
       "paths": ["crates/pig-core/src/lib.rs"],
@@ -179,9 +179,9 @@
       "id": "R05",
       "area": "Control journal, projections and consistent resync",
       "references": [{"project": "deepseek-harness", "path": "packages/api/gateway/src/client/journal-stream.ts"}, {"project": "kimi-code", "path": "packages/kap-server/src/transport/ws/v1/sessionEventBroadcaster.ts"}],
-      "existing_evidence": ["crates/pig-core/src/journal.rs", "crates/pig-core/src/agent/runtime/projection.rs", "src/conversation_projection.rs"],
-      "missing_proof": ["Connect production Catalog/task/UI/SDK projections", "Return and consume a consistent snapshot at an epoch/sequence cut", "Prove replay, duplicate, gap, reorder and stale-epoch behavior"],
-      "status": "implemented"
+      "existing_evidence": ["crates/pig-core/src/journal.rs", "crates/pig-core/src/agent/runtime/projection.rs", "src/conversation_projection.rs", "src/agent.rs"],
+      "missing_proof": ["Connect production Catalog/task/SDK projections to the same resync boundary", "Inject a real journal gap and verify producer replay end to end"],
+      "status": "tested"
     },
     {
       "id": "R06",

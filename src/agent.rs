@@ -439,10 +439,43 @@ default_reasoning_level = "low"
             }
             let mut ui_batch = Vec::with_capacity(batch.len());
             for envelope in &batch {
-                let projected = projection.project(envelope);
-                ui_batch.extend(projected.events);
-                if projected.pass {
-                    ui_batch.push(envelope.event.clone());
+                let Some(resync) = append_projected(&mut projection, envelope, &mut ui_batch)
+                else {
+                    continue;
+                };
+                match events.replay_or_snapshot(&envelope.epoch, resync.cursor) {
+                    Ok(missed) => {
+                        for missed in &missed {
+                            if append_projected(&mut projection, missed, &mut ui_batch).is_some() {
+                                report_projection_error(
+                                    &listener,
+                                    "journal replay did not restore projection order".into(),
+                                );
+                                return;
+                            }
+                        }
+                    }
+                    Err(snapshot) => {
+                        if let Err(error) = projection.reset_with_snapshot(&snapshot) {
+                            report_projection_error(&listener, error);
+                            return;
+                        }
+                        let Some(session_id) = resync.session_id else {
+                            report_projection_error(
+                                &listener,
+                                "global projection resync requires a journal snapshot".into(),
+                            );
+                            return;
+                        };
+                        if let Err(error) = this.with(|agent| {
+                            agent.send_op(Op::OpenSession {
+                                session_id: session_id.clone(),
+                            })
+                        }) {
+                            report_projection_error(&listener, error);
+                            return;
+                        }
+                    }
                 }
             }
             if !ui_batch.is_empty() {
@@ -492,6 +525,23 @@ impl Agent {
         let bytes = std::fs::read(&path).map_err(|error| format!("{}: {error}", path.display()))?;
         Ok((bytes, mime.to_string()))
     }
+}
+
+fn append_projected(
+    projection: &mut crate::conversation_projection::ProjectionRegistry,
+    envelope: &pig_protocol::EventEnvelope,
+    output: &mut Vec<Event>,
+) -> Option<crate::conversation_projection::ProjectionResync> {
+    let projected = projection.project(envelope);
+    output.extend(projected.events);
+    if projected.pass {
+        output.push(envelope.event.clone());
+    }
+    projected.resync
+}
+
+fn report_projection_error(listener: &Callback<String>, detail: String) {
+    listener.post(serde_json::json!([{ "BridgeError": { "detail": detail } }]).to_string());
 }
 
 fn encode_batch(batch: &[Event]) -> String {
