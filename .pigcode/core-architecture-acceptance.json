@@ -228,16 +228,16 @@
       "area": "Context, compaction, cache identity and replay",
       "references": [{"project": "kimi-code", "path": "packages/agent-core-v2/src/agent/fullCompaction/"}, {"project": "codex", "path": "codex-rs/core/src/compact_remote_v2.rs"}],
       "existing_evidence": ["crates/pig-core/tests/compact.rs", "crates/pig-core/tests/context_stability.rs", "crates/pig-core/tests/prefix_cache/", "crates/pig-core/tests/context_overflow/"],
-      "missing_proof": ["Prove model-visible history and usage replay for every boundary", "Preserve prefix/cache identity", "Prove overflow recovery without duplicate side effects"],
-      "status": "implemented"
+      "missing_proof": [],
+      "status": "tested"
     },
     {
       "id": "R12",
       "area": "Media, attachments and model-visible inputs",
       "references": [{"project": "kimi-code", "path": "packages/agent-core-v2/src/agent/media/"}],
       "existing_evidence": ["crates/pig-core/tests/media.rs", "crates/pig-core/src/agent/records/tests/media.rs"],
-      "missing_proof": ["Prove type, size and capability validation for every accepted input", "Preserve attachment identity through fork/resume/replay", "Add media capabilities through declaration rather than control-state changes"],
-      "status": "implemented"
+      "missing_proof": [],
+      "status": "tested"
     },
     {
       "id": "R13",
@@ -267,16 +267,16 @@
       "id": "R16",
       "area": "Representative extension exercises",
       "references": [{"project": "deepseek-harness", "path": "packages/subagent/subagent/src/index.ts"}, {"project": "kimi-code", "path": "packages/agent-core-v2/src/features/"}],
-      "existing_evidence": ["crates/pig-core/tests/runtime_extensions.rs", "crates/pig-core/src/agent/backend.rs"],
-      "missing_proof": ["Cover provider, tool, backend, projection, mailbox kind, initiator, domain trigger and approval policy", "Require registration-only integration", "Run public contracts for cancellation, persistence, replay, quiescence, permission and projection behavior"],
-      "status": "implemented"
+      "existing_evidence": ["crates/pig-core/tests/runtime_extensions.rs", "crates/pig-core/src/agent/backend.rs", "crates/pig-core/tests/config_providers.rs", "crates/pig-core/src/session/tests/approval.rs", "crates/pig-core/src/plugins/tools.rs", "crates/pig-core/tests/ipc.rs"],
+      "missing_proof": [],
+      "status": "tested"
     },
     {
       "id": "R17",
       "area": "Automated architecture conformance gates",
       "references": [{"project": "kimi-code", "path": "packages/agent-core-v2/test/environment/architectureBoundaries.test.ts"}, {"project": "deepseek-harness", "path": "scripts/"}],
       "existing_evidence": ["crates/pig-core/tests/architecture.rs"],
-      "missing_proof": ["Extend ownership gates beyond module inventory to runtime authority and dependency boundaries", "Reject dual control planes and backend/provider Session special cases", "Reject permission bypasses, unregistered projections, unbounded queues and ignored core errors in CI"],
+      "missing_proof": ["Bound provider and session streaming/notification queues", "Reject unregistered projections and ignored core errors in CI"],
       "status": "implemented"
     },
     {

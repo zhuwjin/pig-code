@@ -43,7 +43,8 @@ async fn schedule_extension_uses_runtime_without_session_changes() {
             .as_nanos()
     ));
     let store = Arc::new(Mutex::new(Store::open(&root).expect("store")));
-    let runtime = AgentRuntime::spawn_root("extension-session".into(), store).expect("runtime");
+    let runtime =
+        AgentRuntime::spawn_root("extension-session".into(), store.clone()).expect("runtime");
     runtime
         .register_projection_blocking(Box::new(ScheduleProjection))
         .expect("schedule projection");
@@ -79,7 +80,7 @@ async fn schedule_extension_uses_runtime_without_session_changes() {
             "wake-1".into(),
             "extension-session".into(),
             Some("schedule-run-1".into()),
-            MailboxMessageKind::Wake,
+            MailboxMessageKind::Custom("test.domain_wake".into()),
             serde_json::json!({ "text": "tick", "notification": null }),
             None,
         ))
@@ -88,11 +89,25 @@ async fn schedule_extension_uses_runtime_without_session_changes() {
         .claim_mailbox_blocking("extension-session".into())
         .expect("claim wake");
     assert_eq!(claimed.len(), 1);
-    assert_eq!(claimed[0].kind, MailboxMessageKind::Wake);
+    assert_eq!(claimed[0].kind.as_str(), "test.domain_wake");
     runtime
         .consume_mailbox_blocking("wake-1".into())
         .expect("consume wake");
     runtime.shutdown().await.expect("shutdown");
+    let restarted = AgentRuntime::spawn_root("extension-session".into(), store)
+        .expect("restart with the custom mailbox kind");
+    let restored = restarted.snapshot_blocking().expect("restored mailbox");
+    let message = restored
+        .mailbox
+        .iter()
+        .find(|message| message.message_id == "wake-1")
+        .expect("custom message survives restart");
+    assert_eq!(message.kind.as_str(), "test.domain_wake");
+    assert_eq!(
+        message.state,
+        pig_core::agent::runtime::MailboxDeliveryState::Consumed
+    );
+    restarted.shutdown().await.expect("shutdown restarted");
     let _ = std::fs::remove_dir_all(root);
 }
 

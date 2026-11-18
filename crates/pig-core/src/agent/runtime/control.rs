@@ -36,7 +36,7 @@ type Command = Box<dyn FnOnce(&mut RuntimeState) + Send + 'static>;
 #[derive(Clone)]
 pub struct AgentRuntime {
     session_id: String,
-    commands: mpsc::UnboundedSender<Command>,
+    commands: mpsc::Sender<Command>,
     events: broadcast::Sender<RuntimeControlEvent>,
     backends: Arc<super::super::AgentBackendRegistry>,
     pub(super) executions: super::execution::ExecutionTable,
@@ -76,7 +76,7 @@ impl AgentRuntime {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .runtime_snapshot(&session_id)?;
-        let (commands, receiver) = mpsc::unbounded_channel();
+        let (commands, receiver) = mpsc::channel(256);
         let (events, _) = broadcast::channel(1024);
         let mut state = RuntimeState {
             agents: snapshot
@@ -186,6 +186,7 @@ impl AgentRuntime {
         });
         self.commands
             .send(command)
+            .await
             .map_err(|_| RuntimeError::ChannelClosed)?;
         response.await.map_err(|_| RuntimeError::ChannelClosed)?
     }
@@ -207,8 +208,11 @@ impl AgentRuntime {
             let _ = reply.send(result);
         });
         self.commands
-            .send(command)
-            .map_err(|_| RuntimeError::ChannelClosed)?;
+            .try_send(command)
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => RuntimeError::Busy,
+                mpsc::error::TrySendError::Closed(_) => RuntimeError::ChannelClosed,
+            })?;
         response.recv().map_err(|_| RuntimeError::ChannelClosed)?
     }
 
@@ -562,7 +566,7 @@ const WATCHDOG_TICK: std::time::Duration = std::time::Duration::from_millis(5);
 #[cfg(not(test))]
 const WATCHDOG_TICK: std::time::Duration = std::time::Duration::from_millis(250);
 
-async fn run_commands(mut state: RuntimeState, mut commands: mpsc::UnboundedReceiver<Command>) {
+async fn run_commands(mut state: RuntimeState, mut commands: mpsc::Receiver<Command>) {
     let mut watchdog = tokio::time::interval(WATCHDOG_TICK);
     watchdog.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -2242,6 +2246,42 @@ mod tests {
             runtime.register_agent(agent("s2", "s2", None)).await,
             Err(RuntimeError::ChannelClosed | RuntimeError::Closed)
         ));
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
+mod capacity_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn bounded_command_queue_backpressures_async_and_rejects_blocking_when_full() {
+        let root = std::env::temp_dir().join(format!(
+            "pig-runtime-capacity-{}-{}",
+            std::process::id(),
+            crate::model_io::now_ms()
+        ));
+        let store = Arc::new(Mutex::new(Store::open(&root).expect("store")));
+        let runtime = AgentRuntime::spawn_root("capacity-session".into(), store).expect("runtime");
+        let mut permits = Vec::new();
+        while let Ok(permit) = runtime.commands.try_reserve() {
+            permits.push(permit);
+        }
+        assert_eq!(permits.len(), 256);
+        assert!(matches!(
+            runtime.snapshot_blocking(),
+            Err(RuntimeError::Busy)
+        ));
+
+        let waiting = runtime.snapshot();
+        tokio::pin!(waiting);
+        tokio::select! {
+            result = &mut waiting => panic!("async command bypassed a full queue: {result:?}"),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
+        }
+        drop(permits);
+        waiting.await.expect("async command after capacity");
+        runtime.shutdown().await.expect("shutdown");
         let _ = std::fs::remove_dir_all(root);
     }
 }

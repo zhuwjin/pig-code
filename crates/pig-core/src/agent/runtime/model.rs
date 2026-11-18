@@ -155,22 +155,24 @@ pub struct ExecutionAttempt {
     pub released_at_ms: Option<u64>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MailboxMessageKind {
     Steer,
     Followup,
     Notification,
     Wake,
+    Custom(String),
 }
 
 impl MailboxMessageKind {
-    pub fn as_str(self) -> &'static str {
+    pub fn as_str(&self) -> &str {
         match self {
             Self::Steer => "steer",
             Self::Followup => "followup",
             Self::Notification => "notification",
             Self::Wake => "wake",
+            Self::Custom(kind) => kind,
         }
     }
 
@@ -180,7 +182,8 @@ impl MailboxMessageKind {
             "followup" => Self::Followup,
             "notification" => Self::Notification,
             "wake" => Self::Wake,
-            _ => return None,
+            "" => return None,
+            custom => Self::Custom(custom.to_string()),
         })
     }
 }
@@ -352,6 +355,7 @@ pub enum RuntimeError {
     },
     Store(String),
     Backend(String),
+    Busy,
     ChannelClosed,
 }
 
@@ -372,6 +376,7 @@ impl std::fmt::Display for RuntimeError {
             ),
             Self::Store(detail) => write!(formatter, "runtime store failed: {detail}"),
             Self::Backend(detail) => write!(formatter, "agent backend preflight failed: {detail}"),
+            Self::Busy => formatter.write_str("runtime command queue is full"),
             Self::ChannelClosed => formatter.write_str("runtime command channel closed"),
         }
     }

@@ -9,24 +9,24 @@ pub(super) async fn run_tool_batch<T, F>(
     mut finish: impl FnMut(usize, T),
 ) -> bool
 where
-    T: Send + 'static,
-    F: std::future::Future<Output = T> + Send + 'static,
+    T: Send,
+    F: std::future::Future<Output = T> + Send,
 {
-    let mut set: tokio::task::JoinSet<(usize, T)> = tokio::task::JoinSet::new();
+    let mut set = FuturesUnordered::new();
     let mut next = 0usize;
     let cancelled = loop {
         while next < count && set.len() < MAX_PARALLEL_TOOLS {
             let index = next;
             let task = start(index);
-            set.spawn(async move { (index, task.await) });
+            set.push(async move { (index, task.await) });
             next += 1;
         }
         if set.is_empty() {
             break false;
         }
         tokio::select! {
-            joined = set.join_next() => {
-                if let Some(Ok((index, output))) = joined {
+            joined = set.next() => {
+                if let Some((index, output)) = joined {
                     finish(index, output);
                 }
             }
@@ -34,12 +34,7 @@ where
         }
     };
     if cancelled {
-        set.abort_all();
-        while let Some(joined) = set.join_next().await {
-            if let Ok((index, output)) = joined {
-                finish(index, output);
-            }
-        }
+        set.clear();
     }
     cancelled
 }

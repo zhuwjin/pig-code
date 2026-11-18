@@ -849,9 +849,7 @@ impl Session {
                         call_ix,
                         group_end,
                         turn_id,
-                        media,
                         config.context_window,
-                        self.trust.admits(&self.agent.cwd),
                         tx,
                         cancel,
                     )
@@ -1685,9 +1683,7 @@ impl Session {
         start: usize,
         end: usize,
         turn_id: &str,
-        media: tool::MediaCapabilities,
         context_window: u64,
-        trusted: bool,
         tx: &async_channel::Sender<Event>,
         cancel: &CancellationToken,
     ) -> bool {
@@ -1727,15 +1723,12 @@ impl Session {
         // grouping (write tools are sync points, executed only after the group
         // drains). MCP tools: the mask already guarantees read-only +
         // approval-free + no deny hit; the task clones Arc<McpManager> and
-        // fetches by name (an McpTool clone is just an Arc clone, cheap),
-        // executed via execute_with_extra
+        // fetches by name through the same gate as the serial path. Each task
+        // owns only its ChangeTracker; all permission and hook state is shared.
         self.plugin_tools.dispatcher().set_event_sender(tx.clone());
-        let cwd = self.agent.cwd.clone();
-        let state = self.state.clone();
-        let mcp = self.mcp.clone();
-        let plugin_tools = self.plugin_tools.clone();
-        let plugin_filter = self.plugin_tool_filter.clone();
-        let sandbox_profile = crate::task::sandbox_profile_for(self.permissions, self.plan_enabled);
+        let gate = self.gate_snapshot();
+        let tools = tool::all();
+        let tools = &tools;
         let mut slots: Vec<Option<ParallelOutput>> = Vec::new();
         slots.resize_with(cards.len(), || None);
         let cancelled = super::batch::run_tool_batch(
@@ -1743,62 +1736,62 @@ impl Session {
             cancel,
             |index| {
                 let call = cards[index].call.clone();
-                let cwd = cwd.clone();
-                let state = state.clone();
-                let mcp = mcp.clone();
-                let plugin_tools = plugin_tools.clone();
-                let plugin_filter = plugin_filter.clone();
+                let item_id = cards[index].item_id.clone();
+                let gate = gate.clone();
                 async move {
-                    let caps = media;
                     let mut tracker = ChangeTracker::default();
-                    let ctx = ToolContext {
-                        cwd: &cwd,
-                        tracker: &mut tracker,
-                        state: &state,
-                        fs_grant: None,
-                        sandbox_override: Default::default(),
-                        sandbox_profile,
-                        additional_permissions: Default::default(),
-                    };
-                    let mut extra: Vec<Box<dyn tool::Tool>> = match &mcp {
-                        Some(mcp) if call.name.starts_with("mcp__") => {
-                            mcp.tool_named(&call.name).into_iter().collect()
-                        }
-                        _ => vec![],
-                    };
-                    extra.extend(plugin_tools.tools_filtered(&plugin_filter));
-                    if call.name == "Skill" {
-                        extra.push(Box::new(tool::SkillTool::new_trusted(
-                            &cwd,
-                            &plugin_tools.registry(),
-                            trusted,
-                        )));
-                    }
-                    if call.name == "SendMessage" {
-                        extra.push(Box::new(tool::SendMessageTool));
-                    }
+                    let tool = tools
+                        .iter()
+                        .find(|tool| tool.name() == call.name)
+                        .map(|tool| tool.as_ref());
                     let tool_started = Instant::now();
-                    let (mut output, is_error, file_change, edit, mut media) =
-                        tool::execute_with_extra(&call, ctx, &extra).await;
+                    let outcome = gate
+                        .exec_tool_gated(&call, tool, &item_id, turn_id, tx, cancel, &mut tracker)
+                        .await;
                     let elapsed_ms = tool_started.elapsed().as_millis() as u64;
-                    debug_assert!(
-                        file_change.is_none() && tracker.take_dirty().is_empty(),
-                        "concurrent read-only segment produces no file changes: {}",
-                        call.name
-                    );
-                    project_tool_media(&call.arguments, &mut output, &mut media, caps);
-                    let images = tool_images_to_chat(&call.arguments, media.images);
-                    let documents = tool_documents_to_chat(media.documents);
-                    ParallelOutput {
-                        output,
-                        is_error,
-                        edit,
-                        images,
+                    let empty = |stopped| ParallelOutput {
+                        output: String::new(),
+                        is_error: true,
+                        edit: None,
+                        images: vec![],
                         image_refs: vec![],
-                        documents,
+                        documents: vec![],
                         document_refs: vec![],
-                        file_change,
+                        file_change: None,
+                        stopped,
                         elapsed_ms,
+                    };
+                    match outcome {
+                        GatedToolOutcome::Executed {
+                            output,
+                            is_error,
+                            edit,
+                            images,
+                            documents,
+                            ..
+                        } => ParallelOutput {
+                            output,
+                            is_error,
+                            edit,
+                            images,
+                            image_refs: vec![],
+                            documents,
+                            document_refs: vec![],
+                            file_change: None,
+                            stopped: false,
+                            elapsed_ms,
+                        },
+                        GatedToolOutcome::Rejected { note } => ParallelOutput {
+                            output: note,
+                            ..empty(false)
+                        },
+                        GatedToolOutcome::Cancelled => {
+                            cancel.cancel();
+                            ParallelOutput {
+                                output: "Stopped".to_string(),
+                                ..empty(true)
+                            }
+                        }
                     }
                 }
             },
@@ -1815,7 +1808,7 @@ impl Session {
                         item_id: cards[index].item_id.clone(),
                         output: out.output.clone(),
                         is_error: out.is_error,
-                        stopped: false,
+                        stopped: out.stopped,
                         edit: out.edit.clone(),
                     },
                     tx,
@@ -1840,6 +1833,7 @@ impl Session {
                         image_refs,
                         document_refs,
                         file_change,
+                        stopped,
                         ..
                     } = out;
                     let mut message =
@@ -1854,7 +1848,7 @@ impl Session {
                         arguments: card.call.arguments.clone(),
                         output,
                         is_error,
-                        stopped: false,
+                        stopped,
                         edit,
                         agent_card: None,
                         agent_cards: vec![],
@@ -2085,6 +2079,7 @@ struct ParallelOutput {
     /// Refs persisted before the completion event is emitted
     document_refs: Vec<crate::rollout::DocumentRef>,
     file_change: Option<tool::FileChange>,
+    stopped: bool,
     /// This call's own span (concurrent calls overlap, so the turn sums them
     /// the way the harness sums per-call tool spans rather than using the
     /// segment's wall time)
@@ -2575,9 +2570,7 @@ mod tests {
                     0,
                     1,
                     "turn-plugin",
-                    tool::MediaCapabilities::new(true, true),
                     128_000,
-                    false,
                     &tx,
                     &cancel,
                 )

@@ -557,3 +557,105 @@ async fn length_finish_is_not_treated_as_overflow() {
     );
     agent.shutdown();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn overflow_after_a_side_effect_never_replays_the_tool() {
+    let server = start_server(ServerMode::SideEffectOverflow);
+    let (agent, session_id, config, dir, data_dir) =
+        new_agent_for(&server, "side-effect-overflow", 128_000, 8_192).await;
+    agent.shutdown();
+    seed_old_segment(
+        &data_dir,
+        &session_id,
+        "old context to compact",
+        mock::CONTEXT_OVERFLOW_STREAM_TRIGGER,
+    );
+    let agent =
+        pig_core::spawn_agent_with_data_dir(Some(config.clone()), dir.clone(), data_dir.clone());
+    open_session(&agent, &session_id).await;
+
+    let events = send_and_complete(&agent, &session_id, "write the overflow fixture once").await;
+    let target = dir.join("overflow-side-effect.txt");
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap_or_else(|error| panic!(
+            "first Write result at {}: {error}; {events:#?}",
+            target.display()
+        )),
+        "written once"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::ToolCallEnd {
+                    is_error: false,
+                    ..
+                }
+            ))
+            .count(),
+        1,
+        "the Write must execute exactly once: {events:#?}"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::ContextCompacted {
+                    automatic: true,
+                    ..
+                }
+            ))
+            .count(),
+        1,
+        "one recovery compaction: {events:#?}"
+    );
+    let request_shapes = server
+        .bodies
+        .lock()
+        .expect("server requests")
+        .iter()
+        .map(|body| {
+            (
+                body.contains("\"stream\":true"),
+                body.contains(mock::CONTEXT_OVERFLOW_STREAM_TRIGGER),
+                body.contains("call_srv_1"),
+                body.contains("Earlier context compacted"),
+                body.contains("\"role\":\"tool\""),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::Error { .. })),
+        "recovery succeeds without a terminal error; request shapes: {request_shapes:?}"
+    );
+    let rollout_path = data_dir
+        .join("sessions")
+        .join(format!("{session_id}.jsonl"));
+    let rollout = std::fs::read_to_string(&rollout_path).expect("rollout after recovery");
+    assert_eq!(
+        rollout.matches("\"type\":\"tool_execution_start\"").count(),
+        1,
+        "overflow retry must not start the Write again: {rollout}"
+    );
+
+    std::fs::write(&target, "external-update").expect("external post-recovery update");
+    agent.shutdown();
+    let agent = pig_core::spawn_agent_with_data_dir(Some(config), dir.clone(), data_dir.clone());
+    open_session(&agent, &session_id).await;
+    send_and_complete(&agent, &session_id, "continue without replaying tools").await;
+    assert_eq!(
+        std::fs::read_to_string(&target).expect("external update survives replay"),
+        "external-update"
+    );
+    let rollout = std::fs::read_to_string(&rollout_path).expect("rollout after restart");
+    assert_eq!(
+        rollout.matches("\"type\":\"tool_execution_start\"").count(),
+        1,
+        "restart and continuation must preserve the single execution boundary"
+    );
+    agent.shutdown();
+}

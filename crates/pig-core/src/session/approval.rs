@@ -13,12 +13,51 @@ impl Session {
         tx: &async_channel::Sender<Event>,
         cancel: &CancellationToken,
     ) -> GatedToolOutcome {
+        self.gate_snapshot()
+            .exec_tool_gated(call, tool, item_id, turn_id, tx, cancel, &mut self.tracker)
+            .await
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct SessionGateSnapshot {
+    cwd: PathBuf,
+    agent_id: String,
+    run_id: Option<String>,
+    history: Vec<ChatMsg>,
+    session_id: String,
+    mcp: Option<Arc<crate::mcp::McpManager>>,
+    trust: crate::config::WorkspaceTrust,
+    plugin_tools: crate::plugins::PluginToolset,
+    plugin_tool_filter: crate::plugins::PluginToolFilter,
+    permissions: PermissionSettings,
+    media: tool::MediaCapabilities,
+    state: crate::task::SessionToolState,
+    reviewer: Arc<dyn ApprovalReviewer>,
+    permission_rules: Arc<Mutex<crate::permissions::PermissionRules>>,
+    always_allowed: Arc<Mutex<HashSet<(String, String)>>>,
+    plan_enabled: bool,
+    store: Arc<Mutex<Store>>,
+    hooks: crate::hooks::HookSet,
+}
+
+impl SessionGateSnapshot {
+    pub(super) async fn exec_tool_gated(
+        &self,
+        call: &ToolCall,
+        tool: Option<&dyn tool::Tool>,
+        item_id: &str,
+        turn_id: &str,
+        tx: &async_channel::Sender<Event>,
+        cancel: &CancellationToken,
+        tracker: &mut ChangeTracker,
+    ) -> GatedToolOutcome {
         // MCP and plugin tool lists are held by the session; subagent gating does not go through this wrapper.
         // Skills go through the extra channel (not in the all() static table, looked up by name as a fallback)
         let mut extra = self.mcp.as_ref().map(|mcp| mcp.tools()).unwrap_or_default();
-        let trusted = self.trust.admits(&self.agent.cwd);
+        let trusted = self.trust.admits(&self.cwd);
         extra.push(Box::new(tool::SkillTool::new_trusted(
-            &self.agent.cwd,
+            &self.cwd,
             &self.plugin_tools.registry(),
             trusted,
         )));
@@ -27,18 +66,15 @@ impl Session {
         extra.push(Box::new(tool::SendMessageTool));
         extra.extend(self.plugin_tools.tools_filtered(&self.plugin_tool_filter));
         self.plugin_tools.dispatcher().set_event_sender(tx.clone());
-        let event_session_id = self.event_session_id().to_string();
+        let event_session_id = self.session_id.clone();
         let mut gate = GateCtx {
-            cwd: &self.agent.cwd,
-            agent_id: &self.agent.id,
-            run_id: self.agent.run_id(),
+            cwd: &self.cwd,
+            agent_id: &self.agent_id,
+            run_id: self.run_id.clone(),
             permissions: self.permissions,
             allow_scope_widening: true,
-            media: tool::MediaCapabilities::new(
-                self.projected_input_image.unwrap_or(false),
-                self.projected_input_pdf.unwrap_or(false),
-            ),
-            tracker: &mut self.tracker,
+            media: self.media,
+            tracker,
             state: &self.state,
             owns_todo_state: true,
             reviewer: self.reviewer.as_ref(),
@@ -49,9 +85,37 @@ impl Session {
             store: &self.store,
             extra_tools: &extra,
             hooks: &self.hooks,
-            history: &self.agent.history,
+            history: &self.history,
         };
         exec_tool_gated_ctx(&mut gate, call, tool, item_id, turn_id, tx, cancel).await
+    }
+}
+
+impl Session {
+    pub(super) fn gate_snapshot(&self) -> SessionGateSnapshot {
+        SessionGateSnapshot {
+            cwd: self.agent.cwd.clone(),
+            agent_id: self.agent.id.clone(),
+            run_id: self.agent.run_id(),
+            history: self.agent.history.clone(),
+            session_id: self.event_session_id().to_string(),
+            mcp: self.mcp.clone(),
+            trust: self.trust.clone(),
+            plugin_tools: self.plugin_tools.clone(),
+            plugin_tool_filter: self.plugin_tool_filter.clone(),
+            permissions: self.permissions,
+            media: tool::MediaCapabilities::new(
+                self.projected_input_image.unwrap_or(false),
+                self.projected_input_pdf.unwrap_or(false),
+            ),
+            state: self.state.clone(),
+            reviewer: self.reviewer.clone(),
+            permission_rules: self.permission_rules.clone(),
+            always_allowed: self.always_allowed.clone(),
+            plan_enabled: self.plan_enabled,
+            store: self.store.clone(),
+            hooks: self.hooks.clone(),
+        }
     }
 
     /// The one trust boundary for both a grant and a revoke: install the

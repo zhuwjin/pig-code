@@ -70,6 +70,42 @@ fn is_commit(value: &str) -> bool {
     value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+fn production_sources(workspace: &Path) -> Vec<(String, String)> {
+    fn visit(root: &Path, directory: &Path, output: &mut Vec<(String, String)>) {
+        for entry in fs::read_dir(directory).expect("read source directory") {
+            let path = entry.expect("source entry").path();
+            if path.is_dir() {
+                if path.file_name().and_then(|name| name.to_str()) != Some("tests") {
+                    visit(root, &path, output);
+                }
+                continue;
+            }
+            if path.extension().and_then(|extension| extension.to_str()) != Some("rs") {
+                continue;
+            }
+            let relative = path
+                .strip_prefix(root)
+                .expect("workspace-relative source")
+                .to_string_lossy()
+                .replace('\\', "/");
+            if relative.ends_with("/tests.rs") {
+                continue;
+            }
+            let source = fs::read_to_string(&path).expect("read Rust source");
+            let production = source
+                .split("\n#[cfg(test)]")
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            output.push((relative, production));
+        }
+    }
+    let root = workspace.join("crates/pig-core/src");
+    let mut sources = Vec::new();
+    visit(&root, &root, &mut sources);
+    sources
+}
+
 fn top_level_entry(path: &str) -> String {
     Path::new(path)
         .strip_prefix("crates/pig-core/src")
@@ -278,4 +314,87 @@ fn legacy_execute_control_plane_stays_removed() {
             );
         }
     }
+}
+
+#[test]
+fn production_tools_cannot_bypass_the_permission_gate() {
+    let (workspace, _) = load_matrix();
+    for (path, source) in production_sources(&workspace) {
+        if path == "session/gate.rs" {
+            continue;
+        }
+        for forbidden in [
+            "tool::execute(",
+            "tool::execute_with_extra(",
+            "crate::tool::execute(",
+            "crate::tool::execute_with_extra(",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "{path} bypasses the permission gate with {forbidden}"
+            );
+        }
+    }
+}
+
+#[test]
+fn session_has_no_backend_or_provider_special_cases() {
+    let (workspace, _) = load_matrix();
+    for (path, source) in production_sources(&workspace) {
+        if !path.starts_with("session/") {
+            continue;
+        }
+        for forbidden in [
+            "IpcAgentExecutionHandle",
+            "ApiFormat::",
+            "provider_id ==",
+            "provider_id.starts_with",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "{path} contains a backend/provider special case: {forbidden}"
+            );
+        }
+    }
+}
+
+#[test]
+fn domain_modules_cannot_own_runtime_control_state() {
+    let (workspace, _) = load_matrix();
+    for (path, source) in production_sources(&workspace) {
+        if !(path.starts_with("plugins/")
+            || path.starts_with("hooks/")
+            || path == "tool.rs"
+            || path.starts_with("tool/"))
+        {
+            continue;
+        }
+        for forbidden in ["AgentRuntime", "RuntimeState", "ExecutionTable"] {
+            assert!(
+                !source.contains(forbidden),
+                "{path} owns or mutates runtime control state through {forbidden}"
+            );
+        }
+    }
+}
+
+#[test]
+fn runtime_command_capacity_is_bounded() {
+    let (workspace, _) = load_matrix();
+    for (path, source) in production_sources(&workspace) {
+        if !path.starts_with("agent/runtime/") {
+            continue;
+        }
+        assert!(
+            !source.contains("mpsc::unbounded_channel"),
+            "{path} introduces an unbounded runtime command queue"
+        );
+    }
+    let control =
+        fs::read_to_string(workspace.join("crates/pig-core/src/agent/runtime/control.rs"))
+            .expect("runtime control source");
+    assert!(
+        control.contains("mpsc::channel(256)"),
+        "the runtime must have an explicit command capacity"
+    );
 }
