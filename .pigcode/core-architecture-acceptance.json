@@ -1,0 +1,314 @@
+{
+  "schema_version": 1,
+  "goal": ".pigcode/core-architecture-goal.md",
+  "references": {
+    "codex": {
+      "repository": "C:/Users/jin/Documents/Projects/agent-projects/codex",
+      "sha": "ca21fe65d18a9b6326759fb4263c65dfbb645aa5"
+    },
+    "kimi-code": {
+      "repository": "C:/Users/jin/Documents/Projects/agent-projects/kimi-code",
+      "sha": "285584e18844b0b03c5dd217d6e64f5ff5ba784c"
+    },
+    "deepseek-harness": {
+      "repository": "C:/Users/jin/Documents/Projects/agent-projects/deepseek-harness",
+      "sha": "ca33fd6843b205e279c7ccb6cb73a472c78f5760"
+    }
+  },
+  "module_inventory": {
+    "agent": {
+      "paths": ["crates/pig-core/src/agent.rs", "crates/pig-core/src/agent/"],
+      "acceptance": ["R01", "R02", "R03", "R04", "R05", "R06", "R16"],
+      "public_surface": ["agent"]
+    },
+    "api_usage.rs": {
+      "paths": ["crates/pig-core/src/api_usage.rs"],
+      "acceptance": ["R15", "R18"],
+      "public_surface": []
+    },
+    "bin": {
+      "paths": ["crates/pig-core/src/bin/"],
+      "acceptance": ["R06", "R10", "R18"],
+      "public_surface": ["pig-agent-worker", "pig-windows-sandbox"]
+    },
+    "config": {
+      "paths": ["crates/pig-core/src/config/"],
+      "acceptance": ["R07", "R09", "R14"],
+      "public_surface": ["config", "AppConfig"]
+    },
+    "credentials.rs": {
+      "paths": ["crates/pig-core/src/credentials.rs"],
+      "acceptance": ["R09", "R14", "R15"],
+      "public_surface": ["credentials", "AgentHandle.credentials"]
+    },
+    "files.rs": {
+      "paths": ["crates/pig-core/src/files.rs"],
+      "acceptance": ["R08", "R09", "R12"],
+      "public_surface": ["files"]
+    },
+    "fonts.rs": {
+      "paths": ["crates/pig-core/src/fonts.rs"],
+      "acceptance": ["R19"],
+      "public_surface": ["fonts"]
+    },
+    "git.rs": {
+      "paths": ["crates/pig-core/src/git.rs"],
+      "acceptance": ["R08", "R15", "R19"],
+      "public_surface": ["git"]
+    },
+    "hooks": {
+      "paths": ["crates/pig-core/src/hooks/"],
+      "acceptance": ["R13", "R16"],
+      "public_surface": ["hooks"]
+    },
+    "journal.rs": {
+      "paths": ["crates/pig-core/src/journal.rs"],
+      "acceptance": ["R05", "R15"],
+      "public_surface": ["EventJournal", "JournalReplayError", "JournalResyncReason", "JournalResyncRequired"]
+    },
+    "lib.rs": {
+      "paths": ["crates/pig-core/src/lib.rs"],
+      "acceptance": ["R17", "R18", "R19"],
+      "public_surface": ["AgentHandle", "spawn_agent", "spawn_agent_with_data_dir", "spawn_agent_with_data_dir_and_credentials", "net_test_full_turn", "windows_sandbox_helper_main"]
+    },
+    "mcp": {
+      "paths": ["crates/pig-core/src/mcp/"],
+      "acceptance": ["R08", "R13", "R16"],
+      "public_surface": ["mcp"]
+    },
+    "memory.rs": {
+      "paths": ["crates/pig-core/src/memory.rs"],
+      "acceptance": ["R11"],
+      "public_surface": ["memory"]
+    },
+    "model_io.rs": {
+      "paths": ["crates/pig-core/src/model_io.rs"],
+      "acceptance": ["R07", "R15"],
+      "public_surface": ["model_io"]
+    },
+    "models_registry.rs": {
+      "paths": ["crates/pig-core/src/models_registry.rs"],
+      "acceptance": ["R07", "R14"],
+      "public_surface": ["models_registry"]
+    },
+    "net_test.rs": {
+      "paths": ["crates/pig-core/src/net_test.rs"],
+      "acceptance": ["R19"],
+      "public_surface": ["net_test"]
+    },
+    "permissions.rs": {
+      "paths": ["crates/pig-core/src/permissions.rs"],
+      "acceptance": ["R09", "R16"],
+      "public_surface": ["permissions"]
+    },
+    "plugins": {
+      "paths": ["crates/pig-core/src/plugins/"],
+      "acceptance": ["R13", "R14", "R16"],
+      "public_surface": ["plugins"]
+    },
+    "prompt.rs": {
+      "paths": ["crates/pig-core/src/prompt.rs"],
+      "acceptance": ["R11", "R18"],
+      "public_surface": []
+    },
+    "rollout": {
+      "paths": ["crates/pig-core/src/rollout/"],
+      "acceptance": ["R03", "R11", "R18"],
+      "public_surface": ["rollout"]
+    },
+    "session": {
+      "paths": ["crates/pig-core/src/session/"],
+      "acceptance": ["R01", "R02", "R03", "R04", "R07", "R08", "R09", "R11", "R12", "R18"],
+      "public_surface": ["session"]
+    },
+    "store": {
+      "paths": ["crates/pig-core/src/store/"],
+      "acceptance": ["R03", "R04", "R14", "R15"],
+      "public_surface": ["store"]
+    },
+    "task": {
+      "paths": ["crates/pig-core/src/task/"],
+      "acceptance": ["R04", "R09", "R10", "R15"],
+      "public_surface": ["task"]
+    },
+    "tool": {
+      "paths": ["crates/pig-core/src/tool.rs", "crates/pig-core/src/tool/"],
+      "acceptance": ["R08", "R09", "R16"],
+      "public_surface": ["tool"]
+    },
+    "usage.rs": {
+      "paths": ["crates/pig-core/src/usage.rs"],
+      "acceptance": ["R15", "R18"],
+      "public_surface": ["usage"]
+    }
+  },
+  "acceptance_rows": [
+    {
+      "id": "R01",
+      "area": "Single Agent control authority",
+      "references": [{"project": "codex", "path": "codex-rs/core/src/agent/api.rs"}, {"project": "deepseek-harness", "path": "packages/subagent/subagent/src/manager.ts"}],
+      "existing_evidence": ["crates/pig-core/src/agent/runtime/control.rs", "crates/pig-core/tests/agent.rs", "crates/pig-core/tests/subagent.rs"],
+      "missing_proof": ["Remove competing AgentNode and Session control authority", "Prove atomic admission and settlement for every root/child/foreground/background/swarm path", "Delete legacy control and recovery branches"],
+      "status": "implemented"
+    },
+    {
+      "id": "R02",
+      "area": "Agent, Run, Attempt and ExecutionHandle semantics",
+      "references": [{"project": "deepseek-harness", "path": "packages/subagent/subagent/src/types.ts"}, {"project": "codex", "path": "codex-rs/core/src/agent/control/execution.rs"}],
+      "existing_evidence": ["crates/pig-core/src/agent/execution.rs", "crates/pig-core/src/agent/backend.rs", "crates/pig-core/src/agent/runtime/model.rs"],
+      "missing_proof": ["Separate resume, reconnect, detach and stop", "Introduce a long-lived execution handle", "Prove settlement and release independence with attempt fencing"],
+      "status": "implemented"
+    },
+    {
+      "id": "R03",
+      "area": "Durable control state, mailbox and conversation recovery",
+      "references": [{"project": "deepseek-harness", "path": "packages/session/session-persistence-jsonl/src/storage.ts"}, {"project": "deepseek-harness", "path": "packages/subagent/subagent/src/continuation-messages.ts"}],
+      "existing_evidence": ["crates/pig-core/src/store/runtime.rs", "crates/pig-core/src/session/tests/notifications.rs", "crates/pig-core/src/agent/execution_registry.rs", "crates/pig-core/tests/runtime_stress.rs"],
+      "missing_proof": ["Complete every required restart and torn-write case", "Prove exactly-once model-visible delivery", "Use one recovery authority instead of parallel JSONL catalog reconstruction"],
+      "status": "implemented"
+    },
+    {
+      "id": "R04",
+      "area": "Stop, delete, quiescence and bounded cleanup",
+      "references": [{"project": "codex", "path": "codex-rs/core/src/agent/control/runtime.rs"}, {"project": "deepseek-harness", "path": "packages/subagent/subagent-acp/src/run.ts"}, {"project": "kimi-code", "path": "packages/agent-core-v2/src/session/agentLifecycle/agentLifecycleService.ts"}],
+      "existing_evidence": ["crates/pig-core/src/session/subagent/lifecycle.rs", "crates/pig-core/src/session/runner/operations.rs", "crates/pig-core/tests/runtime_stress.rs"],
+      "missing_proof": ["Tie release to backend resource quiescence", "Persist pending deletion and retryable cleanup", "Pass ten repeated mixed stress runs without unbounded residue"],
+      "status": "implemented"
+    },
+    {
+      "id": "R05",
+      "area": "Control journal, projections and consistent resync",
+      "references": [{"project": "deepseek-harness", "path": "packages/api/gateway/src/client/journal-stream.ts"}, {"project": "kimi-code", "path": "packages/kap-server/src/transport/ws/v1/sessionEventBroadcaster.ts"}],
+      "existing_evidence": ["crates/pig-core/src/journal.rs", "crates/pig-core/src/agent/runtime/projection.rs", "src/conversation_projection.rs"],
+      "missing_proof": ["Connect production Catalog/task/UI/SDK projections", "Return and consume a consistent snapshot at an epoch/sequence cut", "Prove replay, duplicate, gap, reorder and stale-epoch behavior"],
+      "status": "implemented"
+    },
+    {
+      "id": "R06",
+      "area": "Real production cross-process backend",
+      "references": [{"project": "deepseek-harness", "path": "packages/subagent/subagent-dsh-sdk/src/run.ts"}, {"project": "kimi-code", "path": "packages/agent-core-v2/src/remote/client/remoteEnvironmentProvider.ts"}],
+      "existing_evidence": ["crates/pig-core/src/agent/ipc.rs", "crates/pig-core/src/bin/pig-agent-worker.rs", "crates/pig-core/tests/ipc.rs"],
+      "missing_proof": ["Register IPC in the production execution path", "Exercise real disconnect and root/worker restart", "Prove send/steer, duplicate delivery, stale attempts, explicit stop and actual release"],
+      "status": "implemented"
+    },
+    {
+      "id": "R07",
+      "area": "Provider and model capability contracts",
+      "references": [{"project": "kimi-code", "path": "packages/core/src/llm/"}, {"project": "codex", "path": "codex-rs/core/src/client.rs"}],
+      "existing_evidence": ["crates/pig-core/tests/provider.rs", "crates/pig-core/tests/provider_compat.rs", "crates/pig-core/tests/provider_reliability.rs", "crates/pig-core/tests/model_lookup.rs", "crates/pig-core/tests/model_io.rs"],
+      "missing_proof": ["Run one complete contract suite for every registered provider", "Prove cancellation, timeout, capability and retry classification", "Add a representative provider through registration only"],
+      "status": "implemented"
+    },
+    {
+      "id": "R08",
+      "area": "Tool, side-effect and unknown-outcome contracts",
+      "references": [{"project": "deepseek-harness", "path": "packages/core/tools/"}, {"project": "deepseek-harness", "path": "packages/subagent/subagent/src/out-of-process.ts"}],
+      "existing_evidence": ["crates/pig-core/tests/tools.rs", "crates/pig-core/tests/tooling.rs", "crates/pig-core/tests/tool_stream.rs", "crates/pig-core/tests/tool_semantics.rs", "crates/pig-core/tests/duplicate_tool_ids.rs"],
+      "missing_proof": ["Prove completed/failed/unknown outcomes for side-effect faults", "Prevent silent side-effect retries", "Add a representative tool through the public contract only"],
+      "status": "implemented"
+    },
+    {
+      "id": "R09",
+      "area": "Permissions, approval and sandbox enforcement",
+      "references": [{"project": "kimi-code", "path": "packages/agent-core-v2/src/agent/permissionPolicy/"}, {"project": "deepseek-harness", "path": "packages/sandbox/"}],
+      "existing_evidence": ["crates/pig-core/tests/permissions.rs", "crates/pig-core/tests/approval_modes.rs", "crates/pig-core/tests/access.rs", "crates/pig-core/tests/fs_access.rs", "crates/pig-core/tests/fs_outside.rs", "crates/pig-core/src/session/reviewer.rs"],
+      "missing_proof": ["Complete reviewer decisions and permission snapshots", "Prove executor enforcement and fail-closed behavior on all platforms", "Add a representative policy without core switches"],
+      "status": "implemented"
+    },
+    {
+      "id": "R10",
+      "area": "Shell task and subprocess lifecycle",
+      "references": [{"project": "codex", "path": "codex-rs/core/src/tasks/"}, {"project": "deepseek-harness", "path": "packages/subprocess/"}],
+      "existing_evidence": ["crates/pig-core/tests/background_tasks.rs", "crates/pig-core/src/task/tests.rs", "crates/pig-core/src/task/process.rs"],
+      "missing_proof": ["Separate shell task and AgentRun authority", "Prove bounded output and recoverable spill", "Prove process-tree quiescence and restart Lost semantics"],
+      "status": "implemented"
+    },
+    {
+      "id": "R11",
+      "area": "Context, compaction, cache identity and replay",
+      "references": [{"project": "kimi-code", "path": "packages/agent-core-v2/src/agent/fullCompaction/"}, {"project": "codex", "path": "codex-rs/core/src/compact_remote_v2.rs"}],
+      "existing_evidence": ["crates/pig-core/tests/compact.rs", "crates/pig-core/tests/context_stability.rs", "crates/pig-core/tests/prefix_cache/", "crates/pig-core/tests/context_overflow/"],
+      "missing_proof": ["Prove model-visible history and usage replay for every boundary", "Preserve prefix/cache identity", "Prove overflow recovery without duplicate side effects"],
+      "status": "implemented"
+    },
+    {
+      "id": "R12",
+      "area": "Media, attachments and model-visible inputs",
+      "references": [{"project": "kimi-code", "path": "packages/agent-core-v2/src/agent/media/"}],
+      "existing_evidence": ["crates/pig-core/tests/media.rs", "crates/pig-core/src/agent/records/tests/media.rs"],
+      "missing_proof": ["Prove type, size and capability validation for every accepted input", "Preserve attachment identity through fork/resume/replay", "Add media capabilities through declaration rather than control-state changes"],
+      "status": "implemented"
+    },
+    {
+      "id": "R13",
+      "area": "Plugin, MCP and SDK capability seams",
+      "references": [{"project": "kimi-code", "path": "packages/klient/src/"}, {"project": "deepseek-harness", "path": "packages/sdk/"}],
+      "existing_evidence": ["crates/pig-core/tests/plugin_sessions.rs", "crates/pig-core/tests/hooks.rs", "tests/App.plugin-sdk.test.tsx"],
+      "missing_proof": ["Version and scope every public capability contract", "Prove idempotent disposal and isolated replayable storage", "Remove side-channel Agent and notification authorities"],
+      "status": "implemented"
+    },
+    {
+      "id": "R14",
+      "area": "Configuration, credentials and persistence safety",
+      "references": [{"project": "deepseek-harness", "path": "packages/settings/"}, {"project": "kimi-code", "path": "packages/agent-core-v2/src/app/config/configService.ts"}],
+      "existing_evidence": ["crates/pig-core/tests/config.rs", "crates/pig-core/tests/config_providers.rs", "crates/pig-core/tests/config_seeding.rs", "crates/pig-core/src/credentials.rs"],
+      "missing_proof": ["Validate every durable boundary at the earliest point", "Prove atomic writes, scoped credentials and redaction", "Replace development formats without destructive user-data handling"],
+      "status": "implemented"
+    },
+    {
+      "id": "R15",
+      "area": "Structured errors, observability and bounded retention",
+      "references": [{"project": "deepseek-harness", "path": "packages/core/agent-loop/src/"}, {"project": "codex", "path": "codex-rs/protocol/src/error.rs"}],
+      "existing_evidence": ["crates/pig-core/src/model_io.rs", "crates/pig-core/src/usage.rs", "crates/pig-core/src/api_usage.rs", "crates/pig-core/src/journal.rs"],
+      "missing_proof": ["Propagate structured identities through all core errors", "Eliminate silent core failure paths", "Bound logs, queues, journals and retained history with retryable cleanup"],
+      "status": "implemented"
+    },
+    {
+      "id": "R16",
+      "area": "Representative extension exercises",
+      "references": [{"project": "deepseek-harness", "path": "packages/subagent/subagent/src/index.ts"}, {"project": "kimi-code", "path": "packages/agent-core-v2/src/features/"}],
+      "existing_evidence": ["crates/pig-core/tests/runtime_extensions.rs", "crates/pig-core/src/agent/backend.rs"],
+      "missing_proof": ["Cover provider, tool, backend, projection, mailbox kind, initiator, domain trigger and approval policy", "Require registration-only integration", "Run public contracts for cancellation, persistence, replay, quiescence, permission and projection behavior"],
+      "status": "implemented"
+    },
+    {
+      "id": "R17",
+      "area": "Automated architecture conformance gates",
+      "references": [{"project": "kimi-code", "path": "packages/agent-core-v2/test/environment/architectureBoundaries.test.ts"}, {"project": "deepseek-harness", "path": "scripts/"}],
+      "existing_evidence": [],
+      "missing_proof": ["Create executable dependency and ownership gates", "Reject dual control planes and backend/provider Session special cases", "Reject permission bypasses, unregistered projections, unbounded queues and ignored core errors in CI"],
+      "status": "unimplemented"
+    },
+    {
+      "id": "R18",
+      "area": "Crate host API and public lifecycle surface",
+      "references": [{"project": "codex", "path": "codex-rs/core/src/thread_manager.rs"}, {"project": "kimi-code", "path": "packages/agent-core-v2/src/session/"}],
+      "existing_evidence": ["crates/pig-core/src/lib.rs", "crates/pig-core/tests/sessions.rs", "crates/pig-core/tests/workspaces.rs"],
+      "missing_proof": ["Define explicit host-handle close and quiescence semantics", "Classify every public core interface in the acceptance matrix", "Prove spawn, shutdown, journal and credential ownership across restart"],
+      "status": "implemented"
+    },
+    {
+      "id": "R19",
+      "area": "Platform support and diagnostics",
+      "references": [{"project": "codex", "path": "codex-rs/utils/process/src/lib.rs"}, {"project": "kimi-code", "path": "packages/agent-core-v2/src/os/backends/"}],
+      "existing_evidence": ["crates/pig-core/src/git.rs", "crates/pig-core/src/fonts.rs", "crates/pig-core/src/net_test.rs", "crates/pig-core/tests/git_status.rs", "crates/pig-core/tests/git_queue.rs"],
+      "missing_proof": ["Keep diagnostics on production control and execution paths", "Prove platform process behavior without console or orphan leaks", "Classify support modules without creating an unreviewed peripheral tier"],
+      "status": "implemented"
+    }
+  ],
+  "final": {
+    "status": "unimplemented",
+    "commit": null,
+    "local_commands": {
+      "cargo check --all-targets": null,
+      "cargo test --workspace": null,
+      "nsh check && nsh test": null
+    },
+    "ci": {
+      "macos": null,
+      "windows": null,
+      "linux": null
+    },
+    "issue": "https://github.com/zhuwjin/pig-code-ts/issues/9"
+  }
+}
