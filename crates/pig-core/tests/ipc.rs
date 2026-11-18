@@ -113,7 +113,7 @@ async fn real_worker_completes_and_reconnects_after_parent_restart() {
     let parent = runtime(store.clone(), address);
     let unsupported = ipc_start_with_requirements(
         address,
-        "ipc-unsupported",
+        worker_identity("ipc-unsupported", 1),
         IpcRunSpec {
             config_path: Some(config_path.clone()),
             cwd: cwd.clone(),
@@ -136,7 +136,7 @@ async fn real_worker_completes_and_reconnects_after_parent_restart() {
         .expect("completed run registration");
     ipc_start(
         address,
-        &completed_run.run_id,
+        worker_identity(&completed_run.run_id, 1),
         IpcRunSpec {
             config_path: Some(config_path.clone()),
             cwd: cwd.clone(),
@@ -155,7 +155,7 @@ async fn real_worker_completes_and_reconnects_after_parent_restart() {
         terminal.text
     );
     assert!(completed_cursor > 0);
-    ipc_release(address, &completed_run.run_id, false)
+    ipc_release(address, &worker_identity(&completed_run.run_id, 1), false)
         .await
         .expect("release completed run");
     parent
@@ -211,7 +211,7 @@ async fn real_worker_completes_and_reconnects_after_parent_restart() {
         .expect("active run registration");
     ipc_start(
         address,
-        &active_run.run_id,
+        worker_identity(&active_run.run_id, 1),
         IpcRunSpec {
             config_path: Some(config_path),
             cwd,
@@ -277,7 +277,7 @@ async fn real_worker_completes_and_reconnects_after_parent_restart() {
         Err(RuntimeError::StaleAttempt { .. })
     ));
 
-    ipc_stop(address, &active_run.run_id)
+    ipc_stop(address, &worker_identity(&active_run.run_id, 1))
         .await
         .expect("stop reconnected run");
     active_cursor = worker_info.latest_sequence;
@@ -313,7 +313,7 @@ async fn real_worker_completes_and_reconnects_after_parent_restart() {
             .released_at_ms
             .is_some()
     );
-    ipc_release(address, &active_run.run_id, false)
+    ipc_release(address, &worker_identity(&active_run.run_id, 1), false)
         .await
         .expect("release stopped run");
     assert!(ipc_events(address, &active_run.run_id, 0).await.is_err());
@@ -986,5 +986,122 @@ async fn execution_handle_deduplicates_consumed_input_and_waits_for_queued_turn(
     );
     handle.release().await.expect("release queued run");
     worker.kill().await.expect("stop worker");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stale_execution_handle_cannot_control_or_release_a_reconnected_run() {
+    let (config_path, cwd, root) = crate::common::setup("ipc-stale-execution");
+    let (address, mut worker) = start_worker(&root.join("worker-state")).await;
+    let run_id = "ipc-stale-execution";
+    let mut first = IpcAgentExecutionHandle::start(
+        address,
+        worker_identity(run_id, 1),
+        IpcRunSpec {
+            config_path: Some(config_path),
+            cwd,
+            data_dir: root.join("worker-data"),
+            prompt: mock::SCENARIO_SLOW_TRIGGER.to_string(),
+        },
+    )
+    .await
+    .expect("start first attempt");
+    timeout(Duration::from_secs(10), async {
+        loop {
+            match first.next().await.expect("first attempt update") {
+                AgentExecutionUpdate::Output {
+                    event: pig_protocol::Event::ToolCallBegin { .. },
+                    ..
+                } => break,
+                AgentExecutionUpdate::Output { .. } => {}
+                AgentExecutionUpdate::Settled { .. } => panic!("settled before reconnect"),
+                AgentExecutionUpdate::Disconnected { detail, .. } => panic!("{detail}"),
+            }
+        }
+    })
+    .await
+    .expect("first attempt is running");
+    let mut second = IpcAgentExecutionHandle::reconnect(
+        address,
+        worker_identity(run_id, 2),
+        AgentExecutionCursor {
+            attempt: 1,
+            backend_epoch: "worker-restart-epoch-1".into(),
+            sequence: 0,
+        },
+    )
+    .await
+    .expect("second attempt owns the remote execution");
+
+    let stale_send = first
+        .send(AgentExecutionInput {
+            message_id: "stale-input".into(),
+            payload: serde_json::json!({"text": "must not be accepted"}),
+        })
+        .await
+        .expect_err("stale input must be rejected");
+    assert!(stale_send.to_string().contains("stale"));
+    let stale_stop = first
+        .stop(AgentExecutionStop::Graceful {
+            reason: "stale stop".into(),
+        })
+        .await
+        .expect_err("stale stop must be rejected");
+    assert!(stale_stop.to_string().contains("stale"));
+    let stale_release = first
+        .release()
+        .await
+        .expect_err("stale release must be rejected");
+    assert!(stale_release.to_string().contains("stale"));
+    assert!(
+        ipc_reconnect(address, run_id)
+            .await
+            .expect("remote remains active")
+            .terminal
+            .is_none()
+    );
+    second
+        .stop(AgentExecutionStop::Graceful {
+            reason: "current attempt stop".into(),
+        })
+        .await
+        .expect("current attempt can stop");
+    let (_, result) = collect_handle_events(&mut second).await;
+    assert_eq!(result.status, pig_protocol::AgentRunStatus::Cancelled);
+    let (_, first_result) = collect_handle_events(&mut first).await;
+    assert_eq!(first_result.status, pig_protocol::AgentRunStatus::Cancelled);
+    worker.kill().await.expect("restart after reconnect");
+    let (_, mut restarted) = start_worker_at(&root.join("worker-state"), address).await;
+    assert!(
+        first
+            .release()
+            .await
+            .expect_err("release must restore and authorize the recorded owner")
+            .to_string()
+            .contains("stale")
+    );
+    let mut third = IpcAgentExecutionHandle::reconnect(
+        address,
+        worker_identity(run_id, 3),
+        AgentExecutionCursor {
+            attempt: 2,
+            backend_epoch: "worker-restart-epoch-2".into(),
+            sequence: 0,
+        },
+    )
+    .await
+    .expect("persisted attempt survives worker restart");
+    let (_, recovered) = collect_handle_events(&mut third).await;
+    assert_eq!(recovered.status, pig_protocol::AgentRunStatus::Cancelled);
+    assert!(
+        second
+            .release()
+            .await
+            .expect_err("previous owner must become stale")
+            .to_string()
+            .contains("stale")
+    );
+    third.release().await.expect("latest attempt release");
+    restarted.kill().await.expect("stop restarted worker");
     let _ = std::fs::remove_dir_all(root);
 }

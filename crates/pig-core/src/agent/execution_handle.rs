@@ -5,7 +5,7 @@ use pig_protocol::Event;
 
 use super::{AgentBackendError, AgentBackendResult, AgentExecutionCapability, AgentRunIdentity};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AgentExecutionIdentity {
     pub run: AgentRunIdentity,
     pub attempt: u64,

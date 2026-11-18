@@ -24,7 +24,7 @@ pub enum AgentExecutionCapability {
     Worktree,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AgentRunIdentity {
     pub session_id: String,
     pub agent_id: String,
