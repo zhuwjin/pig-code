@@ -16,8 +16,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install NSH
-        run: cargo install nsh-cli --version 0.6.0 --locked
+      - name: Install NSH (macOS and Linux)
+        if: runner.os != 'Windows'
+        env:
+          NSH_VERSION: v0.6.0
+        run: |
+          curl -fsSL https://nsh.dev/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Install NSH (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          NSH_VERSION: v0.6.0
+        run: |
+          irm https://nsh.dev/install.ps1 | iex
+          Add-Content -Path $env:GITHUB_PATH -Value "$env:LOCALAPPDATA\nsh\bin"
+      - name: Verify NSH installation
+        run: nsh --version
       - name: Install Linux test fonts
         if: runner.os == 'Linux'
         run: |
