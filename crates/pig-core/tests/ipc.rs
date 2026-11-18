@@ -3,11 +3,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use pig_core::agent::ipc::{
-    IpcAgentBackendFactory, IpcCapability, IpcEventBatch, IpcRunResult, IpcRunSpec, ipc_events,
-    ipc_reconnect, ipc_release, ipc_start, ipc_start_with_requirements, ipc_stop,
+    IpcAgentBackendFactory, IpcAgentExecutionHandle, IpcCapability, IpcEventBatch, IpcRunResult,
+    IpcRunSpec, ipc_events, ipc_reconnect, ipc_release, ipc_start, ipc_start_with_requirements,
+    ipc_stop,
 };
 use pig_core::agent::runtime::{
     AgentInitiator, AgentRuntime, RuntimeConnectionState, RuntimeError, RuntimeRunStatus, StartRun,
+};
+use pig_core::agent::{
+    AgentExecutionHandle, AgentExecutionIdentity, AgentExecutionStop, AgentExecutionUpdate,
+    AgentRunIdentity,
 };
 use pig_core::store::Store;
 use pig_provider::mock;
@@ -394,6 +399,101 @@ async fn backend_registry_executes_real_ipc_and_releases_idempotently() {
             .is_some()
     );
     parent.shutdown().await.expect("shutdown");
+    worker.kill().await.expect("stop worker");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn execution_handle_reconnects_stops_and_releases_real_worker() {
+    let (config_path, cwd, root) = crate::common::setup("ipc-execution-handle");
+    let (address, mut worker) = start_worker().await;
+    let run_id = "ipc-handle-run";
+    let identity = |attempt: u64| AgentExecutionIdentity {
+        run: AgentRunIdentity {
+            session_id: "ipc-handle-parent".into(),
+            agent_id: "ipc-handle-agent".into(),
+            run_id: run_id.into(),
+        },
+        attempt,
+        backend_epoch: format!("ipc-handle-epoch-{attempt}"),
+    };
+    let mut handle = IpcAgentExecutionHandle::start(
+        address,
+        identity(1),
+        IpcRunSpec {
+            config_path: Some(config_path),
+            cwd,
+            data_dir: root.join("worker-handle"),
+            prompt: mock::SCENARIO_SLOW_TRIGGER.to_string(),
+        },
+    )
+    .await
+    .expect("start IPC handle");
+    timeout(Duration::from_secs(10), async {
+        loop {
+            match handle.next().await.expect("first handle update") {
+                AgentExecutionUpdate::Output { .. } => break,
+                AgentExecutionUpdate::Disconnected { detail, .. } => {
+                    panic!("unexpected disconnect: {detail}")
+                }
+                AgentExecutionUpdate::Settled { .. } => {
+                    panic!("IPC handle settled before detach")
+                }
+            }
+        }
+    })
+    .await
+    .expect("first handle output");
+    let detached = handle.detach().await.expect("detach active handle");
+    let remote = ipc_reconnect(address, run_id)
+        .await
+        .expect("remote remains registered");
+    assert!(remote.terminal.is_none());
+
+    let mut reconnected =
+        IpcAgentExecutionHandle::reconnect(address, identity(2), detached.cursor.clone())
+            .await
+            .expect("reconnect with a new attempt");
+    assert_eq!(reconnected.identity().attempt, 2);
+    assert!(matches!(
+        reconnected
+            .stop(AgentExecutionStop::Force {
+                reason: "unsupported force".into(),
+            })
+            .await,
+        Err(pig_core::agent::AgentBackendError::UnsupportedCapability {
+            capability: pig_core::agent::AgentExecutionCapability::ForceStop,
+            ..
+        })
+    ));
+    reconnected
+        .stop(AgentExecutionStop::Graceful {
+            reason: "test stop".into(),
+        })
+        .await
+        .expect("graceful remote stop");
+    let (terminal_cursor, result) = timeout(Duration::from_secs(30), async {
+        loop {
+            match reconnected.next().await.expect("reconnected update") {
+                AgentExecutionUpdate::Output { .. } => {}
+                AgentExecutionUpdate::Disconnected { detail, .. } => {
+                    panic!("unexpected reconnect loss: {detail}")
+                }
+                AgentExecutionUpdate::Settled { cursor, result } => {
+                    break (cursor, result);
+                }
+            }
+        }
+    })
+    .await
+    .expect("remote stop settlement");
+    assert_eq!(result.status, pig_protocol::AgentRunStatus::Cancelled);
+    let released = reconnected.release().await.expect("release remote worker");
+    assert_eq!(released.cursor, terminal_cursor);
+    assert_eq!(released.identity, identity(2));
+    let repeated = reconnected.release().await.expect("idempotent release");
+    assert_eq!(repeated, released);
+    assert!(ipc_events(address, run_id, 0).await.is_err());
     worker.kill().await.expect("stop worker");
     let _ = std::fs::remove_dir_all(root);
 }

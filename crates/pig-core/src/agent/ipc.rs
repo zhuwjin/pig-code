@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -12,6 +12,11 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 
 use super::runtime::new_runtime_id;
+use super::{
+    AgentBackendError, AgentBackendResult, AgentExecutionCapability, AgentExecutionCursor,
+    AgentExecutionHandle, AgentExecutionIdentity, AgentExecutionInput, AgentExecutionReceipt,
+    AgentExecutionRelease, AgentExecutionStop, AgentExecutionUpdate,
+};
 use crate::AgentHandle;
 
 pub const IPC_PROTOCOL_VERSION: u32 = 1;
@@ -616,6 +621,285 @@ pub async fn ipc_release(address: SocketAddr, run_id: &str, force: bool) -> Resu
     )
     .await
     .map(|_| ())
+}
+
+fn ipc_handle_result(result: IpcRunResult) -> Result<AgentBackendResult, AgentBackendError> {
+    let status = match result.status.as_str() {
+        "completed" => pig_protocol::AgentRunStatus::Completed,
+        "cancelled" => pig_protocol::AgentRunStatus::Cancelled,
+        "failed" => pig_protocol::AgentRunStatus::Failed,
+        other => {
+            return Err(AgentBackendError::Failed(format!(
+                "IPC returned unknown run status {other}"
+            )));
+        }
+    };
+    Ok(AgentBackendResult {
+        status,
+        stop_reason: result.stop_reason,
+        text: result.text,
+        turns: result.turns,
+        usage: result.usage,
+    })
+}
+
+pub struct IpcAgentExecutionHandle {
+    address: SocketAddr,
+    identity: AgentExecutionIdentity,
+    cursor: AgentExecutionCursor,
+    pending: VecDeque<IpcRunEvent>,
+    terminal: Option<(AgentExecutionCursor, AgentBackendResult)>,
+    detached: Option<AgentExecutionReceipt>,
+    released: Option<AgentExecutionRelease>,
+    stop_requested: bool,
+}
+
+impl IpcAgentExecutionHandle {
+    pub async fn start(
+        address: SocketAddr,
+        identity: AgentExecutionIdentity,
+        spec: IpcRunSpec,
+    ) -> Result<Self, AgentBackendError> {
+        ipc_start_with_requirements(
+            address,
+            &identity.run.run_id,
+            spec,
+            [
+                IpcCapability::Start,
+                IpcCapability::Send,
+                IpcCapability::Stop,
+                IpcCapability::Events,
+                IpcCapability::Reconnect,
+            ]
+            .into_iter()
+            .collect(),
+        )
+        .await
+        .map_err(AgentBackendError::Disconnected)?;
+        Ok(Self::new(address, identity, 0))
+    }
+
+    pub async fn reconnect(
+        address: SocketAddr,
+        identity: AgentExecutionIdentity,
+        cursor: AgentExecutionCursor,
+    ) -> Result<Self, AgentBackendError> {
+        ipc_reconnect(address, &identity.run.run_id)
+            .await
+            .map_err(AgentBackendError::Disconnected)?;
+        Ok(Self::new(address, identity, cursor.sequence))
+    }
+
+    fn new(address: SocketAddr, identity: AgentExecutionIdentity, sequence: u64) -> Self {
+        let cursor = AgentExecutionCursor {
+            attempt: identity.attempt,
+            backend_epoch: identity.backend_epoch.clone(),
+            sequence,
+        };
+        Self {
+            address,
+            identity,
+            cursor,
+            pending: VecDeque::new(),
+            terminal: None,
+            detached: None,
+            released: None,
+            stop_requested: false,
+        }
+    }
+
+    fn cursor(&self, sequence: u64) -> AgentExecutionCursor {
+        AgentExecutionCursor {
+            attempt: self.identity.attempt,
+            backend_epoch: self.identity.backend_epoch.clone(),
+            sequence,
+        }
+    }
+
+    fn receipt(&self) -> AgentExecutionReceipt {
+        AgentExecutionReceipt {
+            cursor: self.cursor.clone(),
+        }
+    }
+
+    fn check_active(&self) -> Result<(), AgentBackendError> {
+        if self.detached.is_some() {
+            return Err(AgentBackendError::Disconnected(
+                "IPC execution is detached".to_string(),
+            ));
+        }
+        if self.terminal.is_some() {
+            return Err(AgentBackendError::InvalidContext(
+                "IPC execution has already settled".to_string(),
+            ));
+        }
+        if self.stop_requested {
+            return Err(AgentBackendError::InvalidContext(
+                "IPC execution is stopping".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl AgentExecutionHandle for IpcAgentExecutionHandle {
+    fn identity(&self) -> &AgentExecutionIdentity {
+        &self.identity
+    }
+
+    fn capabilities(&self) -> std::collections::BTreeSet<AgentExecutionCapability> {
+        [
+            AgentExecutionCapability::Background,
+            AgentExecutionCapability::Steer,
+            AgentExecutionCapability::Reconnect,
+            AgentExecutionCapability::Stop,
+        ]
+        .into_iter()
+        .collect()
+    }
+
+    fn send(
+        &mut self,
+        input: AgentExecutionInput,
+    ) -> BoxFuture<'_, Result<AgentExecutionReceipt, AgentBackendError>> {
+        Box::pin(async move {
+            self.check_active()?;
+            let text = input
+                .payload
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    AgentBackendError::InvalidContext(
+                        "IPC execution input requires a text field".to_string(),
+                    )
+                })?
+                .to_string();
+            ipc_send(self.address, &self.identity.run.run_id, text)
+                .await
+                .map_err(AgentBackendError::Disconnected)?;
+            Ok(self.receipt())
+        })
+    }
+
+    fn stop(
+        &mut self,
+        stop: AgentExecutionStop,
+    ) -> BoxFuture<'_, Result<AgentExecutionReceipt, AgentBackendError>> {
+        Box::pin(async move {
+            self.check_active()?;
+            match stop {
+                AgentExecutionStop::Graceful { .. } => {}
+                AgentExecutionStop::Force { .. } => {
+                    return Err(AgentBackendError::UnsupportedCapability {
+                        backend_id: "ipc".to_string(),
+                        capability: AgentExecutionCapability::ForceStop,
+                    });
+                }
+            }
+            ipc_stop(self.address, &self.identity.run.run_id)
+                .await
+                .map_err(AgentBackendError::Disconnected)?;
+            self.stop_requested = true;
+            Ok(self.receipt())
+        })
+    }
+
+    fn detach(&mut self) -> BoxFuture<'_, Result<AgentExecutionReceipt, AgentBackendError>> {
+        Box::pin(async move {
+            if let Some(receipt) = &self.detached {
+                return Ok(receipt.clone());
+            }
+            let receipt = self.receipt();
+            self.detached = Some(receipt.clone());
+            Ok(receipt)
+        })
+    }
+
+    fn next(&mut self) -> BoxFuture<'_, Result<AgentExecutionUpdate, AgentBackendError>> {
+        Box::pin(async move {
+            if self.detached.is_some() {
+                return Err(AgentBackendError::Disconnected(
+                    "IPC execution is detached".to_string(),
+                ));
+            }
+            loop {
+                if let Some(output) = self.pending.pop_front() {
+                    self.cursor = self.cursor(output.sequence);
+                    return Ok(AgentExecutionUpdate::Output {
+                        sequence: output.sequence,
+                        event: output.event,
+                    });
+                }
+                if let Some((cursor, result)) = &self.terminal {
+                    self.cursor = cursor.clone();
+                    return Ok(AgentExecutionUpdate::Settled {
+                        cursor: cursor.clone(),
+                        result: result.clone(),
+                    });
+                }
+                let batch = match ipc_events(
+                    self.address,
+                    &self.identity.run.run_id,
+                    self.cursor.sequence,
+                )
+                .await
+                {
+                    Ok(batch) => batch,
+                    Err(detail) => {
+                        return Ok(AgentExecutionUpdate::Disconnected {
+                            cursor: self.cursor.clone(),
+                            detail,
+                        });
+                    }
+                };
+                self.pending.extend(batch.events);
+                if let Some(terminal) = batch.terminal {
+                    let cursor = self.cursor(batch.latest_sequence);
+                    self.terminal = Some((cursor, ipc_handle_result(terminal)?));
+                }
+                if self.pending.is_empty() && self.terminal.is_none() {
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
+            }
+        })
+    }
+
+    fn release(&mut self) -> BoxFuture<'_, Result<AgentExecutionRelease, AgentBackendError>> {
+        Box::pin(async move {
+            if let Some(released) = &self.released {
+                return Ok(released.clone());
+            }
+            if self.terminal.is_none() {
+                let info = ipc_reconnect(self.address, &self.identity.run.run_id)
+                    .await
+                    .map_err(AgentBackendError::Disconnected)?;
+                let terminal = info.terminal.ok_or_else(|| {
+                    AgentBackendError::InvalidContext(
+                        "IPC execution must settle before release".to_string(),
+                    )
+                })?;
+                let cursor = self.cursor(info.latest_sequence);
+                self.terminal = Some((cursor, ipc_handle_result(terminal)?));
+                self.pending.clear();
+            }
+            ipc_release(self.address, &self.identity.run.run_id, false)
+                .await
+                .map_err(AgentBackendError::Disconnected)?;
+            let cursor = self
+                .terminal
+                .as_ref()
+                .map(|(cursor, _)| cursor.clone())
+                .unwrap_or_else(|| self.cursor.clone());
+            self.cursor = cursor.clone();
+            let released = AgentExecutionRelease {
+                identity: self.identity.clone(),
+                cursor,
+                released_at_ms: crate::model_io::now_ms(),
+            };
+            self.released = Some(released.clone());
+            Ok(released)
+        })
+    }
 }
 
 pub struct IpcAgentBackendFactory {

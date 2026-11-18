@@ -15,6 +15,7 @@ pub enum AgentExecutionCapability {
     Resume,
     Reconnect,
     Stop,
+    ForceStop,
     StructuredOutput,
     Approval,
     Media,
