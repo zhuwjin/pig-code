@@ -411,13 +411,22 @@ impl super::AgentRuntime {
                         )
                     })
                     .await;
-                self.executions.finish(&run_id);
-                let attempt = result?;
-                Ok(AgentExecutionRelease {
-                    identity: release.identity,
-                    cursor: release.cursor,
-                    released_at_ms: attempt.released_at_ms.expect("released attempt timestamp"),
-                })
+                match result {
+                    Ok(attempt) => {
+                        self.executions.finish(&run_id);
+                        Ok(AgentExecutionRelease {
+                            identity: release.identity,
+                            cursor: release.cursor,
+                            released_at_ms: attempt
+                                .released_at_ms
+                                .expect("released attempt timestamp"),
+                        })
+                    }
+                    Err(error) => {
+                        self.put_execution(&run_id, entry).await?;
+                        Err(error)
+                    }
+                }
             }
             Err(error) => {
                 self.put_execution(&run_id, entry).await?;
@@ -477,6 +486,7 @@ mod tests {
     struct HandleState {
         stopped: bool,
         releases: usize,
+        fail_release: bool,
     }
 
     struct TestHandle {
@@ -582,7 +592,15 @@ mod tests {
                 if let Some(release) = &self.released {
                     return Ok(release.clone());
                 }
-                self.lock().releases += 1;
+                {
+                    let mut state = self.lock();
+                    state.releases += 1;
+                    if state.fail_release {
+                        return Err(AgentBackendError::Failed(
+                            "injected backend release failure".into(),
+                        ));
+                    }
+                }
                 let release = AgentExecutionRelease {
                     identity: self.identity.clone(),
                     cursor: AgentExecutionCursor {
@@ -608,6 +626,149 @@ mod tests {
             attempt,
             backend_epoch: epoch.into(),
         }
+    }
+
+    async fn completed_execution(
+        test_name: &str,
+    ) -> (
+        super::super::AgentRuntime,
+        Arc<Mutex<Store>>,
+        Arc<Mutex<HandleState>>,
+        String,
+        std::path::PathBuf,
+    ) {
+        let root = std::env::temp_dir().join(crate::agent::runtime::new_runtime_id(test_name));
+        let store = Arc::new(Mutex::new(Store::open(&root).expect("runtime store")));
+        let backends = Arc::new(AgentBackendRegistry::default());
+        backends
+            .register("remote", ControlOnlyFactory)
+            .expect("register remote");
+        let runtime = super::super::AgentRuntime::spawn_root_with_backends(
+            "runtime-execution".into(),
+            store.clone(),
+            backends,
+        )
+        .expect("runtime");
+        let run_id = "run-release-failure".to_string();
+        let (_, attempt) = runtime
+            .start_run(StartRun {
+                run_id: Some(run_id.clone()),
+                agent_id: "runtime-execution".into(),
+                backend_id: "remote".into(),
+                required_capabilities: [
+                    AgentExecutionCapability::Reconnect,
+                    AgentExecutionCapability::Stop,
+                    AgentExecutionCapability::Detach,
+                ]
+                .into_iter()
+                .collect(),
+                initiator: AgentInitiator::System,
+                idempotency_key: Some(format!("{test_name}:run")),
+                causation_id: None,
+                correlation_id: None,
+                queued: false,
+                watchdog: Default::default(),
+            })
+            .await
+            .expect("start controlled run");
+        let state = Arc::new(Mutex::new(HandleState::default()));
+        let execution = identity(&run_id, attempt.attempt, &attempt.backend_epoch);
+        runtime
+            .register_execution(Box::new(TestHandle::new(execution, state.clone())))
+            .await
+            .expect("register execution");
+        let update = runtime
+            .next_execution(run_id.clone())
+            .await
+            .expect("settle execution");
+        assert!(matches!(
+            update,
+            AgentExecutionUpdate::Settled { result, .. }
+                if result.status == pig_protocol::AgentRunStatus::Completed
+        ));
+        (runtime, store, state, run_id, root)
+    }
+
+    #[tokio::test]
+    async fn backend_release_failure_keeps_the_execution_available_for_retry() {
+        let (runtime, _store, state, run_id, root) =
+            completed_execution("backend-release-failure").await;
+        state.lock().expect("state").fail_release = true;
+        let error = runtime
+            .release_execution_handle(run_id.clone())
+            .await
+            .expect_err("inject backend release failure");
+        assert!(
+            error
+                .to_string()
+                .contains("injected backend release failure")
+        );
+        assert_eq!(runtime.execution_count().await, 1);
+        assert!(
+            runtime.snapshot().await.expect("snapshot").attempts[0]
+                .released_at_ms
+                .is_none()
+        );
+        state.lock().expect("state").fail_release = false;
+        let released = runtime
+            .release_execution_handle(run_id.clone())
+            .await
+            .expect("retry backend release");
+        assert_eq!(state.lock().expect("state").releases, 2);
+        let repeated = runtime
+            .release_execution_handle(run_id)
+            .await
+            .expect("idempotent release");
+        assert_eq!(repeated, released);
+        runtime.shutdown().await.expect("shutdown");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn control_fact_failure_after_release_keeps_an_idempotent_retry_record() {
+        let (runtime, _store, state, run_id, root) =
+            completed_execution("release-control-fact-failure").await;
+        let faults = rusqlite::Connection::open(root.join("store.sqlite")).expect("fault database");
+        faults
+            .execute(
+                "CREATE TRIGGER fail_execution_release
+                 BEFORE UPDATE ON runtime_attempts
+                 WHEN NEW.released_at_ms IS NOT NULL
+                 BEGIN SELECT RAISE(FAIL, 'injected release control fact failure'); END;",
+                [],
+            )
+            .expect("inject control fact failure");
+        let error = runtime
+            .release_execution_handle(run_id.clone())
+            .await
+            .expect_err("release fact must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("injected release control fact failure")
+        );
+        assert_eq!(runtime.execution_count().await, 1);
+        assert!(
+            runtime.snapshot().await.expect("snapshot").attempts[0]
+                .released_at_ms
+                .is_none()
+        );
+        faults
+            .execute("DROP TRIGGER fail_execution_release", [])
+            .expect("remove failure injection");
+        let released = runtime
+            .release_execution_handle(run_id.clone())
+            .await
+            .expect("retry control fact commit");
+        assert_eq!(state.lock().expect("state").releases, 1);
+        assert_eq!(runtime.execution_count().await, 0);
+        let repeated = runtime
+            .release_execution_handle(run_id)
+            .await
+            .expect("idempotent committed release");
+        assert_eq!(repeated, released);
+        runtime.shutdown().await.expect("shutdown");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]

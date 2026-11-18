@@ -188,7 +188,7 @@
       "area": "Real production cross-process backend",
       "references": [{"project": "deepseek-harness", "path": "packages/subagent/subagent-dsh-sdk/src/run.ts"}, {"project": "kimi-code", "path": "packages/agent-core-v2/src/remote/client/remoteEnvironmentProvider.ts"}],
       "existing_evidence": ["crates/pig-core/src/agent/ipc.rs", "crates/pig-core/src/agent/backend.rs", "crates/pig-core/src/bin/pig-agent-worker.rs", "crates/pig-core/tests/ipc.rs"],
-      "missing_proof": ["Exercise backend journal/control-fact failure injection through the Runtime execution path"],
+      "missing_proof": [],
       "status": "tested"
     },
     {
