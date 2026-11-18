@@ -76,6 +76,10 @@ fn steer_items(events: &[Event]) -> Vec<pig_protocol::QueueItem> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn steer_accepted_then_falls_back_on_interrupt() {
+    if !common::native_sandbox_usable() {
+        common::assert_native_sandbox_rejection().await;
+        return;
+    }
     let (config_path, cwd, data_dir) = setup("queue-steer-fallback");
     let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir);
     let sid = new_session(&agent, cwd).await;
@@ -398,6 +402,10 @@ async fn cancel_and_reorder_manage_queue_lane() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lane_moves_reorder_and_steer_send_now() {
+    if !common::native_sandbox_usable() {
+        common::assert_native_sandbox_rejection().await;
+        return;
+    }
     let (config_path, cwd, data_dir) = setup("queue-lane-moves");
     let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir);
     let sid = new_session(&agent, cwd).await;

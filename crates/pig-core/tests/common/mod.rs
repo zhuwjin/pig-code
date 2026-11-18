@@ -45,6 +45,48 @@ fn test_dir(name: &str) -> PathBuf {
 }
 
 #[allow(dead_code)]
+pub fn native_sandbox_usable() -> bool {
+    #[cfg(windows)]
+    {
+        return pig_core::task::sandbox_readiness().usable();
+    }
+    #[cfg(not(windows))]
+    true
+}
+
+#[allow(dead_code)]
+pub fn native_sandbox_refusal(output: &str) -> bool {
+    output.contains("process security environment")
+        || output.contains("cannot be sandboxed")
+        || output.contains("sandbox helper")
+}
+
+#[allow(dead_code)]
+pub async fn assert_native_sandbox_rejection() {
+    let (config_path, cwd, data_dir) = setup("native-sandbox-rejection");
+    let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir);
+    let session_id = new_session(&agent, cwd).await;
+    agent
+        .ops
+        .send(Op::SendMessage {
+            session_id,
+            content: mock::SCENARIO_SLOW_TRIGGER.to_string(),
+            files: vec![],
+            images: vec![],
+            permissions: pig_protocol::ExecMode::Auto.permissions(),
+            delivery: pig_protocol::MessageDelivery::Queue,
+        })
+        .await
+        .expect("send sandbox probe");
+    recv_until(&agent.events, Duration::from_secs(30), |event| {
+        matches!(event, Event::ToolCallEnd { output, .. } if native_sandbox_refusal(output))
+    })
+    .await;
+    assert!(!native_sandbox_usable());
+    agent.shutdown();
+}
+
+#[allow(dead_code)]
 pub fn outside_dir(name: &str) -> PathBuf {
     let home = std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))

@@ -769,6 +769,10 @@ impl TcpProxy {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn execution_handle_steers_and_reconnects_after_a_real_transport_disconnect() {
+    if !crate::common::native_sandbox_usable() {
+        crate::common::assert_native_sandbox_rejection().await;
+        return;
+    }
     let (config_path, cwd, root) = crate::common::setup("ipc-transport-disconnect");
     let (worker_address, mut worker) = start_worker(&root.join("worker-state")).await;
     let proxy_address = self::worker_address();
@@ -1000,6 +1004,10 @@ async fn execution_handle_deduplicates_consumed_input_and_waits_for_queued_turn(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stale_execution_handle_cannot_control_or_release_a_reconnected_run() {
+    if !crate::common::native_sandbox_usable() {
+        crate::common::assert_native_sandbox_rejection().await;
+        return;
+    }
     let (config_path, cwd, root) = crate::common::setup("ipc-stale-execution");
     let (address, mut worker) = start_worker(&root.join("worker-state")).await;
     let run_id = "ipc-stale-execution";
@@ -1253,6 +1261,10 @@ async fn lost_send_response_is_reconciled_without_replaying_the_input() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn worker_crash_resumes_a_durable_pending_input_in_a_new_run() {
+    if !crate::common::native_sandbox_usable() {
+        crate::common::assert_native_sandbox_rejection().await;
+        return;
+    }
     let (config_path, cwd, root) = crate::common::setup("ipc-crash-pending-input");
     let state = root.join("worker-state");
     let data_dir = root.join("worker-data");
