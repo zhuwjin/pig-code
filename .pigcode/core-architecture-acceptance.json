@@ -156,7 +156,7 @@
       "area": "Agent, Run, Attempt and ExecutionHandle semantics",
       "references": [{"project": "deepseek-harness", "path": "packages/subagent/subagent/src/types.ts"}, {"project": "codex", "path": "codex-rs/core/src/agent/control/execution.rs"}],
       "existing_evidence": ["crates/pig-core/src/agent/execution.rs", "crates/pig-core/src/agent/backend.rs", "crates/pig-core/src/agent/execution_handle.rs", "crates/pig-core/src/agent/ipc.rs", "crates/pig-core/tests/ipc.rs", "crates/pig-core/src/agent/runtime/model.rs"],
-      "missing_proof": ["Separate resume, reconnect, detach and stop in every production control path", "Migrate LocalBackend and AgentBackendRegistry execution paths to the long-lived handle; the real IPC handle is implemented", "Prove settlement and release independence with attempt fencing"],
+      "missing_proof": ["Separate resume, reconnect, detach and stop in every production control path", "Migrate LocalBackend and replace legacy execute-only calls with long-lived handles; Registry.start and real IPC are covered", "Prove settlement and release independence with attempt fencing"],
       "status": "implemented"
     },
     {
@@ -187,7 +187,7 @@
       "id": "R06",
       "area": "Real production cross-process backend",
       "references": [{"project": "deepseek-harness", "path": "packages/subagent/subagent-dsh-sdk/src/run.ts"}, {"project": "kimi-code", "path": "packages/agent-core-v2/src/remote/client/remoteEnvironmentProvider.ts"}],
-      "existing_evidence": ["crates/pig-core/src/agent/ipc.rs", "crates/pig-core/src/bin/pig-agent-worker.rs", "crates/pig-core/tests/ipc.rs"],
+      "existing_evidence": ["crates/pig-core/src/agent/ipc.rs", "crates/pig-core/src/agent/backend.rs", "crates/pig-core/src/bin/pig-agent-worker.rs", "crates/pig-core/tests/ipc.rs"],
       "missing_proof": ["Register IPC in the production execution path", "Exercise real transport disconnect and worker process restart; parent restart is already covered", "Prove send/steer, duplicate delivery and stale attempts through the production handle"],
       "status": "implemented"
     },

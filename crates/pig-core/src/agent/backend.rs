@@ -4,7 +4,11 @@ use std::sync::{Arc, RwLock};
 
 use futures_util::future::BoxFuture;
 
-use super::{AgentExecutionBackend, AgentExecutionCapability, AgentExecutionRequest};
+use super::{
+    AgentExecutionBackend, AgentExecutionCapability, AgentExecutionHandle, AgentExecutionInput,
+    AgentExecutionReceipt, AgentExecutionRelease, AgentExecutionRequest, AgentExecutionStop,
+    AgentExecutionUpdate,
+};
 use crate::session::AgentRunResult;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -117,6 +121,53 @@ impl<F: AgentBackendFactory> ErasedAgentBackendFactory for TypedAgentBackendFact
             }
         };
         self.0.create(context)
+    }
+}
+
+struct ReservedAgentExecutionHandle {
+    inner: Box<dyn AgentExecutionHandle>,
+    permit: Option<super::AgentRunPermit>,
+}
+
+impl AgentExecutionHandle for ReservedAgentExecutionHandle {
+    fn identity(&self) -> &super::AgentExecutionIdentity {
+        self.inner.identity()
+    }
+
+    fn capabilities(&self) -> BTreeSet<AgentExecutionCapability> {
+        self.inner.capabilities()
+    }
+
+    fn send(
+        &mut self,
+        input: AgentExecutionInput,
+    ) -> BoxFuture<'_, Result<AgentExecutionReceipt, AgentBackendError>> {
+        self.inner.send(input)
+    }
+
+    fn stop(
+        &mut self,
+        stop: AgentExecutionStop,
+    ) -> BoxFuture<'_, Result<AgentExecutionReceipt, AgentBackendError>> {
+        self.inner.stop(stop)
+    }
+
+    fn detach(&mut self) -> BoxFuture<'_, Result<AgentExecutionReceipt, AgentBackendError>> {
+        self.inner.detach()
+    }
+
+    fn next(&mut self) -> BoxFuture<'_, Result<AgentExecutionUpdate, AgentBackendError>> {
+        self.inner.next()
+    }
+
+    fn release(&mut self) -> BoxFuture<'_, Result<AgentExecutionRelease, AgentBackendError>> {
+        Box::pin(async move {
+            let result = self.inner.release().await;
+            if result.is_ok() {
+                self.permit.take();
+            }
+            result
+        })
     }
 }
 
@@ -233,6 +284,41 @@ impl AgentBackendRegistry {
             .await
     }
 
+    pub async fn start<C: Send + 'static>(
+        &self,
+        backend_id: &str,
+        context: C,
+        request: AgentExecutionRequest,
+    ) -> Result<Box<dyn AgentExecutionHandle>, AgentBackendError> {
+        self.start_inner(backend_id, context, request, true).await
+    }
+
+    async fn start_inner<C: Send + 'static>(
+        &self,
+        backend_id: &str,
+        context: C,
+        request: AgentExecutionRequest,
+        reserve_tree: bool,
+    ) -> Result<Box<dyn AgentExecutionHandle>, AgentBackendError> {
+        let factory = self.factory(backend_id)?;
+        self.preflight(backend_id, &request.required_capabilities)?;
+        let scheduler = self.ensure_scheduler();
+        let permit = if reserve_tree {
+            scheduler.acquire_backend(backend_id, &request.cancel).await
+        } else {
+            scheduler
+                .acquire_reserved_backend(backend_id, &request.cancel)
+                .await
+        }
+        .ok_or(AgentBackendError::Cancelled)?;
+        let backend = factory.create(Box::new(context)).await?;
+        let inner = backend.start(request).await?;
+        Ok(Box::new(ReservedAgentExecutionHandle {
+            inner,
+            permit: Some(permit),
+        }))
+    }
+
     async fn execute_inner<C: Send + 'static>(
         &self,
         backend_id: &str,
@@ -280,6 +366,15 @@ mod tests {
             .collect()
         }
 
+        fn start(
+            self: Box<Self>,
+            request: AgentExecutionRequest,
+        ) -> BoxFuture<'static, Result<Box<dyn AgentExecutionHandle>, AgentBackendError>> {
+            Box::pin(async move {
+                Ok(Box::new(PermitHandle::new(request)) as Box<dyn AgentExecutionHandle>)
+            })
+        }
+
         fn execute(
             self: Box<Self>,
             request: AgentExecutionRequest,
@@ -297,6 +392,75 @@ mod tests {
                     turns: 1,
                     usage: (1, 2, 3),
                 })
+            })
+        }
+    }
+
+    struct PermitHandle {
+        identity: crate::agent::AgentExecutionIdentity,
+        released: Option<AgentExecutionRelease>,
+    }
+
+    impl PermitHandle {
+        fn new(request: AgentExecutionRequest) -> Self {
+            Self {
+                identity: request.execution,
+                released: None,
+            }
+        }
+
+        fn unsupported<T>() -> BoxFuture<'static, Result<T, AgentBackendError>> {
+            Box::pin(async { Err(AgentBackendError::InvalidContext("not exercised".into())) })
+        }
+    }
+
+    impl AgentExecutionHandle for PermitHandle {
+        fn identity(&self) -> &crate::agent::AgentExecutionIdentity {
+            &self.identity
+        }
+
+        fn capabilities(&self) -> BTreeSet<AgentExecutionCapability> {
+            BTreeSet::new()
+        }
+
+        fn send(
+            &mut self,
+            _input: AgentExecutionInput,
+        ) -> BoxFuture<'_, Result<AgentExecutionReceipt, AgentBackendError>> {
+            Self::unsupported()
+        }
+
+        fn stop(
+            &mut self,
+            _stop: AgentExecutionStop,
+        ) -> BoxFuture<'_, Result<AgentExecutionReceipt, AgentBackendError>> {
+            Self::unsupported()
+        }
+
+        fn detach(&mut self) -> BoxFuture<'_, Result<AgentExecutionReceipt, AgentBackendError>> {
+            Self::unsupported()
+        }
+
+        fn next(&mut self) -> BoxFuture<'_, Result<AgentExecutionUpdate, AgentBackendError>> {
+            Self::unsupported()
+        }
+
+        fn release(&mut self) -> BoxFuture<'_, Result<AgentExecutionRelease, AgentBackendError>> {
+            Box::pin(async move {
+                if let Some(release) = &self.released {
+                    return Ok(release.clone());
+                }
+                let release = AgentExecutionRelease {
+                    cursor: crate::agent::AgentExecutionCursor {
+                        attempt: self.identity.attempt,
+                        backend_epoch: self.identity.backend_epoch.clone(),
+                        sequence: 0,
+                    },
+                    identity: self.identity.clone(),
+                    released_at_ms: 0,
+                };
+                self.released = Some(release.clone());
+                Ok(release)
             })
         }
     }
@@ -384,5 +548,27 @@ mod tests {
             Err(AgentBackendError::Disconnected(_))
         ));
         assert_eq!(creates.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn registry_handle_holds_capacity_until_release() {
+        let registry = AgentBackendRegistry::default();
+        registry
+            .register(
+                "fake",
+                FakeFactory {
+                    creates: Arc::new(AtomicUsize::new(0)),
+                },
+            )
+            .expect("register fake");
+        let scheduler = registry.ensure_scheduler();
+        let capacity = scheduler.available();
+        let mut handle = registry
+            .start("fake", "fake-context", request("permit"))
+            .await
+            .expect("start handle");
+        assert_eq!(scheduler.available(), capacity - 1);
+        handle.release().await.expect("release handle");
+        assert_eq!(scheduler.available(), capacity);
     }
 }

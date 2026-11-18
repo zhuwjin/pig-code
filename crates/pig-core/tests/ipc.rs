@@ -3,22 +3,22 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use pig_core::agent::ipc::{
-    IpcAgentBackendFactory, IpcAgentExecutionHandle, IpcCapability, IpcEventBatch, IpcRunResult,
-    IpcRunSpec, ipc_events, ipc_reconnect, ipc_release, ipc_start, ipc_start_with_requirements,
-    ipc_stop,
+    IpcAgentBackendFactory, IpcCapability, IpcEventBatch, IpcRunResult, IpcRunSpec, ipc_events,
+    ipc_reconnect, ipc_release, ipc_start, ipc_start_with_requirements, ipc_stop,
 };
 use pig_core::agent::runtime::{
     AgentInitiator, AgentRuntime, RuntimeConnectionState, RuntimeError, RuntimeRunStatus, StartRun,
 };
 use pig_core::agent::{
-    AgentExecutionHandle, AgentExecutionIdentity, AgentExecutionStop, AgentExecutionUpdate,
-    AgentRunIdentity,
+    AgentEventCursor, AgentExecutionActivation, AgentExecutionIdentity, AgentExecutionRequest,
+    AgentExecutionStop, AgentExecutionUpdate, AgentRunIdentity,
 };
 use pig_core::store::Store;
 use pig_provider::mock;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
 
 async fn start_worker() -> (SocketAddr, Child) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_pig-agent-worker"));
@@ -417,18 +417,36 @@ async fn execution_handle_reconnects_stops_and_releases_real_worker() {
         attempt,
         backend_epoch: format!("ipc-handle-epoch-{attempt}"),
     };
-    let mut handle = IpcAgentExecutionHandle::start(
-        address,
-        identity(1),
-        IpcRunSpec {
-            config_path: Some(config_path),
-            cwd,
-            data_dir: root.join("worker-handle"),
-            prompt: mock::SCENARIO_SLOW_TRIGGER.to_string(),
-        },
+    let backends = pig_core::agent::AgentBackendRegistry::with_local();
+    backends
+        .register("ipc", IpcAgentBackendFactory::new(address))
+        .expect("register IPC backend");
+    let spec = IpcRunSpec {
+        config_path: Some(config_path),
+        cwd,
+        data_dir: root.join("worker-handle"),
+        prompt: mock::SCENARIO_SLOW_TRIGGER.to_string(),
+    };
+    let execution = identity(1);
+    let (events, _receiver) = async_channel::unbounded();
+    let mut request = AgentExecutionRequest::new(
+        execution.run.clone(),
+        events,
+        CancellationToken::new(),
+        AgentExecutionActivation::Start,
     )
-    .await
-    .expect("start IPC handle");
+    .with_execution_identity(execution);
+    request.required_capabilities = [
+        pig_core::agent::AgentExecutionCapability::Steer,
+        pig_core::agent::AgentExecutionCapability::Reconnect,
+        pig_core::agent::AgentExecutionCapability::Stop,
+    ]
+    .into_iter()
+    .collect();
+    let mut handle = backends
+        .start("ipc", spec.clone(), request)
+        .await
+        .expect("start IPC handle through registry");
     timeout(Duration::from_secs(10), async {
         loop {
             match handle.next().await.expect("first handle update") {
@@ -450,10 +468,30 @@ async fn execution_handle_reconnects_stops_and_releases_real_worker() {
         .expect("remote remains registered");
     assert!(remote.terminal.is_none());
 
-    let mut reconnected =
-        IpcAgentExecutionHandle::reconnect(address, identity(2), detached.cursor.clone())
-            .await
-            .expect("reconnect with a new attempt");
+    let execution = identity(2);
+    let (events, _receiver) = async_channel::unbounded();
+    let mut request = AgentExecutionRequest::new(
+        execution.run.clone(),
+        events,
+        CancellationToken::new(),
+        AgentExecutionActivation::Reconnect,
+    )
+    .with_execution_identity(execution);
+    request.cursor = Some(AgentEventCursor {
+        run: identity(1).run,
+        sequence: detached.cursor.sequence,
+    });
+    request.required_capabilities = [
+        pig_core::agent::AgentExecutionCapability::Steer,
+        pig_core::agent::AgentExecutionCapability::Reconnect,
+        pig_core::agent::AgentExecutionCapability::Stop,
+    ]
+    .into_iter()
+    .collect();
+    let mut reconnected = backends
+        .start("ipc", spec, request)
+        .await
+        .expect("reconnect through registry with a new attempt");
     assert_eq!(reconnected.identity().attempt, 2);
     assert!(matches!(
         reconnected

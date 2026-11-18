@@ -958,6 +958,53 @@ impl super::AgentExecutionBackend for IpcAgentExecutionBackend {
         .collect()
     }
 
+    fn start(
+        self: Box<Self>,
+        request: super::AgentExecutionRequest,
+    ) -> BoxFuture<'static, Result<Box<dyn AgentExecutionHandle>, AgentBackendError>> {
+        Box::pin(async move {
+            if request.identity != request.execution.run {
+                return Err(AgentBackendError::Failed(
+                    "IPC execution identity mismatch".to_string(),
+                ));
+            }
+            let execution = request.execution.clone();
+            match request.activation {
+                super::AgentExecutionActivation::Start => {
+                    let handle =
+                        IpcAgentExecutionHandle::start(self.address, execution, self.spec).await?;
+                    Ok(Box::new(handle) as Box<dyn AgentExecutionHandle>)
+                }
+                super::AgentExecutionActivation::Resume => Err(AgentBackendError::InvalidContext(
+                    "Agent resume requires a new Run, not an IPC execution resume".to_string(),
+                )),
+                super::AgentExecutionActivation::Reconnect => {
+                    let cursor = request.cursor.ok_or_else(|| {
+                        AgentBackendError::InvalidContext(
+                            "IPC reconnect requires an event cursor".to_string(),
+                        )
+                    })?;
+                    if cursor.run != request.identity {
+                        return Err(AgentBackendError::Failed(
+                            "IPC reconnect cursor identity mismatch".to_string(),
+                        ));
+                    }
+                    let handle = IpcAgentExecutionHandle::reconnect(
+                        self.address,
+                        execution.clone(),
+                        AgentExecutionCursor {
+                            attempt: execution.attempt,
+                            backend_epoch: execution.backend_epoch.clone(),
+                            sequence: cursor.sequence,
+                        },
+                    )
+                    .await?;
+                    Ok(Box::new(handle) as Box<dyn AgentExecutionHandle>)
+                }
+            }
+        })
+    }
+
     fn execute(
         self: Box<Self>,
         request: super::AgentExecutionRequest,

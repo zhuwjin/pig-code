@@ -44,6 +44,7 @@ pub enum AgentExecutionActivation {
 
 pub struct AgentExecutionRequest {
     pub identity: AgentRunIdentity,
+    pub execution: super::AgentExecutionIdentity,
     pub events: async_channel::Sender<Event>,
     pub cancel: CancellationToken,
     pub activation: AgentExecutionActivation,
@@ -59,6 +60,11 @@ impl AgentExecutionRequest {
         activation: AgentExecutionActivation,
     ) -> Self {
         Self {
+            execution: super::AgentExecutionIdentity {
+                run: identity.clone(),
+                attempt: 1,
+                backend_epoch: super::runtime::new_runtime_id("epoch"),
+            },
             identity,
             events,
             cancel,
@@ -66,6 +72,12 @@ impl AgentExecutionRequest {
             cursor: None,
             required_capabilities: BTreeSet::new(),
         }
+    }
+
+    pub fn with_execution_identity(mut self, execution: super::AgentExecutionIdentity) -> Self {
+        self.identity = execution.run.clone();
+        self.execution = execution;
+        self
     }
 }
 
@@ -78,6 +90,10 @@ pub trait AgentExecutionBackend: Send {
     fn supports(&self, capability: AgentExecutionCapability) -> bool {
         self.capabilities().contains(&capability)
     }
+    fn start(
+        self: Box<Self>,
+        request: AgentExecutionRequest,
+    ) -> BoxFuture<'static, Result<Box<dyn super::AgentExecutionHandle>, super::AgentBackendError>>;
     fn execute(
         self: Box<Self>,
         request: AgentExecutionRequest,
@@ -151,6 +167,18 @@ fn execution_failure(identity: AgentRunIdentity, reason: &str, detail: &str) -> 
 impl AgentExecutionBackend for LocalAgentExecutionBackend {
     fn capabilities(&self) -> BTreeSet<AgentExecutionCapability> {
         Self::capabilities()
+    }
+
+    fn start(
+        self: Box<Self>,
+        _request: AgentExecutionRequest,
+    ) -> BoxFuture<'static, Result<Box<dyn super::AgentExecutionHandle>, super::AgentBackendError>>
+    {
+        Box::pin(async move {
+            Err(super::AgentBackendError::InvalidContext(
+                "Local managed execution is awaiting handle migration".to_string(),
+            ))
+        })
     }
 
     fn execute(
