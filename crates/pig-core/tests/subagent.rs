@@ -3131,7 +3131,8 @@ async fn running_nested_parent_consumes_automatic_notification_without_waking_ro
         &agent,
         &sid,
         &format!("{} NESTED_BG_STEER", mock::SUBAGENT_TRIGGER),
-        ExecMode::Auto,
+        // Keep the direct parent running even when a host cannot run a sandbox.
+        ExecMode::Full,
         None,
     )
     .await;
@@ -3144,7 +3145,8 @@ async fn running_nested_parent_consumes_automatic_notification_without_waking_ro
     assert!(
         !events
             .iter()
-            .any(|event| matches!(event, Event::TaskNotificationBatch { .. }))
+            .any(|event| matches!(event, Event::TaskNotificationBatch { .. })),
+        "a nested terminal notification must not wake the root: {events:#?}"
     );
     let child_id = parse_agent_id(output).to_string();
     let nested = nested_tool_record(&data_dir, &sid, &child_id, "Agent");

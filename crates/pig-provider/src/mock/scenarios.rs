@@ -1684,7 +1684,7 @@ pub(super) fn subagent_child_response(body: &str, tool_results: usize) -> Vec<St
         "NESTED_BG_STEER" if !tool_answered(body, "call_nested_pause") => tool_call_chunks(
             "call_nested_pause",
             "ExecCommand",
-            &serde_json::json!({"command": "sleep 0.2"}).to_string(),
+            &serde_json::json!({"command": "sleep 2"}).to_string(),
             None,
         ),
         "NESTED_BG_STOP" if !tool_answered(body, "call_nested_stop") => {
