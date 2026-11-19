@@ -355,7 +355,8 @@ async fn parallel_group_cancellation_persists_every_stopped_receipt() {
 
     assert!(
         !cwd.join("cancel-parallel-followup-must-not-exist.txt")
-            .exists()
+            .exists(),
+        "cancelled turn executed a later write: {aborted:#?}"
     );
     let ends: Vec<(bool, bool)> = aborted
         .iter()

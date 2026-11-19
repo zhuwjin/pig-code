@@ -15,22 +15,26 @@ where
     let mut set = FuturesUnordered::new();
     let mut next = 0usize;
     let cancelled = loop {
-        while next < count && set.len() < MAX_PARALLEL_TOOLS {
+        while next < count && set.len() < MAX_PARALLEL_TOOLS && !cancel.is_cancelled() {
             let index = next;
             let task = start(index);
             set.push(async move { (index, task.await) });
             next += 1;
         }
+        if cancel.is_cancelled() {
+            break true;
+        }
         if set.is_empty() {
             break false;
         }
         tokio::select! {
+            biased;
+            _ = cancel.cancelled() => break true,
             joined = set.next() => {
                 if let Some((index, output)) = joined {
                     finish(index, output);
                 }
             }
-            _ = cancel.cancelled() => break true,
         }
     };
     if cancelled {
@@ -73,5 +77,32 @@ mod tests {
         .await;
         assert!(!cancelled);
         assert!(maximum.load(Ordering::SeqCst) >= 2);
+    }
+
+    #[tokio::test]
+    async fn batch_does_not_start_a_tool_after_cancellation() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let starts = Arc::new(AtomicUsize::new(0));
+        let cancelled = run_tool_batch(
+            1,
+            &cancel,
+            |index| {
+                starts.fetch_add(1, Ordering::SeqCst);
+                async move { index }
+            },
+            |_, _| {},
+        )
+        .await;
+        assert!(cancelled);
+        assert_eq!(starts.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn batch_reports_cancellation_after_all_tools_have_drained() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let cancelled = run_tool_batch(0, &cancel, |index| async move { index }, |_, _| {}).await;
+        assert!(cancelled);
     }
 }

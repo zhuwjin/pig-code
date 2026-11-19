@@ -115,6 +115,37 @@ fn tool_ends(events: &[Event]) -> Vec<(&str, &str, bool)> {
         .collect()
 }
 
+fn assert_shell_output(events: &[Event], call_id: &str, expected: &str) -> bool {
+    let ends = tool_ends(events);
+    let (_, output, is_error) = ends
+        .iter()
+        .find(|(id, _, _)| id.contains(call_id))
+        .unwrap_or_else(|| panic!("missing shell result for {call_id}: {ends:?}"));
+    if common::native_sandbox_usable() {
+        assert!(
+            !is_error && output.contains(expected),
+            "expected {expected:?} from {call_id}: {ends:?}"
+        );
+        true
+    } else {
+        assert!(
+            common::native_sandbox_refusal(output),
+            "an unavailable native sandbox must reject {call_id}: {ends:?}"
+        );
+        false
+    }
+}
+
+fn assert_shell_write(events: &[Event], call_id: &str, target: &std::path::Path) -> bool {
+    let executed = assert_shell_output(events, call_id, "[exit code: 0]");
+    assert_eq!(
+        target.exists(),
+        executed,
+        "shell write must match the native sandbox outcome: {target:?}"
+    );
+    executed
+}
+
 fn file_changes(events: &[Event]) -> Vec<(&str, &str, u32, u32)> {
     events
         .iter()
@@ -160,13 +191,7 @@ async fn scenario_b_allow_all_then_revert() {
         "final text contains the scenario B marker"
     );
 
-    let ends = tool_ends(&events);
-    assert!(
-        ends.iter().any(|(id, out, err)| id.contains("call_b_bash")
-            && out.contains(mock::SCENARIO_B_BASH_MARKER)
-            && !err),
-        "Bash output contains the marker: {ends:?}"
-    );
+    assert_shell_output(&events, "call_b_bash", mock::SCENARIO_B_BASH_MARKER);
 
     // The turn reports measured per-call tool spans (Write + Edit + Bash, the
     // gate and its approval wait included), not a residual
@@ -268,15 +293,7 @@ async fn scenario_b_deny_all() {
         "the two file tools were rejected: {:?}",
         tool_ends(&events)
     );
-    assert!(
-        tool_ends(&events)
-            .iter()
-            .any(|(id, out, err)| id.contains("call_b_bash")
-                && out.contains(mock::SCENARIO_B_BASH_MARKER)
-                && !err),
-        "the read-only Bash still runs without an approval: {:?}",
-        tool_ends(&events)
-    );
+    assert_shell_output(&events, "call_b_bash", mock::SCENARIO_B_BASH_MARKER);
     assert!(file_changes(&events).is_empty(), "no file changes");
     assert!(
         !dir.join(mock::SCENARIO_B_FILE).exists(),
@@ -383,10 +400,7 @@ async fn read_only_escalation_prompts_and_writes_the_approved_root() {
             break;
         }
     }
-    assert!(
-        target.exists(),
-        "the approved root was writable: {collected:#?}"
-    );
+    assert_shell_write(&collected, "call_esc_1", &target);
     assert!(
         collected.iter().any(|e| matches!(
             e,
@@ -451,7 +465,7 @@ async fn a_widening_for_the_workspace_runs_without_a_dialog() {
             .any(|event| matches!(event, Event::ApprovalRequested { .. })),
         "a widening that names only writable roots must not prompt: {collected:#?}"
     );
-    assert!(target.exists(), "the command ran: {collected:#?}");
+    assert_shell_write(&collected, "call_esc_1", &target);
     let ends = tool_ends(&collected);
     assert!(
         ends.iter().any(|(_, output, is_error)| {
@@ -628,11 +642,8 @@ async fn a_widening_offers_no_session_tier() {
         "the second command asks again (no session memory): {collected:#?}"
     );
     assert!(saw_structured_request, "the request lists the roots");
-    assert!(root.join("grant-a.txt").exists(), "first write landed");
-    assert!(
-        root.join("grant-b.txt").exists(),
-        "the second widening was approved on its own"
-    );
+    assert_shell_write(&collected, "call_sg_1", &root.join("grant-a.txt"));
+    assert_shell_write(&collected, "call_sg_2", &root.join("grant-b.txt"));
     assert!(
         collected.iter().any(|e| matches!(
             e,
@@ -715,11 +726,7 @@ async fn auto_no_approvals() {
         "no approval prompts under full access"
     );
     assert!(dir.join(mock::SCENARIO_B_FILE).exists());
-    assert!(
-        tool_ends(&events)
-            .iter()
-            .any(|(_, out, err)| out.contains(mock::SCENARIO_B_BASH_MARKER) && !err)
-    );
+    assert_shell_output(&events, "call_b_bash", mock::SCENARIO_B_BASH_MARKER);
     agent.shutdown();
 }
 
@@ -1339,10 +1346,7 @@ async fn escalation_request_always_prompts_and_grants_once() {
             .any(|e| matches!(e, Event::ApprovalRequested { .. })),
         "an explicit widening request must always prompt: {collected:#?}"
     );
-    assert!(
-        target.exists(),
-        "the approved command ran and wrote its target"
-    );
+    assert_shell_write(&collected, "call_esc_1", &target);
     let _ = std::fs::remove_dir_all(&outside);
     agent.shutdown();
 }
@@ -1363,12 +1367,7 @@ async fn auto_bash_runs_without_approval() {
         approval_details(&events).is_empty(),
         "read-only command should not prompt"
     );
-    let ends = tool_ends(&events);
-    assert!(
-        ends.iter()
-            .any(|(_, out, err)| !err && out.contains("[exit code: 0]")),
-        "ls actually executes: {ends:?}"
-    );
+    assert_shell_output(&events, "call_ro_ls", "[exit code: 0]");
     agent.shutdown();
 }
 
@@ -1486,12 +1485,7 @@ async fn permissions_allow_skips_approval() {
     )
     .await;
     assert!(approval_details(&events).is_empty(), "allow skips approval");
-    assert!(
-        tool_ends(&events)
-            .iter()
-            .any(|(_, out, err)| !err && out.contains("[exit code: 0]")),
-        "ls actually executes"
-    );
+    assert_shell_output(&events, "call_ro_ls", "[exit code: 0]");
     agent.shutdown();
 }
 
@@ -2869,16 +2863,11 @@ async fn require_escalated_prompts_and_runs_with_restrictions() {
             .1
             .contains("writes a report outside the workspace")
     );
-    assert!(
-        tool_ends(&events).iter().any(|(id, output, is_error)| {
-            id.contains("call_require_escalated") && output.contains("[exit code: 0]") && !is_error
-        }),
-        "escalated command did not complete: {:?}",
-        tool_ends(&events)
-    );
-    assert_eq!(
-        std::fs::read_to_string(&target).unwrap().trim(),
-        "escalated"
-    );
+    if assert_shell_write(&events, "call_require_escalated", &target) {
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap().trim(),
+            "escalated"
+        );
+    }
     agent.shutdown();
 }

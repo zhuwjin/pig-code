@@ -19,6 +19,9 @@ pub(crate) async fn exec_tool_gated_ctx(
     tx: &async_channel::Sender<Event>,
     cancel: &CancellationToken,
 ) -> GatedToolOutcome {
+    if cancel.is_cancelled() {
+        return GatedToolOutcome::Cancelled;
+    }
     // ---- PreToolUse hooks (before any permission logic, so hooks observe
     // every call including ones the rules will deny). May reject the call,
     // rewrite the input, or adjust the permission path; contexts carry to the
@@ -907,8 +910,9 @@ The sandbox stays on: ordinary paths become writable, but protected files, deny 
             additional_permissions,
         };
         tokio::select! {
-            result = tool::execute_with_extra(call, tool_ctx, ctx.extra_tools) => Some(result),
+            biased;
             _ = cancel.cancelled() => None,
+            result = tool::execute_with_extra(call, tool_ctx, ctx.extra_tools) => Some(result),
         }
     };
     let Some((mut output, is_error, file_change, edit, mut media)) = result else {
