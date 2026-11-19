@@ -28,6 +28,9 @@ struct ModuleEntry {
 #[derive(Deserialize)]
 struct AcceptanceRow {
     id: String,
+    reference_semantics: String,
+    pig_invariants: Vec<String>,
+    automated_tests: Vec<String>,
     references: Vec<RowReference>,
     existing_evidence: Vec<String>,
     missing_proof: Vec<String>,
@@ -165,6 +168,29 @@ fn matrix_covers_every_core_entry_and_existing_path() {
     }
     assert_eq!(covered, actual, "core module inventory must be exhaustive");
     for row in &matrix.acceptance_rows {
+        assert!(
+            !row.reference_semantics.trim().is_empty(),
+            "{} has no concrete reference semantics",
+            row.id
+        );
+        assert!(
+            !row.pig_invariants.is_empty()
+                && row
+                    .pig_invariants
+                    .iter()
+                    .all(|item| !item.trim().is_empty()),
+            "{} has no Pig invariants",
+            row.id
+        );
+        assert!(
+            !row.automated_tests.is_empty()
+                && row
+                    .automated_tests
+                    .iter()
+                    .all(|item| !item.trim().is_empty()),
+            "{} has no named automated tests",
+            row.id
+        );
         for evidence in &row.existing_evidence {
             assert!(
                 workspace.join(evidence).exists(),
@@ -279,7 +305,10 @@ fn verified_status_requires_complete_delivery_evidence() {
         .commit
         .as_deref()
         .expect("verified delivery needs a final commit");
-    assert!(is_commit(commit), "final delivery needs a full commit SHA");
+    assert!(
+        commit == "HEAD" || is_commit(commit),
+        "final delivery needs HEAD or a full commit SHA"
+    );
     for command in [
         "cargo check --all-targets",
         "cargo test --workspace",

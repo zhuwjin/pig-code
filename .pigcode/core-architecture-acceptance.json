@@ -146,6 +146,9 @@
     {
       "id": "R01",
       "area": "Single Agent control authority",
+      "reference_semantics": "Codex AgentControl owns spawn/send/membership and separates delivery acceptance from model consumption; DeepSeek SubagentManager serializes child admission, capacity and disposal through one activation map.",
+      "pig_invariants": ["AgentRuntime is the sole authority for Agent/Run/Attempt lineage, capacity and terminal state across local, nested and IPC execution.", "The command loop commits facts serially without holding a lock across await; stale attempts, duplicate settlement and late events cannot change a newer run."],
+      "automated_tests": ["agent::runtime::control::tests::runtime_commits_ordered_events_and_restores_run_history", "runtime_stress::mixed_runtime_operations_remain_bounded_for_ten_fixed_seeds"],
       "references": [{"project": "codex", "path": "codex-rs/core/src/agent/api.rs"}, {"project": "deepseek-harness", "path": "packages/subagent/subagent/src/manager.ts"}],
       "existing_evidence": ["crates/pig-core/src/agent/runtime/control.rs", "crates/pig-core/src/agent/runtime/execution.rs", "crates/pig-core/tests/agent.rs", "crates/pig-core/tests/subagent.rs"],
       "missing_proof": [],
@@ -154,6 +157,9 @@
     {
       "id": "R02",
       "area": "Agent, Run, Attempt and ExecutionHandle semantics",
+      "reference_semantics": "DeepSeek binds result and idempotent disposal to one activation rather than a later resume; Codex releases execution capacity through a scoped guard. Pig additionally distinguishes a new resume Run from a reconnect Attempt.",
+      "pig_invariants": ["ExecutionHandle send/stop/reconnect/events/result/release is capability-checked and attempt-fenced.", "Run settlement is distinct from release; release awaits backend quiescence and repeated release is idempotent."],
+      "automated_tests": ["agent::execution_handle::tests::stop_is_not_release_and_release_waits_for_quiescence", "ipc::stale_execution_handle_cannot_control_or_release_a_reconnected_run"],
       "references": [{"project": "deepseek-harness", "path": "packages/subagent/subagent/src/types.ts"}, {"project": "codex", "path": "codex-rs/core/src/agent/control/execution.rs"}],
       "existing_evidence": ["crates/pig-core/src/agent/execution.rs", "crates/pig-core/src/agent/backend.rs", "crates/pig-core/src/agent/execution_handle.rs", "crates/pig-core/src/agent/execution_registry.rs", "crates/pig-core/src/agent/ipc.rs", "crates/pig-core/src/agent/runtime/execution.rs", "crates/pig-core/src/session/subagent/lifecycle.rs", "crates/pig-core/tests/ipc.rs", "crates/pig-core/tests/agent.rs", "crates/pig-core/src/agent/runtime/model.rs"],
       "missing_proof": [],
@@ -162,6 +168,9 @@
     {
       "id": "R03",
       "area": "Durable control state, mailbox and conversation recovery",
+      "reference_semantics": "DeepSeek JSONL persistence serializes contiguous appends, repairs a torn tail and never returns a shorter observed prefix; continuation messages carry durable sender attribution and terminal outcome as model-visible input.",
+      "pig_invariants": ["SQLite transactions own control state, mailbox/outbox/receipts and recovery metadata; JSONL owns model history with stable message IDs.", "Mailbox queued/claimed/consumed recovery reconciles against logged message IDs so a model-visible delivery occurs exactly once without a duplicate wake."],
+      "automated_tests": ["agent::execution_registry::tests::jsonl_delivery_without_sqlite_ack_is_consumed_once_on_restart", "runtime_stress::mixed_runtime_operations_remain_bounded_across_restarts"],
       "references": [{"project": "deepseek-harness", "path": "packages/session/session-persistence-jsonl/src/storage.ts"}, {"project": "deepseek-harness", "path": "packages/subagent/subagent/src/continuation-messages.ts"}],
       "existing_evidence": ["crates/pig-core/src/store/runtime.rs", "crates/pig-core/src/store/execution.rs", "crates/pig-core/src/session/runner/operations.rs", "crates/pig-core/src/session/tests/notifications.rs", "crates/pig-core/src/agent/execution_registry.rs", "crates/pig-core/tests/runtime_stress.rs", "crates/pig-core/tests/ipc.rs"],
       "missing_proof": [],
@@ -170,6 +179,9 @@
     {
       "id": "R04",
       "area": "Stop, delete, quiescence and bounded cleanup",
+      "reference_semantics": "Codex closes tree admission, joins members and records bounded teardown failures; DeepSeek and Kimi bind cancellation and disposal to the exact live child and await process quiescence.",
+      "pig_invariants": ["Graceful and force stop produce deterministic terminal states; deletion persists pending work and retries cleanup instead of deleting live artifacts or waiting forever on an uncooperative backend.", "Execution release, AgentHandle close and process-tree teardown leave no writer, reservation, orphan process or unrecoverable deletion."],
+      "automated_tests": ["sessions::pending_deletion_survives_restart_and_retries_failed_artifacts", "sessions::agent_handle_close_waits_for_runtime_and_is_idempotent", "ipc::execution_handle_reconnects_stops_and_releases_real_worker"],
       "references": [{"project": "codex", "path": "codex-rs/core/src/agent/control/runtime.rs"}, {"project": "deepseek-harness", "path": "packages/subagent/subagent-acp/src/run.ts"}, {"project": "kimi-code", "path": "packages/agent-core-v2/src/session/agentLifecycle/agentLifecycleService.ts"}],
       "existing_evidence": ["crates/pig-core/src/session/subagent/lifecycle.rs", "crates/pig-core/src/session/runner/operations.rs", "crates/pig-core/src/store/deletion.rs", "crates/pig-core/src/lib.rs", "crates/pig-core/src/agent/ipc.rs", "crates/pig-core/src/agent/execution_registry.rs", "crates/pig-core/src/agent/runtime/execution.rs", "crates/pig-core/tests/sessions.rs", "crates/pig-core/src/session/subagent/tests/orchestration.rs", "crates/pig-core/tests/runtime_stress.rs"],
       "missing_proof": [],
@@ -178,6 +190,9 @@
     {
       "id": "R05",
       "area": "Control journal, projections and consistent resync",
+      "reference_semantics": "DeepSeek RemoteJournalStream publishes a cursor-bound snapshot before live entries, repairs gaps and rejects discontinuous or old generations; Kimi buffers live events while the initial page is read, then flushes them in order.",
+      "pig_invariants": ["All catalog, task, conversation, UI and plugin views derive from ordered run/sequence facts; a resync snapshot and its cursor are committed atomically.", "Duplicate, out-of-order and stale-epoch input cannot regress projections; replayable cursors continue in order and expired cursors return ResyncRequired with one consistent snapshot."],
+      "automated_tests": ["runtime_extensions::catalog_projection_registers_and_resyncs_without_core_changes", "agent::ipc::tests::failed_journal_write_does_not_publish_or_advance_cursor"],
       "references": [{"project": "deepseek-harness", "path": "packages/api/gateway/src/client/journal-stream.ts"}, {"project": "kimi-code", "path": "packages/kap-server/src/transport/ws/v1/sessionEventBroadcaster.ts"}],
       "existing_evidence": ["crates/pig-core/src/journal.rs", "crates/pig-core/src/agent/runtime/projection.rs", "src/conversation_projection.rs", "src/agent.rs", "crates/pig-core/tests/runtime_extensions.rs"],
       "missing_proof": [],
@@ -186,6 +201,9 @@
     {
       "id": "R06",
       "area": "Real production cross-process backend",
+      "reference_semantics": "DeepSeek starts an independent runtime over stdio JSON-RPC, flattens child terminal results and disposes to process quiescence; Kimi selects remote capabilities rather than treating a transport failure as local process loss.",
+      "pig_invariants": ["The registered ipc backend runs the real pig-agent-worker in production, including start, send/steer, stop, reconnect and release; unsupported capabilities fail before start.", "Disconnect and root/worker restart reconcile durable inputs, cursor-deduplicated output and terminal results; stale attempts cannot settle a replacement run."],
+      "automated_tests": ["ipc::real_worker_completes_and_reconnects_after_parent_restart", "ipc::execution_handle_steers_and_reconnects_after_a_real_transport_disconnect", "ipc::worker_restart_replays_a_completed_run_without_duplicates"],
       "references": [{"project": "deepseek-harness", "path": "packages/subagent/subagent-dsh-sdk/src/run.ts"}, {"project": "kimi-code", "path": "packages/agent-core-v2/src/remote/client/remoteEnvironmentProvider.ts"}],
       "existing_evidence": ["crates/pig-core/src/agent/ipc.rs", "crates/pig-core/src/agent/backend.rs", "crates/pig-core/src/bin/pig-agent-worker.rs", "crates/pig-core/tests/ipc.rs"],
       "missing_proof": [],
@@ -194,6 +212,9 @@
     {
       "id": "R07",
       "area": "Provider and model capability contracts",
+      "reference_semantics": "Codex creates a turn-scoped streaming client with explicit model, reasoning, usage and retry behavior; Kimi exposes typed provider/model capability boundaries rather than session-specific format branches.",
+      "pig_invariants": ["Registered providers share contracts for streaming, reasoning, media, structured output, usage, cancellation, timeout and business errors, with explicit malformed/empty/finish classification.", "Transient transport recovery does not blindly replay a side-effecting Run; a new provider registers through configuration and contract implementation without Runtime/Session special cases."],
+      "automated_tests": ["pig_provider::contract::openai_chat_provider_contract", "pig_provider::contract::openai_responses_provider_contract", "pig_provider::contract::anthropic_messages_provider_contract", "config_providers::compatible_provider_registration_executes_without_runtime_special_cases"],
       "references": [{"project": "kimi-code", "path": "packages/core/src/llm/"}, {"project": "codex", "path": "codex-rs/core/src/client.rs"}],
       "existing_evidence": ["crates/pig-core/tests/provider.rs", "crates/pig-core/tests/provider_compat.rs", "crates/pig-core/tests/provider_reliability.rs", "crates/pig-core/tests/model_lookup.rs", "crates/pig-core/tests/model_io.rs", "crates/pig-provider/src/contract.rs", "crates/pig-core/tests/config_providers.rs"],
       "missing_proof": [],
@@ -202,6 +223,9 @@
     {
       "id": "R08",
       "area": "Tool, side-effect and unknown-outcome contracts",
+      "reference_semantics": "DeepSeek tools use typed schemas and its out-of-process run seam settles cancellation/failure without rejecting the result; it caps diagnostic data and requires an enterable absolute cwd before spawning.",
+      "pig_invariants": ["Tools carry typed inputs, structured errors, cancellation, timeout and bounded/spillable output; their durable results remain linked to the exact call.", "A transport or crash interruption distinguishes completed, failed and unknown side effects and never silently repeats an unknown write."],
+      "automated_tests": ["sessions::started_tool_without_result_recovers_as_model_visible_unknown", "sessions::unknown_write_outcome_is_visible_without_replaying_the_side_effect", "duplicate_tool_ids::duplicate_serial_tool_ids_keep_distinct_approvals_and_items"],
       "references": [{"project": "deepseek-harness", "path": "packages/core/tools/"}, {"project": "deepseek-harness", "path": "packages/subagent/subagent/src/out-of-process.ts"}],
       "existing_evidence": ["crates/pig-core/tests/tools.rs", "crates/pig-core/tests/tooling.rs", "crates/pig-core/tests/tool_stream.rs", "crates/pig-core/tests/tool_semantics.rs", "crates/pig-core/tests/duplicate_tool_ids.rs", "crates/pig-core/tests/plugin_sessions.rs", "crates/pig-core/tests/sessions.rs", "crates/pig-core/src/task/spill.rs", "crates/pig-core/src/plugins/tools.rs"],
       "missing_proof": [],
@@ -210,6 +234,9 @@
     {
       "id": "R09",
       "area": "Permissions, approval and sandbox enforcement",
+      "reference_semantics": "Kimi computes permission policy before tool execution and binds decisions to agent/turn context; DeepSeek applies a shared per-call filesystem policy in platform backends and only widens it through an approved one-time escalation.",
+      "pig_invariants": ["The actual execution point enforces workspace trust, read/write roots, network, credentials and fail-closed sandbox availability; prompts and tool descriptions are not the security boundary.", "Approval requests carry session/agent/run/turn/call, structured action, cwd and permission snapshot; User and deterministic Policy reviewers share Allow/Deny/Defer/Abort, timeout and cancellation semantics."],
+      "automated_tests": ["session::tests::approval::registered_policy_receives_the_execution_permission_snapshot", "session::tests::approval::unavailable_reviewer_fails_closed_before_the_tool_runs", "architecture::production_tools_cannot_bypass_the_permission_gate"],
       "references": [{"project": "kimi-code", "path": "packages/agent-core-v2/src/agent/permissionPolicy/"}, {"project": "deepseek-harness", "path": "packages/sandbox/"}],
       "existing_evidence": ["crates/pig-core/tests/permissions.rs", "crates/pig-core/tests/approval_modes.rs", "crates/pig-core/tests/access.rs", "crates/pig-core/tests/fs_access.rs", "crates/pig-core/tests/fs_outside.rs", "crates/pig-core/src/session/reviewer.rs", "crates/pig-core/src/session/tests/approval.rs"],
       "missing_proof": ["Complete three-platform executor and sandbox CI verification"],
@@ -218,6 +245,9 @@
     {
       "id": "R10",
       "area": "Shell task and subprocess lifecycle",
+      "reference_semantics": "Codex owns cancellable task execution and interruption; DeepSeek owns managed child-range teardown, bounded waits and output lifecycle through its subprocess seam.",
+      "pig_invariants": ["ShellTask state is separate from AgentRun; process trees support graceful/force stop and restart-loss classification.", "Background output is bounded and spill-recoverable, task notification failure is observable, and terminal cleanup joins the real child tree."],
+      "automated_tests": ["bash::stop_kills_process_group", "bash::stop_kills_process_group_without_sandbox", "bash::background_output_cap_kills_and_notes"],
       "references": [{"project": "codex", "path": "codex-rs/core/src/tasks/"}, {"project": "deepseek-harness", "path": "packages/subprocess/"}],
       "existing_evidence": ["crates/pig-core/tests/background_tasks.rs", "crates/pig-core/tests/bash.rs", "crates/pig-core/src/task/tests.rs", "crates/pig-core/src/task/process.rs", "crates/pig-core/src/task/process/tree.rs", "crates/pig-core/src/session/tests/notifications.rs", "crates/pig-core/src/store/tasks.rs"],
       "missing_proof": ["Complete three-platform ProcessTree and sandbox CI verification"],
@@ -226,6 +256,9 @@
     {
       "id": "R11",
       "area": "Context, compaction, cache identity and replay",
+      "reference_semantics": "Kimi records compaction operations, restores their wire ranges, tracks usage and retries bounded overflow recovery; Codex separates compacted history from a fresh request and preserves stable replay prefixes.",
+      "pig_invariants": ["Fresh/fork/resume/replay and compaction retain model-visible history, paired tool exchanges, media references and usage watermarks.", "Reactive overflow recovery compacts before retrying the model and never repeats an already-executed side effect; capability changes deliberately refresh cache identity."],
+      "automated_tests": ["context_overflow::recovery::overflow_after_a_side_effect_never_replays_the_tool", "compact::compact_usage_resets_and_replays", "prefix_cache::chat_parallel_calls_keep_ids_order_and_single_assistant_group_after_restart"],
       "references": [{"project": "kimi-code", "path": "packages/agent-core-v2/src/agent/fullCompaction/"}, {"project": "codex", "path": "codex-rs/core/src/compact_remote_v2.rs"}],
       "existing_evidence": ["crates/pig-core/tests/compact.rs", "crates/pig-core/tests/context_stability.rs", "crates/pig-core/tests/prefix_cache/", "crates/pig-core/tests/context_overflow/"],
       "missing_proof": [],
@@ -234,6 +267,9 @@
     {
       "id": "R12",
       "area": "Media, attachments and model-visible inputs",
+      "reference_semantics": "Kimi SessionMediaStore gives durable media IDs typed content, streams, ranges and materialization; model input capabilities determine which attachments can be projected.",
+      "pig_invariants": ["Image/PDF type, size and capability checks run before model submission; attachment references survive fork/resume/replay without embedding stale raw bytes in ordinary history.", "Missing or corrupt media degrade with an explicit model-visible note rather than changing unrelated history or silently claiming the model saw it."],
+      "automated_tests": ["media::paste_vision_prefix_survives_restart", "media::paste_resume_degrades_when_media_deleted", "media::pdf_document_round_trips_chat"],
       "references": [{"project": "kimi-code", "path": "packages/agent-core-v2/src/agent/media/"}],
       "existing_evidence": ["crates/pig-core/tests/media.rs", "crates/pig-core/src/agent/records/tests/media.rs"],
       "missing_proof": [],
@@ -242,6 +278,9 @@
     {
       "id": "R13",
       "area": "Plugin, MCP and SDK capability seams",
+      "reference_semantics": "DeepSeek exposes a complete runtime over newline-delimited JSON-RPC with typed requests/results/notifications; Kimi exposes scoped client capabilities and disposable subscriptions.",
+      "pig_invariants": ["Plugin/SDK calls are typed, versioned and capability-scoped; storage has scoped atomic revisions, and disposal cannot remove a newer registration.", "Plugin sessions, agent views and events use the same Runtime/projection path; MCP and plugins cannot bypass workspace or permission enforcement."],
+      "automated_tests": ["plugin_sessions::a_plugin_lists_starts_waits_reads_and_stops_contributed_agents", "plugin_sessions::project_plugins_cannot_cross_workspace_boundaries", "App.plugin-sdk::disposers are single-shot and cannot remove a newer same-name registration"],
       "references": [{"project": "kimi-code", "path": "packages/klient/src/"}, {"project": "deepseek-harness", "path": "packages/sdk/"}],
       "existing_evidence": ["crates/pig-core/tests/plugin_sessions.rs", "crates/pig-core/tests/hooks.rs", "tests/App.plugin-sdk.test.tsx", "crates/pig-core/src/mcp/client.rs", "crates/pig-core/src/plugins/config.rs", "crates/pig-core/tests/architecture.rs"],
       "missing_proof": [],
@@ -250,6 +289,9 @@
     {
       "id": "R14",
       "area": "Configuration, credentials and persistence safety",
+      "reference_semantics": "Kimi registers configuration sections, applies scoped overlays and plans atomic writeback; DeepSeek settings separate typed schema, environment binding and durable updates.",
+      "pig_invariants": ["Configuration is validated at the earliest boundary with actionable errors; persisted state and live Runtime are refreshed from the same accepted value.", "Credential values never enter normal logs, snapshots or ordinary event errors; file/plugin stores use bounded, atomic, isolated writes."],
+      "automated_tests": ["config_providers::config_v2_snapshot_and_save", "config_providers::api_key_never_roundtrips_through_get_and_save_config", "config_providers::test_provider_reports_a_missing_credential"],
       "references": [{"project": "deepseek-harness", "path": "packages/settings/"}, {"project": "kimi-code", "path": "packages/agent-core-v2/src/app/config/configService.ts"}],
       "existing_evidence": ["crates/pig-core/tests/config.rs", "crates/pig-core/tests/config_providers.rs", "crates/pig-core/tests/config_seeding.rs", "crates/pig-core/src/credentials.rs", "crates/pig-core/src/config/persistence.rs", "crates/pig-core/src/plugins/config.rs"],
       "missing_proof": [],
@@ -258,6 +300,9 @@
     {
       "id": "R15",
       "area": "Structured errors, observability and bounded retention",
+      "reference_semantics": "Codex carries typed protocol errors with operation context; DeepSeek agent-loop and provider seams preserve bounded diagnostics, terminal reasons and safe error categories.",
+      "pig_invariants": ["Core errors preserve applicable session/agent/run/attempt/call identity and never silently drop journal, task-notification or cleanup failures.", "Queues, output, journal and durable history have explicit bounds; cleanup failures remain retryable and sensitive payloads do not enter ordinary diagnostics."],
+      "automated_tests": ["sessions::execution_errors_keep_their_runtime_identity", "architecture::durable_history_has_a_shared_non_destructive_quota", "architecture::task_notification_failures_are_observable"],
       "references": [{"project": "deepseek-harness", "path": "packages/core/agent-loop/src/"}, {"project": "codex", "path": "codex-rs/protocol/src/error.rs"}],
       "existing_evidence": ["crates/pig-core/src/model_io.rs", "crates/pig-core/src/usage.rs", "crates/pig-core/src/api_usage.rs", "crates/pig-core/src/journal.rs", "crates/pig-protocol/src/error.rs", "crates/pig-core/tests/sessions.rs", "crates/pig-core/src/task/process.rs", "crates/pig-core/src/task/spill.rs", "crates/pig-core/src/models_registry.rs", "crates/pig-core/src/rollout/mod.rs", "crates/pig-core/src/agent/records/conversation.rs", "crates/pig-provider/src/contract.rs", "crates/pig-core/src/task/tests.rs", "src/agent.rs"],
       "missing_proof": [],
@@ -266,6 +311,9 @@
     {
       "id": "R16",
       "area": "Representative extension exercises",
+      "reference_semantics": "DeepSeek registers independent subagent providers behind one manager contract; Kimi adds domain features and lifecycle behavior through scoped services rather than another core authority.",
+      "pig_invariants": ["Representative provider, tool, backend, projection, custom mailbox, schedule initiator and approval-policy extensions use public registration/contracts only.", "Extensions do not mutate Runtime internals, add provider/backend branches to Session, create a second notification authority or bypass cancellation, persistence and permission gates."],
+      "automated_tests": ["runtime_extensions::schedule_extension_uses_runtime_without_session_changes", "runtime_extensions::catalog_projection_registers_and_resyncs_without_core_changes", "config_providers::compatible_provider_registration_executes_without_runtime_special_cases", "session::tests::approval::registered_policy_receives_the_execution_permission_snapshot", "ipc::backend_registry_executes_real_ipc_and_releases_idempotently", "plugins::tools::tests::tool_results_are_bound_to_session_package_and_digest"],
       "references": [{"project": "deepseek-harness", "path": "packages/subagent/subagent/src/index.ts"}, {"project": "kimi-code", "path": "packages/agent-core-v2/src/features/"}],
       "existing_evidence": ["crates/pig-core/tests/runtime_extensions.rs", "crates/pig-core/src/agent/backend.rs", "crates/pig-core/tests/config_providers.rs", "crates/pig-core/src/session/tests/approval.rs", "crates/pig-core/src/plugins/tools.rs", "crates/pig-core/tests/ipc.rs"],
       "missing_proof": [],
@@ -274,6 +322,9 @@
     {
       "id": "R17",
       "area": "Automated architecture conformance gates",
+      "reference_semantics": "Kimi statically rejects environment bypasses and unscoped execution; DeepSeek package contracts put process, persistence and extension ownership behind explicit seams.",
+      "pig_invariants": ["CI rejects domain-owned Runtime state, legacy dual control writes, provider/backend Session branches, unbounded provider/runtime channels and production permission bypasses.", "Inventory and verified delivery evidence are machine-checked; status cannot substitute for missing semantics, named tests or successful platform proof."],
+      "automated_tests": ["architecture::domain_modules_cannot_own_runtime_control_state", "architecture::session_has_no_backend_or_provider_special_cases", "architecture::verified_status_requires_complete_delivery_evidence"],
       "references": [{"project": "kimi-code", "path": "packages/agent-core-v2/test/environment/architectureBoundaries.test.ts"}, {"project": "deepseek-harness", "path": "scripts/"}],
       "existing_evidence": ["crates/pig-core/tests/architecture.rs", "crates/pig-core/tests/runtime_extensions.rs", "crates/pig-core/src/journal.rs", "src/agent.rs", "crates/pig-core/src/task/notification.rs"],
       "missing_proof": [],
@@ -282,6 +333,9 @@
     {
       "id": "R18",
       "area": "Crate host API and public lifecycle surface",
+      "reference_semantics": "Codex ThreadManager owns startup, resume, history and tree shutdown behind host-facing APIs; Kimi Session services own creation, persistence, workdir and lifecycle scopes.",
+      "pig_invariants": ["AgentHandle exposes one operation channel, event stream, journal and credential surface, with shared idempotent close/close_blocking lifecycle.", "Public core entries are inventoried; fresh/fork/resume and replayed histories pass through the same Session and Runtime rather than host-only shortcuts."],
+      "automated_tests": ["sessions::agent_handle_close_waits_for_runtime_and_is_idempotent", "sessions::reopening_a_loaded_session_replays_its_real_history_before_completion", "fork::fork_session_truncates_and_switches"],
       "references": [{"project": "codex", "path": "codex-rs/core/src/thread_manager.rs"}, {"project": "kimi-code", "path": "packages/agent-core-v2/src/session/"}],
       "existing_evidence": ["crates/pig-core/src/lib.rs", "crates/pig-core/tests/sessions.rs", "crates/pig-core/tests/workspaces.rs"],
       "missing_proof": [],
@@ -291,6 +345,9 @@
       "id": "R19",
       "area": "Platform support and diagnostics",
       "references": [{"project": "codex", "path": "codex-rs/utils/process/src/lib.rs"}, {"project": "kimi-code", "path": "packages/agent-core-v2/src/os/backends/"}],
+      "reference_semantics": "Codex centralizes platform-specific process construction while leaving lifetime and stdio to its caller; Kimi exposes host behavior through OS backends rather than scattering platform branches through the core.",
+      "pig_invariants": ["Git/workspaces, fonts, networking, terminals and sandbox diagnostics stay isolated behind core/platform modules; unsupported capabilities produce explicit errors.", "The same Rust and NSH contracts run on macOS, Windows and Linux without skipping required executor, lifecycle or UI steps."],
+      "automated_tests": ["architecture::matrix_covers_every_core_entry_and_existing_path", "architecture::public_modules_and_acceptance_links_are_complete", "workspaces::workspaces_add_list_remove"],
       "existing_evidence": ["crates/pig-core/src/git.rs", "crates/pig-core/src/fonts.rs", "crates/pig-core/src/net_test.rs", "crates/pig-core/tests/git_status.rs", "crates/pig-core/tests/git_queue.rs"],
       "missing_proof": [],
       "status": "tested"
