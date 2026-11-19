@@ -152,7 +152,7 @@
       "references": [{"project": "codex", "path": "codex-rs/core/src/agent/api.rs"}, {"project": "deepseek-harness", "path": "packages/subagent/subagent/src/manager.ts"}],
       "existing_evidence": ["crates/pig-core/src/agent/runtime/control.rs", "crates/pig-core/src/agent/runtime/execution.rs", "crates/pig-core/tests/agent.rs", "crates/pig-core/tests/subagent.rs"],
       "missing_proof": [],
-      "status": "tested"
+      "status": "verified"
     },
     {
       "id": "R02",
@@ -163,7 +163,7 @@
       "references": [{"project": "deepseek-harness", "path": "packages/subagent/subagent/src/types.ts"}, {"project": "codex", "path": "codex-rs/core/src/agent/control/execution.rs"}],
       "existing_evidence": ["crates/pig-core/src/agent/execution.rs", "crates/pig-core/src/agent/backend.rs", "crates/pig-core/src/agent/execution_handle.rs", "crates/pig-core/src/agent/execution_registry.rs", "crates/pig-core/src/agent/ipc.rs", "crates/pig-core/src/agent/runtime/execution.rs", "crates/pig-core/src/session/subagent/lifecycle.rs", "crates/pig-core/tests/ipc.rs", "crates/pig-core/tests/agent.rs", "crates/pig-core/src/agent/runtime/model.rs"],
       "missing_proof": [],
-      "status": "tested"
+      "status": "verified"
     },
     {
       "id": "R03",
@@ -174,7 +174,7 @@
       "references": [{"project": "deepseek-harness", "path": "packages/session/session-persistence-jsonl/src/storage.ts"}, {"project": "deepseek-harness", "path": "packages/subagent/subagent/src/continuation-messages.ts"}],
       "existing_evidence": ["crates/pig-core/src/store/runtime.rs", "crates/pig-core/src/store/execution.rs", "crates/pig-core/src/session/runner/operations.rs", "crates/pig-core/src/session/tests/notifications.rs", "crates/pig-core/src/agent/execution_registry.rs", "crates/pig-core/tests/runtime_stress.rs", "crates/pig-core/tests/ipc.rs"],
       "missing_proof": [],
-      "status": "tested"
+      "status": "verified"
     },
     {
       "id": "R04",
@@ -185,7 +185,7 @@
       "references": [{"project": "codex", "path": "codex-rs/core/src/agent/control/runtime.rs"}, {"project": "deepseek-harness", "path": "packages/subagent/subagent-acp/src/run.ts"}, {"project": "kimi-code", "path": "packages/agent-core-v2/src/session/agentLifecycle/agentLifecycleService.ts"}],
       "existing_evidence": ["crates/pig-core/src/session/subagent/lifecycle.rs", "crates/pig-core/src/session/runner/operations.rs", "crates/pig-core/src/store/deletion.rs", "crates/pig-core/src/lib.rs", "crates/pig-core/src/agent/ipc.rs", "crates/pig-core/src/agent/execution_registry.rs", "crates/pig-core/src/agent/runtime/execution.rs", "crates/pig-core/tests/sessions.rs", "crates/pig-core/src/session/subagent/tests/orchestration.rs", "crates/pig-core/tests/runtime_stress.rs"],
       "missing_proof": [],
-      "status": "tested"
+      "status": "verified"
     },
     {
       "id": "R05",
@@ -196,7 +196,7 @@
       "references": [{"project": "deepseek-harness", "path": "packages/api/gateway/src/client/journal-stream.ts"}, {"project": "kimi-code", "path": "packages/kap-server/src/transport/ws/v1/sessionEventBroadcaster.ts"}],
       "existing_evidence": ["crates/pig-core/src/journal.rs", "crates/pig-core/src/agent/runtime/projection.rs", "src/conversation_projection.rs", "src/agent.rs", "crates/pig-core/tests/runtime_extensions.rs"],
       "missing_proof": [],
-      "status": "tested"
+      "status": "verified"
     },
     {
       "id": "R06",
@@ -207,7 +207,7 @@
       "references": [{"project": "deepseek-harness", "path": "packages/subagent/subagent-dsh-sdk/src/run.ts"}, {"project": "kimi-code", "path": "packages/agent-core-v2/src/remote/client/remoteEnvironmentProvider.ts"}],
       "existing_evidence": ["crates/pig-core/src/agent/ipc.rs", "crates/pig-core/src/agent/backend.rs", "crates/pig-core/src/bin/pig-agent-worker.rs", "crates/pig-core/tests/ipc.rs"],
       "missing_proof": [],
-      "status": "tested"
+      "status": "verified"
     },
     {
       "id": "R07",
@@ -218,7 +218,7 @@
       "references": [{"project": "kimi-code", "path": "packages/core/src/llm/"}, {"project": "codex", "path": "codex-rs/core/src/client.rs"}],
       "existing_evidence": ["crates/pig-core/tests/provider.rs", "crates/pig-core/tests/provider_compat.rs", "crates/pig-core/tests/provider_reliability.rs", "crates/pig-core/tests/model_lookup.rs", "crates/pig-core/tests/model_io.rs", "crates/pig-provider/src/contract.rs", "crates/pig-core/tests/config_providers.rs"],
       "missing_proof": [],
-      "status": "tested"
+      "status": "verified"
     },
     {
       "id": "R08",
@@ -229,7 +229,7 @@
       "references": [{"project": "deepseek-harness", "path": "packages/core/tools/"}, {"project": "deepseek-harness", "path": "packages/subagent/subagent/src/out-of-process.ts"}],
       "existing_evidence": ["crates/pig-core/tests/tools.rs", "crates/pig-core/tests/tooling.rs", "crates/pig-core/tests/tool_stream.rs", "crates/pig-core/tests/tool_semantics.rs", "crates/pig-core/tests/duplicate_tool_ids.rs", "crates/pig-core/tests/plugin_sessions.rs", "crates/pig-core/tests/sessions.rs", "crates/pig-core/src/task/spill.rs", "crates/pig-core/src/plugins/tools.rs"],
       "missing_proof": [],
-      "status": "tested"
+      "status": "verified"
     },
     {
       "id": "R09",
@@ -239,8 +239,8 @@
       "automated_tests": ["session::tests::approval::registered_policy_receives_the_execution_permission_snapshot", "session::tests::approval::unavailable_reviewer_fails_closed_before_the_tool_runs", "architecture::production_tools_cannot_bypass_the_permission_gate"],
       "references": [{"project": "kimi-code", "path": "packages/agent-core-v2/src/agent/permissionPolicy/"}, {"project": "deepseek-harness", "path": "packages/sandbox/"}],
       "existing_evidence": ["crates/pig-core/tests/permissions.rs", "crates/pig-core/tests/approval_modes.rs", "crates/pig-core/tests/access.rs", "crates/pig-core/tests/fs_access.rs", "crates/pig-core/tests/fs_outside.rs", "crates/pig-core/src/session/reviewer.rs", "crates/pig-core/src/session/tests/approval.rs"],
-      "missing_proof": ["Complete three-platform executor and sandbox CI verification"],
-      "status": "tested"
+      "missing_proof": [],
+      "status": "verified"
     },
     {
       "id": "R10",
@@ -250,8 +250,8 @@
       "automated_tests": ["bash::stop_kills_process_group", "bash::stop_kills_process_group_without_sandbox", "bash::background_output_cap_kills_and_notes"],
       "references": [{"project": "codex", "path": "codex-rs/core/src/tasks/"}, {"project": "deepseek-harness", "path": "packages/subprocess/"}],
       "existing_evidence": ["crates/pig-core/tests/background_tasks.rs", "crates/pig-core/tests/bash.rs", "crates/pig-core/src/task/tests.rs", "crates/pig-core/src/task/process.rs", "crates/pig-core/src/task/process/tree.rs", "crates/pig-core/src/session/tests/notifications.rs", "crates/pig-core/src/store/tasks.rs"],
-      "missing_proof": ["Complete three-platform ProcessTree and sandbox CI verification"],
-      "status": "tested"
+      "missing_proof": [],
+      "status": "verified"
     },
     {
       "id": "R11",
@@ -262,7 +262,7 @@
       "references": [{"project": "kimi-code", "path": "packages/agent-core-v2/src/agent/fullCompaction/"}, {"project": "codex", "path": "codex-rs/core/src/compact_remote_v2.rs"}],
       "existing_evidence": ["crates/pig-core/tests/compact.rs", "crates/pig-core/tests/context_stability.rs", "crates/pig-core/tests/prefix_cache/", "crates/pig-core/tests/context_overflow/"],
       "missing_proof": [],
-      "status": "tested"
+      "status": "verified"
     },
     {
       "id": "R12",
@@ -273,7 +273,7 @@
       "references": [{"project": "kimi-code", "path": "packages/agent-core-v2/src/agent/media/"}],
       "existing_evidence": ["crates/pig-core/tests/media.rs", "crates/pig-core/src/agent/records/tests/media.rs"],
       "missing_proof": [],
-      "status": "tested"
+      "status": "verified"
     },
     {
       "id": "R13",
@@ -284,7 +284,7 @@
       "references": [{"project": "kimi-code", "path": "packages/klient/src/"}, {"project": "deepseek-harness", "path": "packages/sdk/"}],
       "existing_evidence": ["crates/pig-core/tests/plugin_sessions.rs", "crates/pig-core/tests/hooks.rs", "tests/App.plugin-sdk.test.tsx", "crates/pig-core/src/mcp/client.rs", "crates/pig-core/src/plugins/config.rs", "crates/pig-core/tests/architecture.rs"],
       "missing_proof": [],
-      "status": "tested"
+      "status": "verified"
     },
     {
       "id": "R14",
@@ -295,7 +295,7 @@
       "references": [{"project": "deepseek-harness", "path": "packages/settings/"}, {"project": "kimi-code", "path": "packages/agent-core-v2/src/app/config/configService.ts"}],
       "existing_evidence": ["crates/pig-core/tests/config.rs", "crates/pig-core/tests/config_providers.rs", "crates/pig-core/tests/config_seeding.rs", "crates/pig-core/src/credentials.rs", "crates/pig-core/src/config/persistence.rs", "crates/pig-core/src/plugins/config.rs"],
       "missing_proof": [],
-      "status": "tested"
+      "status": "verified"
     },
     {
       "id": "R15",
@@ -306,7 +306,7 @@
       "references": [{"project": "deepseek-harness", "path": "packages/core/agent-loop/src/"}, {"project": "codex", "path": "codex-rs/protocol/src/error.rs"}],
       "existing_evidence": ["crates/pig-core/src/model_io.rs", "crates/pig-core/src/usage.rs", "crates/pig-core/src/api_usage.rs", "crates/pig-core/src/journal.rs", "crates/pig-protocol/src/error.rs", "crates/pig-core/tests/sessions.rs", "crates/pig-core/src/task/process.rs", "crates/pig-core/src/task/spill.rs", "crates/pig-core/src/models_registry.rs", "crates/pig-core/src/rollout/mod.rs", "crates/pig-core/src/agent/records/conversation.rs", "crates/pig-provider/src/contract.rs", "crates/pig-core/src/task/tests.rs", "src/agent.rs"],
       "missing_proof": [],
-      "status": "tested"
+      "status": "verified"
     },
     {
       "id": "R16",
@@ -317,7 +317,7 @@
       "references": [{"project": "deepseek-harness", "path": "packages/subagent/subagent/src/index.ts"}, {"project": "kimi-code", "path": "packages/agent-core-v2/src/features/"}],
       "existing_evidence": ["crates/pig-core/tests/runtime_extensions.rs", "crates/pig-core/src/agent/backend.rs", "crates/pig-core/tests/config_providers.rs", "crates/pig-core/src/session/tests/approval.rs", "crates/pig-core/src/plugins/tools.rs", "crates/pig-core/tests/ipc.rs"],
       "missing_proof": [],
-      "status": "tested"
+      "status": "verified"
     },
     {
       "id": "R17",
@@ -328,7 +328,7 @@
       "references": [{"project": "kimi-code", "path": "packages/agent-core-v2/test/environment/architectureBoundaries.test.ts"}, {"project": "deepseek-harness", "path": "scripts/"}],
       "existing_evidence": ["crates/pig-core/tests/architecture.rs", "crates/pig-core/tests/runtime_extensions.rs", "crates/pig-core/src/journal.rs", "src/agent.rs", "crates/pig-core/src/task/notification.rs"],
       "missing_proof": [],
-      "status": "tested"
+      "status": "verified"
     },
     {
       "id": "R18",
@@ -339,7 +339,7 @@
       "references": [{"project": "codex", "path": "codex-rs/core/src/thread_manager.rs"}, {"project": "kimi-code", "path": "packages/agent-core-v2/src/session/"}],
       "existing_evidence": ["crates/pig-core/src/lib.rs", "crates/pig-core/tests/sessions.rs", "crates/pig-core/tests/workspaces.rs"],
       "missing_proof": [],
-      "status": "tested"
+      "status": "verified"
     },
     {
       "id": "R19",
@@ -350,21 +350,21 @@
       "automated_tests": ["architecture::matrix_covers_every_core_entry_and_existing_path", "architecture::public_modules_and_acceptance_links_are_complete", "workspaces::workspaces_add_list_remove"],
       "existing_evidence": ["crates/pig-core/src/git.rs", "crates/pig-core/src/fonts.rs", "crates/pig-core/src/net_test.rs", "crates/pig-core/tests/git_status.rs", "crates/pig-core/tests/git_queue.rs"],
       "missing_proof": [],
-      "status": "tested"
+      "status": "verified"
     }
   ],
   "final": {
-    "status": "tested",
-    "commit": null,
+    "status": "verified",
+    "commit": "HEAD",
     "local_commands": {
       "cargo check --all-targets": "exit 0",
       "cargo test --workspace": "exit 0",
       "nsh check && nsh test": "exit 0"
     },
     "ci": {
-      "macos": null,
-      "windows": null,
-      "linux": null
+      "macos": "https://github.com/zhuwjin/pig-code-ts/actions/runs/44605971419/job/135849631019",
+      "windows": "https://github.com/zhuwjin/pig-code-ts/actions/runs/44605971419/job/135849632214",
+      "linux": "https://github.com/zhuwjin/pig-code-ts/actions/runs/44605971419/job/135849632290"
     },
     "issue": "https://github.com/zhuwjin/pig-code-ts/issues/9"
   }
