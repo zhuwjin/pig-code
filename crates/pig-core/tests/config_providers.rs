@@ -331,6 +331,7 @@ max_output_tokens = 8192
         std::sync::Arc::new(pig_core::credentials::CredentialManager::empty_memory()),
     );
     let events = agent.events.clone();
+    common::new_session(&agent, dir.clone()).await;
     agent
         .ops
         .send(Op::TestProvider {
