@@ -921,6 +921,10 @@ async fn execution_handle_steers_and_reconnects_after_a_real_transport_disconnec
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn execution_handle_deduplicates_consumed_input_and_waits_for_queued_turn() {
+    if !crate::common::native_sandbox_usable() {
+        crate::common::assert_native_sandbox_rejection().await;
+        return;
+    }
     let (config_path, cwd, root) = crate::common::setup("ipc-consumed-input");
     let (address, mut worker) = start_worker(&root.join("worker-state")).await;
     let run_id = "ipc-consumed-input";
@@ -932,7 +936,7 @@ async fn execution_handle_deduplicates_consumed_input_and_waits_for_queued_turn(
             config_path: Some(config_path),
             cwd,
             data_dir: root.join("worker-data"),
-            prompt: "read the mock file and summarize".to_string(),
+            prompt: mock::SCENARIO_SLOW_TRIGGER.to_string(),
         },
     )
     .await
@@ -966,7 +970,7 @@ async fn execution_handle_deduplicates_consumed_input_and_waits_for_queued_turn(
 
     let mut completions = 0;
     let mut visible_inputs = 0;
-    let result = timeout(Duration::from_secs(30), async {
+    let result = timeout(Duration::from_secs(60), async {
         loop {
             match handle.next().await.expect("queued worker update") {
                 AgentExecutionUpdate::Output { event, .. } => {
@@ -1134,6 +1138,10 @@ async fn stale_execution_handle_cannot_control_or_release_a_reconnected_run() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn lost_send_response_is_reconciled_without_replaying_the_input() {
+    if !crate::common::native_sandbox_usable() {
+        crate::common::assert_native_sandbox_rejection().await;
+        return;
+    }
     let (config_path, cwd, root) = crate::common::setup("ipc-lost-send-response");
     let (address, mut worker) = start_worker(&root.join("worker-state")).await;
     let run_id = "ipc-lost-send-response";
@@ -1146,7 +1154,7 @@ async fn lost_send_response_is_reconciled_without_replaying_the_input() {
             config_path: Some(config_path),
             cwd,
             data_dir: root.join("worker-data"),
-            prompt: "read the mock file and summarize".to_string(),
+            prompt: mock::SCENARIO_SLOW_TRIGGER.to_string(),
         },
     )
     .await
@@ -1234,7 +1242,7 @@ async fn lost_send_response_is_reconciled_without_replaying_the_input() {
 
     let mut visible_inputs = 0;
     let mut completions = 0;
-    let (_, result) = timeout(Duration::from_secs(30), async {
+    let (_, result) = timeout(Duration::from_secs(60), async {
         let mut sequences = Vec::new();
         loop {
             match recovered.next().await.expect("reconciled worker update") {
