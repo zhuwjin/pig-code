@@ -61,6 +61,7 @@ export type MessageProps = UiContext & {
   onImage: (source: string, label: string) => void;
   flat?: boolean;
   activityPreview?: boolean;
+  onActivityItemViewable?: (id: string, visible: boolean) => void;
 };
 
 function UserRow(props: MessageProps & { item: Accessor<UserItem> }) {
@@ -573,6 +574,11 @@ function ActivityRow(props: MessageProps & { row: Accessor<Extract<ConversationR
         each={row().items}
         keyExtractor={(item) => item.id}
         estimatedItemSize={28}
+        onViewableItemsChange={({ viewableItems }) => {
+          for (const entry of viewableItems) {
+            props.onActivityItemViewable?.(entry.item.id, entry.isViewable);
+          }
+        }}
       >
         {(item) => <ItemMessageRow {...props} item={item} />}
       </List>
@@ -785,7 +791,7 @@ function TailRows(props: UiContext & { navEligible: boolean }) {
   );
 }
 
-export function MessageList(props: UiContext & { items: ChatItem[]; navFoot?: number; onScroll?: (event: ScrollEvent) => void; onLatestVisibleChange?: (visible: boolean) => void }) {
+export function MessageList(props: UiContext & { items: ChatItem[]; navFoot?: number; onScroll?: (event: ScrollEvent) => void; onLatestVisibleChange?: (visible: boolean) => void; onActivityItemViewable?: (id: string, visible: boolean) => void }) {
   const rows = computed(
     () => flattenConversationRows(
       props.items,

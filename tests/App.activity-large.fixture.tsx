@@ -1,4 +1,4 @@
-import { mount, View } from "nsh";
+import { mount, signal, Text, View } from "nsh";
 import { MessageList } from "../app/components/messages";
 import { AgentStore } from "../app/store";
 import { ThemeStore } from "../app/theme";
@@ -6,6 +6,7 @@ import type { ChatItem, TurnState } from "../app/protocol";
 
 const store = new AgentStore(true);
 const themeStore = new ThemeStore();
+const lastToolVisible = signal(false);
 const turn: TurnState = {
   id: "turn-1",
   status: "done",
@@ -36,6 +37,14 @@ store.running.set({ "activity-large": false });
 
 mount(() => (
   <View class="h-full w-full">
-    <MessageList store={store} themeStore={themeStore} items={store.items()["activity-large"] ?? []} />
+    <Text>{lastToolVisible() ? "Last tool is visible" : "Last tool is not visible"}</Text>
+    <MessageList
+      store={store}
+      themeStore={themeStore}
+      items={store.items()["activity-large"] ?? []}
+      onActivityItemViewable={(id, visible) => {
+        if (id === "tool-998") lastToolVisible.set(visible);
+      }}
+    />
   </View>
 ));
