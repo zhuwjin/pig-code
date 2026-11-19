@@ -1365,10 +1365,18 @@ async fn worker_crash_resumes_a_durable_pending_input_in_a_new_run() {
     let mut pending_visible = 0;
     let mut completions = 0;
     let mut completion_identities = Vec::new();
+    let mut turn_inputs = Vec::new();
+    let mut active_run = None;
     let result = timeout(Duration::from_secs(30), async {
         loop {
             match resumed.next().await.expect("resumed worker update") {
                 AgentExecutionUpdate::Output { event, .. } => {
+                    if let pig_protocol::Event::TurnStarted { run, .. } = &event {
+                        active_run = run.as_ref().map(|run| run.run_id.clone());
+                    }
+                    if let pig_protocol::Event::UserMessage { text, .. } = &event {
+                        turn_inputs.push((text.clone(), active_run.clone()));
+                    }
                     if matches!(
                         event,
                         pig_protocol::Event::UserMessage { ref text, .. }
@@ -1391,7 +1399,7 @@ async fn worker_crash_resumes_a_durable_pending_input_in_a_new_run() {
     assert_eq!(pending_visible, 1);
     assert_eq!(
         completions, 2,
-        "completion identities: {completion_identities:#?}"
+        "completion identities: {completion_identities:#?}; inputs: {turn_inputs:#?}"
     );
     assert_eq!(result.status, pig_protocol::AgentRunStatus::Completed);
     resumed.release().await.expect("release resumed run");

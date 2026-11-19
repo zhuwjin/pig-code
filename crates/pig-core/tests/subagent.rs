@@ -1896,8 +1896,8 @@ async fn subagent_stop_then_resume_succeeds_after_driver_settles() {
         None,
     )
     .await;
-    let (resumed, resumed_error) =
-        agent_end_with(&collected, "call_agent_2").expect("resume Agent ToolCallEnd");
+    let (resumed, resumed_error) = agent_end_with(&collected, "call_agent_2")
+        .unwrap_or_else(|| panic!("resume Agent ToolCallEnd: {collected:#?}"));
     assert!(
         !resumed_error,
         "resume after a settled stop should succeed: {resumed}"

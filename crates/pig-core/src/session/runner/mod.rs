@@ -586,6 +586,18 @@ impl Manager {
                 }
             };
             entry.cancel_promote = false;
+            if let Some(completion) = outcome.completion.clone() {
+                emit(
+                    &event_tx,
+                    Event::TurnComplete {
+                        session_id: session_id.clone(),
+                        duration_ms: completion.duration_ms,
+                        run: completion.run,
+                        stats: completion.stats,
+                        finish_reason: completion.finish_reason,
+                    },
+                );
+            }
             if !drain
                 && !matches!(outcome.status, crate::session::AgentRunStatus::Completed)
                 && queued > 0

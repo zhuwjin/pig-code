@@ -113,6 +113,7 @@ struct WorkerRunOutput {
     steering: usize,
     turns: usize,
     usage: (u64, u64, u64),
+    started: bool,
 }
 
 impl WorkerRun {
@@ -163,7 +164,7 @@ impl WorkerRun {
             .map_err(|error| error.to_string())?;
         writeln!(file, "{encoded}").map_err(|error| error.to_string())?;
         file.sync_data().map_err(|error| error.to_string())?;
-        output.fold_event(&record.event);
+        output.fold_event(&record.event, &self.session_id);
         output.events.push(record);
         Ok(sequence)
     }
@@ -176,12 +177,15 @@ impl WorkerRun {
 }
 
 impl WorkerRunOutput {
-    fn fold_event(&mut self, event: &Event) {
+    fn fold_event(&mut self, event: &Event, session_id: &str) {
         match event {
             Event::TextDelta { delta, .. } => self.text.push_str(delta),
             Event::QueueChanged { items, .. } => self.queued = items.len(),
             Event::SteerChanged { items, .. } => self.steering = items.len(),
-            Event::TurnStarted { .. } => self.terminal = None,
+            Event::TurnStarted { .. } => {
+                self.started = true;
+                self.terminal = None;
+            }
             Event::TurnComplete {
                 stats,
                 finish_reason,
@@ -205,18 +209,32 @@ impl WorkerRunOutput {
                     }
                 });
             }
-            Event::TurnAborted { .. } => {
-                self.terminal = Some(IpcRunResult {
-                    status: "cancelled".to_string(),
-                    stop_reason: "cancelled".to_string(),
-                    text: self.text.clone(),
-                    turns: self.turns,
-                    usage: self.usage,
-                });
+            Event::AgentControl { event }
+                if event.kind == "run_settled" && event.agent_id.as_deref() == Some(session_id) =>
+            {
+                let status = event
+                    .payload
+                    .get("status")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("failed");
+                if status != "completed" {
+                    self.terminal = Some(IpcRunResult {
+                        status: status.to_string(),
+                        stop_reason: event
+                            .payload
+                            .get("stop_reason")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or(status)
+                            .to_string(),
+                        text: self.text.clone(),
+                        turns: self.turns,
+                        usage: self.usage,
+                    });
+                }
             }
             Event::Error {
                 error, fatal: true, ..
-            } => {
+            } if !self.started => {
                 self.terminal = Some(IpcRunResult {
                     status: "failed".to_string(),
                     stop_reason: pig_provider::core_error_en(error),
@@ -317,7 +335,7 @@ impl WorkerState {
         {
             let mut output = run.output();
             for event in &events {
-                output.fold_event(&event.event);
+                output.fold_event(&event.event, &run.session_id);
             }
             if output.terminal.is_none() {
                 output.terminal = Some(IpcRunResult {
@@ -1373,5 +1391,68 @@ mod tests {
         assert!(output.terminal.is_none());
         drop(output);
         std::fs::remove_dir_all(root).expect("remove journal fault injection directory");
+    }
+
+    #[test]
+    fn terminal_worker_output_waits_for_the_root_run_settlement() {
+        let mut output = WorkerRunOutput::default();
+        output.fold_event(
+            &Event::TurnStarted {
+                session_id: "root".into(),
+                turn_id: "turn".into(),
+                run: None,
+            },
+            "root",
+        );
+        output.fold_event(
+            &Event::TurnAborted {
+                session_id: "root".into(),
+                run: None,
+            },
+            "root",
+        );
+        assert!(output.terminal.is_none());
+        let settled = |agent_id: &str| Event::AgentControl {
+            event: pig_protocol::AgentControlEvent {
+                session_id: "root".into(),
+                sequence: 1,
+                event_id: "settled".into(),
+                kind: "run_settled".into(),
+                agent_id: Some(agent_id.into()),
+                run_id: Some("run".into()),
+                attempt: Some(1),
+                backend_epoch: Some("epoch".into()),
+                payload: serde_json::json!({"status":"cancelled", "stop_reason":"cancelled"}),
+                created_at_ms: 1,
+            },
+        };
+        output.fold_event(&settled("child"), "root");
+        assert!(output.terminal.is_none(), "a child cannot settle the root");
+        output.fold_event(&settled("root"), "root");
+        assert_eq!(
+            output
+                .terminal
+                .as_ref()
+                .map(|result| result.status.as_str()),
+            Some("cancelled")
+        );
+
+        let mut rejected = WorkerRunOutput::default();
+        rejected.fold_event(
+            &Event::Error {
+                session_id: Some("root".into()),
+                error: pig_protocol::CoreError::NoModelConfigured,
+                fatal: true,
+            },
+            "root",
+        );
+        assert_eq!(
+            rejected
+                .terminal
+                .as_ref()
+                .map(|result| result.status.as_str()),
+            Some("failed"),
+            "a pre-start rejection must not wait forever"
+        );
     }
 }

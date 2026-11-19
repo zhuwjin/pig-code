@@ -637,17 +637,13 @@ impl Session {
                     self.sync_rollout();
                     self.report_rollout_failure(tx);
                     let run = self.run_envelope();
-                    let outcome = self.root_result(crate::session::AgentRunStatus::Completed);
-                    self.emit(
-                        |session_id| Event::TurnComplete {
-                            session_id,
-                            duration_ms,
-                            run,
-                            stats,
-                            finish_reason,
-                        },
-                        tx,
-                    );
+                    let mut outcome = self.root_result(crate::session::AgentRunStatus::Completed);
+                    outcome.completion = Some(crate::session::outcome::TurnCompletion {
+                        duration_ms,
+                        run,
+                        stats,
+                        finish_reason,
+                    });
                     self.touch_index();
                     return outcome;
                 }
