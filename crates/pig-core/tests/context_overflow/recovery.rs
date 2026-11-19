@@ -574,6 +574,42 @@ async fn overflow_after_a_side_effect_never_replays_the_tool() {
 
     let events = send_and_complete(&agent, &session_id, "write the overflow fixture once").await;
     let target = dir.join("overflow-side-effect.txt");
+    if !common::native_sandbox_usable() {
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                Event::ToolCallEnd { item_id, output, .. }
+                    if item_id.ends_with("call_srv_1") && common::native_sandbox_refusal(output)
+            )),
+            "the real tool call must report the unavailable native sandbox: {events:#?}"
+        );
+        assert!(!target.exists(), "a refused side effect leaves no file");
+        let rollout_path = data_dir
+            .join("sessions")
+            .join(format!("{session_id}.jsonl"));
+        let count_starts = || {
+            std::fs::read_to_string(&rollout_path)
+                .expect("rollout after refused side effect")
+                .matches("\"type\":\"tool_execution_start\"")
+                .count()
+        };
+        assert_eq!(count_starts(), 1, "recovery must not replay the tool");
+        agent.shutdown();
+        let agent = pig_core::spawn_agent_with_data_dir(Some(config), dir.clone(), data_dir);
+        open_session(&agent, &session_id).await;
+        send_and_complete(&agent, &session_id, "continue without replaying tools").await;
+        assert!(
+            !target.exists(),
+            "restart must not execute the refused tool"
+        );
+        assert_eq!(
+            count_starts(),
+            1,
+            "restart must not add an execution boundary"
+        );
+        agent.shutdown();
+        return;
+    }
     assert_eq!(
         std::fs::read_to_string(&target).unwrap_or_else(|error| panic!(
             "first Write result at {}: {error}; {events:#?}",

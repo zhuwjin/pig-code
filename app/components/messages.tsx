@@ -941,10 +941,13 @@ export function MessageList(props: UiContext & { items: ChatItem[]; navFoot?: nu
           lastContentHeight = event.contentSize.height;
           lastViewportHeight = event.size.height;
           distanceFromEnd = event.contentSize.height - event.offset.y - event.size.height;
-          setLatestVisible(distanceFromEnd > FOLLOW_THRESHOLD);
         }}
+        viewabilityConfig={{ itemVisibleThreshold: 1 }}
         onViewableItemsChange={({ viewableItems }) => {
           visibleRowIndices = viewableItems.filter((item) => item.isViewable).map((item) => item.index);
+          const last = rows().length - 1;
+          const latestVisible = last >= 0 && viewableItems.some((item) => item.index === last && item.isViewable);
+          setLatestVisible(last >= 0 && !latestVisible);
           updateActiveTurn();
         }}
       >

@@ -141,6 +141,9 @@ test("creates, edits and deletes providers and models through real config", asyn
   await app.waitFor("id:model-delete-custom-1-mock-copy-model", { state: "gone" });
   await app.press("id:provider-delete-custom-1");
   await app.waitFor("确认删除");
+  await app.type("id:provider-name", " Stable");
+  await app.waitFor("Mock Copy Renamed Stable");
+  await app.waitFor("确认删除");
   await app.press("id:provider-delete-custom-1");
   await app.waitFor("id:provider-select-custom-1", { state: "gone" });
 });

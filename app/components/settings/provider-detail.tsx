@@ -297,8 +297,11 @@ export function ProviderDetail(props: UiContext & {
 }) {
   const { provider, store } = props;
   const deleteArmed = signal(false);
+  let deleteProviderId = provider().id;
   effect(() => {
-    provider().id;
+    const id = provider().id;
+    if (id === deleteProviderId) return;
+    deleteProviderId = id;
     deleteArmed.set(false);
   });
   return (
