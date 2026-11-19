@@ -69,7 +69,8 @@ windows = { version = "0.57", features = [
 # (`mxc_common` models, the `process_container_common` runner and the generated
 # PSEC specification) live behind `#[doc(hidden)]` re-exports there, which is
 # what upstream's own Codex sandbox consumes as well.
-mxc-sdk = "1.0"
+# Exact version: NSH's generated build graph does not reuse the workspace lockfile.
+mxc-sdk = "=1.0.1"
 # Builds the minimal PSEC specification the availability probe creates.
 flatbuffers = "25"
 # MXC's ETW dependency: 1.2.4 imports OneCore_apiset, which the GNU Windows

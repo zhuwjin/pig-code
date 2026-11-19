@@ -343,6 +343,22 @@ fn verified_status_requires_complete_delivery_evidence() {
 }
 
 #[test]
+fn native_sdk_version_is_exact_for_nsh_builds() {
+    let (workspace, _) = load_matrix();
+    let manifest: toml::Value = fs::read_to_string(workspace.join("crates/pig-core/Cargo.toml"))
+        .expect("read pig-core manifest")
+        .parse()
+        .expect("parse pig-core manifest");
+    let version = manifest["target"]["cfg(windows)"]["dependencies"]["mxc-sdk"]
+        .as_str()
+        .expect("Windows MXC dependency version");
+    assert!(
+        version.starts_with('='),
+        "NSH generated builds need an exact MXC version, got {version}"
+    );
+}
+
+#[test]
 fn legacy_execute_control_plane_stays_removed() {
     let (workspace, _) = load_matrix();
     for path in [

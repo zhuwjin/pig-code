@@ -324,7 +324,7 @@
       "area": "Automated architecture conformance gates",
       "reference_semantics": "Kimi statically rejects environment bypasses and unscoped execution; DeepSeek package contracts put process, persistence and extension ownership behind explicit seams.",
       "pig_invariants": ["CI rejects domain-owned Runtime state, legacy dual control writes, provider/backend Session branches, unbounded provider/runtime channels and production permission bypasses.", "Inventory and verified delivery evidence are machine-checked; status cannot substitute for missing semantics, named tests or successful platform proof."],
-      "automated_tests": ["architecture::domain_modules_cannot_own_runtime_control_state", "architecture::session_has_no_backend_or_provider_special_cases", "architecture::verified_status_requires_complete_delivery_evidence"],
+      "automated_tests": ["architecture::domain_modules_cannot_own_runtime_control_state", "architecture::session_has_no_backend_or_provider_special_cases", "architecture::verified_status_requires_complete_delivery_evidence", "architecture::native_sdk_version_is_exact_for_nsh_builds"],
       "references": [{"project": "kimi-code", "path": "packages/agent-core-v2/test/environment/architectureBoundaries.test.ts"}, {"project": "deepseek-harness", "path": "scripts/"}],
       "existing_evidence": ["crates/pig-core/tests/architecture.rs", "crates/pig-core/tests/runtime_extensions.rs", "crates/pig-core/src/journal.rs", "src/agent.rs", "crates/pig-core/src/task/notification.rs"],
       "missing_proof": [],
