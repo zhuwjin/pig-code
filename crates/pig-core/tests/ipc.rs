@@ -285,13 +285,36 @@ async fn real_worker_completes_and_reconnects_after_parent_restart() {
         .expect("stop reconnected run");
     active_cursor = worker_info.latest_sequence;
     let stopped = wait_terminal(address, &active_run.run_id, &mut active_cursor).await;
-    assert_eq!(stopped.status, "cancelled");
+    if crate::common::native_sandbox_usable() {
+        assert_eq!(stopped.status, "cancelled");
+    } else {
+        let observed = ipc_events(address, &active_run.run_id, 0)
+            .await
+            .expect("read the terminal tool receipt");
+        assert!(
+            observed.events.iter().any(|record| matches!(
+                &record.event,
+                pig_protocol::Event::ToolCallEnd { output, .. }
+                    if crate::common::native_sandbox_refusal(output)
+            )),
+            "a completed run on this host must have refused the sandboxed command"
+        );
+        assert!(
+            matches!(stopped.status.as_str(), "completed" | "cancelled"),
+            "the remote run must be terminal: {stopped:?}"
+        );
+    }
+    let terminal_status = if stopped.status == "completed" {
+        RuntimeRunStatus::Completed
+    } else {
+        RuntimeRunStatus::Cancelled
+    };
     reconnected
         .settle_run(
             active_run.run_id.clone(),
             second_attempt.attempt,
             second_attempt.backend_epoch,
-            RuntimeRunStatus::Cancelled,
+            terminal_status,
             Some(stopped.stop_reason),
             stopped.usage,
         )
