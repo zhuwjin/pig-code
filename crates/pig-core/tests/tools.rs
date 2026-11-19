@@ -1,5 +1,7 @@
 //! Tool-layer unit tests: Edit failure branches, path escape, write/diff/revert.
 
+mod common;
+
 use pig_core::task::SessionToolState;
 use pig_core::tool::{self, ChangeTracker, ToolContext};
 use pig_provider::ToolCall;
@@ -735,6 +737,10 @@ fn fetch_url_is_private_host_ranges() {
 /// TaskStop → Killed (a repeated stop errors); TaskList renders both ids.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn background_bash_task_lifecycle() {
+    if !common::native_sandbox_usable() {
+        common::assert_native_sandbox_rejection().await;
+        return;
+    }
     let dir = temp_dir("bgtask");
     let mut tracker = ChangeTracker::default();
     let state = SessionToolState::for_test();
