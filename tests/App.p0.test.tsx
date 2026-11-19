@@ -192,6 +192,7 @@ test("opens a subagent conversation from the shared conversation wire", async ()
   await app.press("id:send-button");
   await app.waitFor("text:/MOCK_SUBAGENT_PARENT_DONE/", { timeout: 30000 });
   if (!app.texts().some((text) => text.includes("subagent selftest delegation"))) {
+    await app.waitFor("text:/执行了 1 次工具调用/", { timeout: 10000 });
     await app.press("text:/执行了 1 次工具调用/");
   }
   await app.waitFor("text:/subagent selftest delegation/", { timeout: 10000 });
