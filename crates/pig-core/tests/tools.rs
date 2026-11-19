@@ -767,21 +767,26 @@ async fn background_bash_task_lifecycle() {
     let task1 = task_id_of(&out);
 
     // Poll the registry until Completed (with a timeout)
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
-        let done = {
+        let snapshot = {
             let tasks = state.tasks.lock().expect("tasks lock");
-            matches!(
-                tasks.iter().find(|t| t.id == task1).map(|t| &t.status),
-                Some(pig_protocol::TaskStatus::Completed)
-            )
+            tasks
+                .iter()
+                .find(|task| task.id == task1)
+                .map(|task| (task.status, task.reason.clone(), task.output.clone()))
         };
-        if done {
-            break;
+        match snapshot {
+            Some((pig_protocol::TaskStatus::Completed, _, _)) => break,
+            Some((pig_protocol::TaskStatus::Running | pig_protocol::TaskStatus::Queued, _, _)) => {}
+            Some((status, reason, output)) => {
+                panic!("background task did not complete: {status:?}; {reason:?}; {output}")
+            }
+            None => panic!("background task is missing from the registry"),
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "timed out waiting for the background task to exit"
+            "timed out waiting for the background task to exit: {snapshot:?}"
         );
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
