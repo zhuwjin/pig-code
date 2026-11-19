@@ -172,6 +172,7 @@ test("adds a preset provider and maintains models in the fleet table", async () 
 test("stores and clears provider keys without exposing them in the page", async () => {
   const app = await openApp();
   await app.press("id:settings-open");
+  await app.waitFor("id:provider-edit-mock", { timeout: 10000 });
   await app.press("id:provider-edit-mock");
   await app.press("id:provider-toggle-mask");
   await app.press("id:provider-toggle-mask");

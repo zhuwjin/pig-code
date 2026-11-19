@@ -24,6 +24,7 @@ test("searches the full merged catalog with aliases", () => {
 test("selects, cancels and clears provider icons from the title row", async () => {
   const app = await openApp();
   await app.press("id:settings-open");
+  await app.waitFor("id:provider-icon-picker-mock", { timeout: 10000 });
   await app.press("id:provider-icon-picker-mock");
   await app.waitFor("id:icon-picker");
   await app.type("id:icon-search", "深度求索");
@@ -48,6 +49,7 @@ test("selects, cancels and clears provider icons from the title row", async () =
 test("uses the same catalog and independent icon on model rows", async () => {
   const app = await openApp();
   await app.press("id:settings-open");
+  await app.waitFor("id:model-icon-picker-mock-mock-model", { timeout: 10000 });
   await app.press("id:model-icon-picker-mock-mock-model");
   await app.waitFor("id:icon-picker");
   await app.type("id:icon-search", "openrouter");
