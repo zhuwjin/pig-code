@@ -561,7 +561,10 @@ async fn overflow_after_a_side_effect_never_replays_the_tool() {
     let server = start_server(ServerMode::SideEffectOverflow);
     let (agent, session_id, config, dir, data_dir) =
         new_agent_for(&server, "side-effect-overflow", 128_000, 8_192).await;
-    agent.shutdown();
+    agent
+        .close()
+        .await
+        .expect("close the runtime before restarting");
     seed_old_segment(
         &data_dir,
         &session_id,
@@ -594,7 +597,10 @@ async fn overflow_after_a_side_effect_never_replays_the_tool() {
                 .count()
         };
         assert_eq!(count_starts(), 1, "recovery must not replay the tool");
-        agent.shutdown();
+        agent
+            .close()
+            .await
+            .expect("close the runtime before restarting");
         let agent = pig_core::spawn_agent_with_data_dir(Some(config), dir.clone(), data_dir);
         open_session(&agent, &session_id).await;
         send_and_complete(&agent, &session_id, "continue without replaying tools").await;
@@ -677,7 +683,10 @@ async fn overflow_after_a_side_effect_never_replays_the_tool() {
     );
 
     std::fs::write(&target, "external-update").expect("external post-recovery update");
-    agent.shutdown();
+    agent
+        .close()
+        .await
+        .expect("close the runtime before restarting");
     let agent = pig_core::spawn_agent_with_data_dir(Some(config), dir.clone(), data_dir.clone());
     open_session(&agent, &session_id).await;
     send_and_complete(&agent, &session_id, "continue without replaying tools").await;
