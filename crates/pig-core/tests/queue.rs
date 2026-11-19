@@ -27,6 +27,14 @@ async fn send(agent: &pig_core::AgentHandle, sid: &str, text: &str, delivery: Me
 
 /// Collect events until the predicate hits, auto-approving nothing (Auto
 /// mode keeps the SLOW bash approval-free — it is not read-only)
+async fn slow_command_supported() -> bool {
+    if common::native_sandbox_usable() {
+        return true;
+    }
+    common::assert_native_sandbox_rejection().await;
+    false
+}
+
 async fn collect(
     agent: &pig_core::AgentHandle,
     timeout: Duration,
@@ -76,8 +84,7 @@ fn steer_items(events: &[Event]) -> Vec<pig_protocol::QueueItem> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn steer_accepted_then_falls_back_on_interrupt() {
-    if !common::native_sandbox_usable() {
-        common::assert_native_sandbox_rejection().await;
+    if !slow_command_supported().await {
         return;
     }
     let (config_path, cwd, data_dir) = setup("queue-steer-fallback");
@@ -157,6 +164,9 @@ async fn steer_accepted_then_falls_back_on_interrupt() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn steer_injects_at_stop_boundary_within_same_turn() {
+    if !slow_command_supported().await {
+        return;
+    }
     let (config_path, cwd, data_dir) = setup("queue-steer-inject");
     let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir);
     let requests = mock::start_mock_server_with_log().1;
@@ -265,6 +275,9 @@ async fn queue_lane_auto_continues_with_ids() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancel_and_reorder_manage_queue_lane() {
+    if !slow_command_supported().await {
+        return;
+    }
     let (config_path, cwd, data_dir) = setup("queue-manage");
     let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir);
     let sid = new_session(&agent, cwd).await;
@@ -402,8 +415,7 @@ async fn cancel_and_reorder_manage_queue_lane() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lane_moves_reorder_and_steer_send_now() {
-    if !common::native_sandbox_usable() {
-        common::assert_native_sandbox_rejection().await;
+    if !slow_command_supported().await {
         return;
     }
     let (config_path, cwd, data_dir) = setup("queue-lane-moves");
@@ -587,6 +599,9 @@ async fn lane_moves_reorder_and_steer_send_now() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn send_queued_now_interrupts_and_runs_first() {
+    if !slow_command_supported().await {
+        return;
+    }
     let (config_path, cwd, data_dir) = setup("queue-send-now");
     let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir);
     let sid = new_session(&agent, cwd).await;
@@ -648,6 +663,9 @@ async fn send_queued_now_interrupts_and_runs_first() {
 /// banner survived an emptied queue — nothing left to resume).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn deleting_all_queued_items_clears_the_pause() {
+    if !slow_command_supported().await {
+        return;
+    }
     let (config_path, cwd, data_dir) = setup("queue-cancel-unpauses");
     let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir);
     let sid = new_session(&agent, cwd).await;
@@ -725,6 +743,9 @@ async fn deleting_all_queued_items_clears_the_pause() {
 /// false while the promoted item ran).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn send_queued_now_resumes_a_paused_queue() {
+    if !slow_command_supported().await {
+        return;
+    }
     let (config_path, cwd, data_dir) = setup("queue-send-now-resume");
     let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir);
     let sid = new_session(&agent, cwd).await;
@@ -820,6 +841,9 @@ async fn send_queued_now_resumes_a_paused_queue() {
 /// exactly as it was.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stale_send_queued_now_keeps_the_queue_paused() {
+    if !slow_command_supported().await {
+        return;
+    }
     let (config_path, cwd, data_dir) = setup("queue-stale-send-now");
     let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir);
     let sid = new_session(&agent, cwd).await;
@@ -956,6 +980,9 @@ async fn stale_send_queued_now_keeps_the_queue_paused() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn steer_with_images_falls_back_to_queue_lane() {
+    if !slow_command_supported().await {
+        return;
+    }
     let (config_path, cwd, data_dir) = setup("queue-steer-images");
     let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir);
     let sid = new_session(&agent, cwd).await;
@@ -1011,6 +1038,9 @@ async fn steer_with_images_falls_back_to_queue_lane() {
 /// held message.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn held_queue_confirmation_flow() {
+    if !slow_command_supported().await {
+        return;
+    }
     let (config_path, cwd, data_dir) = setup("queue-held");
     let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir);
     let sid = new_session(&agent, cwd.clone()).await;
@@ -1122,6 +1152,9 @@ async fn held_queue_confirmation_flow() {
 /// user resumes via Op::ResumeQueue).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pending_queue_persists_across_restart() {
+    if !slow_command_supported().await {
+        return;
+    }
     let (config_path, cwd, data_dir) = setup("queue-persist");
     let agent = pig_core::spawn_agent_with_data_dir(
         Some(config_path.clone()),
@@ -1234,6 +1267,9 @@ async fn pending_queue_persists_across_restart() {
 /// consecutive boundaries (two extra model rounds), all within one turn.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn one_steer_per_boundary() {
+    if !slow_command_supported().await {
+        return;
+    }
     let (config_path, cwd, data_dir) = setup("queue-steer-one-per");
     let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir);
     let sid = new_session(&agent, cwd).await;
