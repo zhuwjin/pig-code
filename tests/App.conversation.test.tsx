@@ -251,6 +251,10 @@ test("collapses completed work and keeps turn actions available", async () => {
 
 test("keeps stop and send as separate controls during a running turn", async () => {
   const app = await openApp();
+  app.onDialog(() => "启用完全访问");
+  await app.press("id:exec-mode");
+  await app.press("id:exec-mode-full");
+  await app.waitFor("id:exec-mode >> text:完全访问");
   await app.type("id:composer-input", "SLOW_BASH_SCENARIO");
   await app.press("id:send-button");
   await app.waitFor("id:stop-button", { timeout: 20000 });

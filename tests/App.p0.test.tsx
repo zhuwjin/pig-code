@@ -135,6 +135,10 @@ test("supports plan review and returns revision feedback", async () => {
 
 test("queues, steers, reorders, edits and resumes messages while running", async () => {
   const app = await openApp();
+  app.onDialog(() => "启用完全访问");
+  await app.press("id:exec-mode");
+  await app.press("id:exec-mode-full");
+  await app.waitFor("id:exec-mode >> text:完全访问");
   await app.type("id:composer-input", "SLOW_BASH_SCENARIO");
   await app.press("id:send-button");
   await app.waitFor("id:stop-button", { timeout: 20000 });
