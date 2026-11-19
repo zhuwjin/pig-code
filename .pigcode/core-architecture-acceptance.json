@@ -69,7 +69,7 @@
     "lib.rs": {
       "paths": ["crates/pig-core/src/lib.rs"],
       "acceptance": ["R17", "R18", "R19"],
-      "public_surface": ["AgentHandle", "AgentHandle.ops", "AgentHandle.events", "AgentHandle.journal", "AgentHandle.shutdown", "AgentHandle.close", "spawn_agent", "spawn_agent_with_data_dir", "spawn_agent_with_data_dir_and_credentials", "net_test_full_turn", "windows_sandbox_helper_main"]
+      "public_surface": ["AgentHandle", "AgentHandle.ops", "AgentHandle.events", "AgentHandle.journal", "AgentHandle.shutdown", "AgentHandle.close", "AgentHandle.close_blocking", "spawn_agent", "spawn_agent_with_data_dir", "spawn_agent_with_data_dir_and_credentials", "net_test_full_turn", "windows_sandbox_helper_main"]
     },
     "mcp": {
       "paths": ["crates/pig-core/src/mcp/"],
