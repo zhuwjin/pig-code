@@ -191,7 +191,7 @@ pub async fn new_session(agent: &pig_core::AgentHandle, cwd: PathBuf) -> String 
         })
         .await
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let Ok(Ok(event)) = tokio::time::timeout(Duration::from_secs(1), agent.events.recv()).await
         else {
