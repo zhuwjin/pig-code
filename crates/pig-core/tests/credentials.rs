@@ -1087,7 +1087,6 @@ async fn a_junctioned_credential_read_prompts_for_the_real_target() {
     let mut named_target = false;
     let mut named_alias = false;
     let mut read_content = false;
-    let mut saw_native_refusal = false;
     let mut request_details = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
@@ -1117,7 +1116,6 @@ async fn a_junctioned_credential_read_prompts_for_the_real_target() {
         }
         if let Event::ToolCallEnd { output, .. } = &event {
             read_content |= output.contains("KNOWN-HOSTS-ENTRY");
-            saw_native_refusal |= common::native_sandbox_refusal(output);
         }
         if matches!(event, Event::TurnComplete { .. }) {
             break;
@@ -1138,12 +1136,7 @@ async fn a_junctioned_credential_read_prompts_for_the_real_target() {
         !named_alias,
         "the junction spelling is not the approved object"
     );
-    if common::native_sandbox_usable() {
-        assert!(read_content, "after approval the junctioned read succeeds");
-    } else {
-        assert!(saw_native_refusal, "the junctioned read fails closed");
-        assert!(!read_content, "the refused read cannot reveal the target");
-    }
+    assert!(read_content, "after approval the junctioned read succeeds");
     agent.shutdown();
 }
 
