@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use pig_protocol::{Event, Op};
@@ -88,17 +88,19 @@ pub async fn assert_native_sandbox_rejection() {
 
 #[allow(dead_code)]
 pub fn outside_dir(name: &str) -> PathBuf {
-    let home = std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
-        .map(PathBuf::from)
-        .expect("home for outside-workspace test fixture");
-    home.join(".pigcode-test-tmp").join(
-        test_dir(name)
-            .file_name()
-            .expect("test directory name")
-            .to_string_lossy()
-            .into_owned(),
-    )
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("workspace root")
+        .join("target")
+        .join("test-tmp")
+        .join(
+            test_dir(name)
+                .file_name()
+                .expect("test directory name")
+                .to_string_lossy()
+                .into_owned(),
+        )
 }
 
 #[allow(dead_code)]

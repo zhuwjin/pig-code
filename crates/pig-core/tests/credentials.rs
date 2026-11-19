@@ -1049,6 +1049,7 @@ async fn a_junctioned_credential_read_prompts_for_the_real_target() {
     let target = store.join("known_hosts");
     std::fs::write(&target, "KNOWN-HOSTS-ENTRY").expect("write fixture");
     common::junction(&dir.join("innocent-dir"), &store);
+    let canonical_target = dunce::canonicalize(&target).expect("canonical credential target");
     // SAFETY: credential tests serialize on `credential_env_lock`.
     let previous = std::env::var_os("USERPROFILE");
     unsafe { std::env::set_var("USERPROFILE", &profile) };
@@ -1101,8 +1102,8 @@ async fn a_junctioned_credential_read_prompts_for_the_real_target() {
         {
             saw_dialog = true;
             request_details.push(detail.clone());
-            named_target = detail.contains(&target.to_string_lossy().replace('\\', "/"))
-                || detail.contains(&target.to_string_lossy().to_string());
+            named_target = detail.contains(&canonical_target.to_string_lossy().replace('\\', "/"))
+                || detail.contains(&canonical_target.to_string_lossy().to_string());
             named_alias = detail.contains("innocent-dir");
             agent
                 .ops
