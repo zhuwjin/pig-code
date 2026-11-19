@@ -13,6 +13,7 @@ test("opens model settings, lists models and tests the connection", async () => 
   const app = await openApp();
   await app.press("id:settings-open");
   await app.waitFor("id:settings-page");
+  await app.waitFor("id:provider-edit-mock", { timeout: 10000 });
   expect(app.texts()).toContain("模型设置");
   expect(app.texts()).toContain("Mock");
   expect(app.texts()).toContain("mock-model");
