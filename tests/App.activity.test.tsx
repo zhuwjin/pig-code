@@ -99,12 +99,11 @@ test("expands the last item in a large activity", async () => {
   await app.waitFor("id:activity-tool-0");
   await app.press("id:activity-tool-0");
   await app.waitFor("id:activity-tool-0-body");
-  await app.scroll("id:activity-tool-0-body", 40000);
-  await app.waitFor("Last tool is visible");
+  await app.press("id:show-last-tool");
   await app.waitFor("id:tool-tool-998");
   await app.press("id:tool-tool-998");
   await app.wait(400);
-  await app.scroll("id:activity-tool-0-body", 500);
+  await app.press("id:show-last-tool");
   await app.waitFor("id:wrap-tool-998");
 }, 180_000);
 

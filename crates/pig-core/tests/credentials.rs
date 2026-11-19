@@ -90,6 +90,7 @@ async fn a_credential_file_grant_is_offered_once_per_command() {
     let mut saw_dialog = false;
     let mut decisions_ok = false;
     let mut detail_ok = false;
+    let mut saw_native_refusal = false;
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         assert!(Instant::now() < deadline, "timed out");
@@ -118,6 +119,9 @@ async fn a_credential_file_grant_is_offered_once_per_command() {
                 .await
                 .unwrap();
         }
+        if let Event::ToolCallEnd { output, .. } = &event {
+            saw_native_refusal |= common::native_sandbox_refusal(output);
+        }
         let done = matches!(event, Event::TurnComplete { .. });
         if done {
             break;
@@ -135,10 +139,21 @@ async fn a_credential_file_grant_is_offered_once_per_command() {
         "no session-scoped option for a credential file"
     );
     assert!(detail_ok, "the dialog explains the credential boundary");
-    assert_eq!(
-        std::fs::read_to_string(&target).unwrap_or_default().trim(),
-        "x"
-    );
+    if common::native_sandbox_usable() {
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap_or_default().trim(),
+            "x"
+        );
+    } else {
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap_or_default().trim(),
+            "OLD"
+        );
+        assert!(
+            saw_native_refusal,
+            "the approved command still fails closed"
+        );
+    }
     agent.shutdown();
 }
 
@@ -717,12 +732,23 @@ async fn a_redundant_read_request_runs_without_a_dialog() {
         "a redundant read request must not prompt: {collected:#?}"
     );
     let ends = tool_ends(&collected);
-    assert!(
-        ends.iter().any(|(_, output, is_error)| {
-            output.contains("PLAIN-CONTENT") && output.contains("was already allowed") && !is_error
-        }),
-        "the command ran and the output carries the guidance: {ends:?}"
-    );
+    if common::native_sandbox_usable() {
+        assert!(
+            ends.iter().any(|(_, output, is_error)| {
+                output.contains("PLAIN-CONTENT")
+                    && output.contains("was already allowed")
+                    && !is_error
+            }),
+            "the command ran and the output carries the guidance: {ends:?}"
+        );
+    } else {
+        assert!(
+            ends.iter().any(|(_, output, _)| {
+                common::native_sandbox_refusal(output) && output.contains("was already allowed")
+            }),
+            "a redundant request is dropped before the native sandbox refusal: {ends:?}"
+        );
+    }
     agent.shutdown();
 }
 
@@ -1060,6 +1086,8 @@ async fn a_junctioned_credential_read_prompts_for_the_real_target() {
     let mut named_target = false;
     let mut named_alias = false;
     let mut read_content = false;
+    let mut saw_native_refusal = false;
+    let mut request_details = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         assert!(Instant::now() < deadline, "timed out");
@@ -1072,6 +1100,7 @@ async fn a_junctioned_credential_read_prompts_for_the_real_target() {
         } = &event
         {
             saw_dialog = true;
+            request_details.push(detail.clone());
             named_target = detail.contains(&target.to_string_lossy().replace('\\', "/"))
                 || detail.contains(&target.to_string_lossy().to_string());
             named_alias = detail.contains("innocent-dir");
@@ -1085,10 +1114,9 @@ async fn a_junctioned_credential_read_prompts_for_the_real_target() {
                 .await
                 .unwrap();
         }
-        if let Event::ToolCallEnd { output, .. } = &event
-            && output.contains("KNOWN-HOSTS-ENTRY")
-        {
-            read_content = true;
+        if let Event::ToolCallEnd { output, .. } = &event {
+            read_content |= output.contains("KNOWN-HOSTS-ENTRY");
+            saw_native_refusal |= common::native_sandbox_refusal(output);
         }
         if matches!(event, Event::TurnComplete { .. }) {
             break;
@@ -1103,13 +1131,18 @@ async fn a_junctioned_credential_read_prompts_for_the_real_target() {
     assert!(saw_dialog, "the junctioned credential target must prompt");
     assert!(
         named_target,
-        "the dialog must name the object actually granted"
+        "the dialog must name the object actually granted: {request_details:?}"
     );
     assert!(
         !named_alias,
         "the junction spelling is not the approved object"
     );
-    assert!(read_content, "after approval the junctioned read succeeds");
+    if common::native_sandbox_usable() {
+        assert!(read_content, "after approval the junctioned read succeeds");
+    } else {
+        assert!(saw_native_refusal, "the junctioned read fails closed");
+        assert!(!read_content, "the refused read cannot reveal the target");
+    }
     agent.shutdown();
 }
 
@@ -1168,6 +1201,7 @@ async fn a_credential_directory_listing_is_approvable() {
     let mut said_listing = false;
     let mut saw_names = false;
     let mut saw_contents = false;
+    let mut saw_native_refusal = false;
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         assert!(Instant::now() < deadline, "timed out");
@@ -1196,6 +1230,7 @@ async fn a_credential_directory_listing_is_approvable() {
             saw_names |=
                 output.contains("known_hosts") && !output.contains("Operation not permitted");
             saw_contents |= output.contains("HOST-CONFIG");
+            saw_native_refusal |= common::native_sandbox_refusal(output);
         }
         if matches!(event, Event::TurnComplete { .. }) {
             break;
@@ -1213,7 +1248,12 @@ async fn a_credential_directory_listing_is_approvable() {
         "no doomed retry prompt: the listing grant was the whole approval"
     );
     assert!(said_listing, "the dialog offers the listing");
-    assert!(saw_names, "entry names are visible after approval");
+    if common::native_sandbox_usable() {
+        assert!(saw_names, "entry names are visible after approval");
+    } else {
+        assert!(saw_native_refusal, "the listing command fails closed");
+        assert!(!saw_names, "the refused listing reveals no names");
+    }
     assert!(!saw_contents, "contents stay denied");
     agent.shutdown();
 }

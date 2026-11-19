@@ -93,12 +93,13 @@ pub fn windows_sandbox_helper_main() -> i32 {
     crate::task::helper_main()
 }
 
+#[derive(Clone)]
 pub struct AgentHandle {
     pub ops: async_channel::Sender<Op>,
     pub events: async_channel::Receiver<Event>,
     pub journal: EventJournal,
     pub credentials: std::sync::Arc<crate::credentials::CredentialManager>,
-    thread: tokio::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+    thread: std::sync::Arc<std::sync::Mutex<Option<std::thread::JoinHandle<()>>>>,
 }
 
 impl AgentHandle {
@@ -110,8 +111,12 @@ impl AgentHandle {
     /// callers share the same close boundary.
     pub async fn close(&self) -> Result<(), String> {
         let _ = self.ops.send(Op::Shutdown).await;
-        let mut current = self.thread.lock().await;
-        let Some(thread) = current.take() else {
+        let Some(thread) = self
+            .thread
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        else {
             return Ok(());
         };
         match tokio::task::spawn_blocking(move || thread.join()).await {
@@ -119,6 +124,22 @@ impl AgentHandle {
             Ok(Err(_)) => Err("agent runtime thread panicked".to_string()),
             Err(error) => Err(format!("agent runtime close task failed: {error}")),
         }
+    }
+
+    /// Stops the runtime and joins its thread without requiring a Tokio runtime.
+    pub fn close_blocking(&self) -> Result<(), String> {
+        self.shutdown();
+        let thread = self
+            .thread
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        let Some(thread) = thread else {
+            return Ok(());
+        };
+        thread
+            .join()
+            .map_err(|_| "agent runtime thread panicked".to_string())
     }
 }
 
@@ -301,6 +322,6 @@ pub fn spawn_agent_with_data_dir_and_credentials(
         events: event_rx,
         journal,
         credentials,
-        thread: tokio::sync::Mutex::new(Some(thread)),
+        thread: std::sync::Arc::new(std::sync::Mutex::new(Some(thread))),
     }
 }

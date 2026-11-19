@@ -558,6 +558,21 @@ fn encode_batch(batch: &[Event]) -> String {
     })
 }
 
+impl Drop for Agent {
+    fn drop(&mut self) {
+        let Some(directory) = self._selftest_dir.take() else {
+            return;
+        };
+        let handle = self.handle.clone();
+        std::thread::spawn(move || {
+            if let Err(error) = handle.close_blocking() {
+                tracing::warn!(%error, "selftest runtime cleanup failed");
+            }
+            drop(directory);
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -600,6 +615,29 @@ mod tests {
             }
         };
         (agent, root, session_id)
+    }
+
+    #[test]
+    fn selftest_cleanup_closes_the_runtime_before_removing_its_directory() {
+        for _ in 0..16 {
+            let agent = Agent::new(None, Some(true));
+            let root = agent
+                ._selftest_dir
+                .as_ref()
+                .expect("selftest directory")
+                .0
+                .clone();
+            drop(agent);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while root.exists() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "selftest cleanup did not finish: {}",
+                    root.display()
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
     }
 
     #[test]
