@@ -18,6 +18,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: "true"
       - name: Install NSH (macOS and Linux)
         if: runner.os != 'Windows'
         env:
