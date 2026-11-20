@@ -4,7 +4,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use pig_protocol::{TaskKind, TaskStatus, TaskSummary};
-use tokio::sync::mpsc::UnboundedSender;
 
 use crate::rollout::now_secs;
 use crate::store::BackgroundTask;
@@ -57,6 +56,7 @@ pub struct TaskEntry {
     pub started_at: u64,
     pub ended_at: Option<u64>,
     pub pid: Option<u32>,
+    pub(super) process: Option<super::process::ProcessTask>,
     pub output: String,
     /// Full-output spill (lazily created under the session's data-dir tool-results dir)
     pub(super) spill: Option<spill::Spill>,
@@ -81,6 +81,14 @@ pub struct TaskEntry {
 }
 
 impl TaskEntry {
+    pub(crate) fn needs_stop(&self) -> bool {
+        matches!(self.status, TaskStatus::Running | TaskStatus::Queued)
+            || self
+                .process
+                .as_ref()
+                .is_some_and(|process| !process.is_quiescent())
+    }
+
     pub fn recovered_agent(
         id: String,
         command: String,
@@ -100,6 +108,7 @@ impl TaskEntry {
             started_at: created_at,
             ended_at: Some(now_secs()),
             pid: None,
+            process: None,
             output: String::new(),
             spill: None,
             cancel: None,
@@ -185,6 +194,16 @@ impl TaskRegistry {
             })
     }
 
+    #[cfg(test)]
+    pub(crate) fn try_lock(&self) -> Option<RegistryGuard<'_>> {
+        let guard = self.entries.try_lock().ok()?;
+        Some(RegistryGuard {
+            guard,
+            revision: &self.revision,
+            changed: false,
+        })
+    }
+
     pub fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
         self.revision.subscribe()
     }
@@ -219,9 +238,9 @@ impl std::ops::DerefMut for RegistryGuard<'_> {
     }
 }
 
-/// Registration of one subagent's explicit TaskWait interest. The ids stay in
-/// the shared set after a successful wait so the runner does not queue the
-/// same terminal notification as a steer; timeout/error drops the registration.
+/// Registration of a root or delegated agent's explicit TaskWait interest.
+/// Successfully delivered ids stay registered to prevent duplicate delivery;
+/// timeout, cancellation and errors release the pending registration.
 pub(crate) struct TaskWaitInterest {
     waits: Arc<Mutex<HashMap<String, HashSet<String>>>>,
     state: SessionToolState,
@@ -236,16 +255,17 @@ impl TaskWaitInterest {
         owner: &str,
         task_ids: &HashSet<String>,
     ) -> Self {
-        let task_ids: Vec<String> = task_ids.iter().cloned().collect();
-        if !task_ids.is_empty() {
-            state
-                .agent_task_waits
-                .lock()
-                .expect("agent task waits lock")
-                .entry(owner.to_string())
-                .or_default()
-                .extend(task_ids.iter().cloned());
+        let mut task_ids: Vec<String> = task_ids.iter().cloned().collect();
+        if task_ids.is_empty() {
+            task_ids.push("*".to_string());
         }
+        state
+            .agent_task_waits
+            .lock()
+            .expect("agent task waits lock")
+            .entry(owner.to_string())
+            .or_default()
+            .extend(task_ids.iter().cloned());
         Self {
             waits: state.agent_task_waits.clone(),
             state: state.clone(),
@@ -306,18 +326,43 @@ impl Drop for TaskWaitInterest {
                 waits.remove(&self.owner);
             }
         }
+        drop(waits);
+        let changes: Vec<super::notification::TaskChange> = {
+            let tasks = self.state.tasks.lock().expect("task registry lock");
+            tasks
+                .iter()
+                .filter(|entry| {
+                    entry.status.is_terminal()
+                        && !entry.terminal_notification_suppressed
+                        && (self.task_ids.contains(&entry.id)
+                            || self.task_ids.iter().any(|id| id == "*"))
+                })
+                .map(|entry| super::notification::terminal_change(&self.state.session_id, entry))
+                .collect()
+        };
+        for change in changes {
+            super::notification::publish_change(&self.state.task_notify, change);
+        }
     }
 }
 
-/// Whether `owner` successfully received `task_id` through TaskWait; the
-/// terminal notification must not be queued as a steer a second time.
-pub(crate) fn task_wait_delivered(state: &SessionToolState, owner: &str, task_id: &str) -> bool {
+/// Whether `owner` has an active or delivered TaskWait claim for `task_id`.
+pub(crate) fn task_wait_pending(state: &SessionToolState, owner: &str, task_id: &str) -> bool {
     state
         .agent_task_waits
         .lock()
         .expect("agent task waits lock")
         .get(owner)
-        .is_some_and(|ids| ids.contains(task_id))
+        .is_some_and(|ids| ids.contains(task_id) || ids.contains("*"))
+}
+
+pub(crate) fn task_wait_is_pending(state: &SessionToolState, task_id: &str) -> bool {
+    state
+        .agent_task_waits
+        .lock()
+        .expect("agent task waits lock")
+        .values()
+        .any(|ids| ids.contains(task_id) || ids.contains("*"))
 }
 
 pub(crate) fn mark_agent_notification_delivered(
@@ -338,7 +383,8 @@ pub(crate) fn mark_agent_notification_delivered(
     if changed {
         state.notify_task(task_id);
     }
-    if let Some(notification_id) = notification_id
+    if state.owner_agent_id.is_some()
+        && let Some(notification_id) = notification_id
         && let Err(error) = state.agents.consume_notification(notification_id)
     {
         tracing::warn!(%task_id, %notification_id, %error, "notification mailbox consumption failed");
@@ -366,7 +412,7 @@ pub(crate) fn release_agent_mailbox(state: &SessionToolState, owner: &str) {
             .collect()
     };
     for change in changes {
-        let _ = state.task_notify.send(change);
+        super::notification::publish_change(&state.task_notify, change);
     }
 }
 
@@ -378,7 +424,7 @@ pub struct SessionToolState {
     pub todos: TodoHandle,
     pub tasks: TaskRegistry,
     /// Task snapshots and terminal notifications share one channel to the manager.
-    pub task_notify: UnboundedSender<super::notification::TaskChange>,
+    pub task_notify: async_channel::Sender<super::notification::TaskChange>,
     pub session_id: String,
     /// The subagent that owns tasks spawned through this state; None for the
     /// root session (its background tasks notify it directly).
@@ -451,7 +497,7 @@ impl Clone for SessionToolState {
 impl SessionToolState {
     pub fn new(
         session_id: String,
-        task_notify: UnboundedSender<super::notification::TaskChange>,
+        task_notify: async_channel::Sender<super::notification::TaskChange>,
         extra_read_roots: Vec<PathBuf>,
         extra_rw_roots: Vec<PathBuf>,
     ) -> Self {
@@ -619,24 +665,28 @@ impl SessionToolState {
     }
 
     pub fn notify_task(&self, task_id: &str) {
-        let tasks = self.tasks.lock().expect("task registry lock");
-        if let Some(change) = tasks
-            .iter()
-            .find(|entry| entry.id == task_id)
-            .map(|entry| super::notification::snapshot_change(&self.session_id, entry))
-        {
-            let _ = self.task_notify.send(change);
+        let change = {
+            let tasks = self.tasks.lock().expect("task registry lock");
+            tasks
+                .iter()
+                .find(|entry| entry.id == task_id)
+                .map(|entry| super::notification::snapshot_change(&self.session_id, entry))
+        };
+        if let Some(change) = change {
+            super::notification::publish_change(&self.task_notify, change);
         }
     }
 
     pub fn notify_terminal(&self, task_id: &str) {
-        let tasks = self.tasks.lock().expect("task registry lock");
-        if let Some(change) = tasks
-            .iter()
-            .find(|entry| entry.id == task_id)
-            .map(|entry| super::notification::terminal_change(&self.session_id, entry))
-        {
-            let _ = self.task_notify.send(change);
+        let change = {
+            let tasks = self.tasks.lock().expect("task registry lock");
+            tasks
+                .iter()
+                .find(|entry| entry.id == task_id)
+                .map(|entry| super::notification::terminal_change(&self.session_id, entry))
+        };
+        if let Some(change) = change {
+            super::notification::publish_change(&self.task_notify, change);
         }
     }
 
@@ -668,7 +718,7 @@ impl SessionToolState {
     /// behavior is unchanged).
     pub fn for_test() -> Self {
         static TEST_SEQ: AtomicUsize = AtomicUsize::new(0);
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = async_channel::bounded(1024);
         let data_dir = std::env::temp_dir().join(format!(
             "pig-task-state-{}-{}",
             std::process::id(),
@@ -749,6 +799,7 @@ impl TaskRegistry {
                 started_at: summary.started_at_ms / 1_000,
                 ended_at: summary.ended_at_ms.map(|value| value / 1_000),
                 pid: None,
+                process: None,
                 output: summary.output_tail,
                 spill: summary.spill_path.map(spill::Spill::restored),
                 cancel: None,
@@ -795,8 +846,11 @@ pub(super) fn append_output(registry: &TaskRegistry, task_id: &str, raw: &[u8], 
         }
         entry.output.drain(..start);
     }
-    if let Some(spill) = &mut entry.spill {
-        spill.append(raw);
+    if let Some(spill) = &mut entry.spill
+        && let Err(error) = spill.append(raw)
+    {
+        tracing::warn!(task_id = %entry.id, %error, "task spill persistence failed");
+        entry.reason = Some(error);
     }
 }
 
@@ -859,6 +913,7 @@ fn register_agent_task_with_status(
             started_at: now_secs(),
             ended_at: None,
             pid: None,
+            process: None,
             output: String::new(),
             spill: None,
             cancel: Some(cancel),

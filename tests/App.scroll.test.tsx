@@ -39,6 +39,7 @@ test("expands and collapses at the bottom with native layout animation", async (
     height: 700,
   });
   await app.waitFor("Final answer");
+  await app.waitUntil(() => !app.shows("id:latest-messages"));
   expect(app.shows("id:latest-messages")).toBe(false);
 
   await app.press("id:work-expand-turn");

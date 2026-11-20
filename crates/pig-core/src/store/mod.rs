@@ -14,6 +14,7 @@ use rusqlite::{Connection, params};
 
 use crate::rollout::now_secs;
 
+mod deletion;
 mod execution;
 pub use execution::ExecutionClaim;
 mod runtime;
@@ -119,6 +120,16 @@ impl Store {
                 request_id TEXT NOT NULL,
                 payload TEXT NOT NULL,
                 created_at_ms INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS execution_receipts (
+                session_id TEXT NOT NULL,
+                request_id TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (session_id, request_id)
+            );
+            CREATE TABLE IF NOT EXISTS session_deletions (
+                session_id TEXT PRIMARY KEY,
+                requested_at_ms INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS todos (
                 session_id TEXT PRIMARY KEY,
@@ -279,6 +290,20 @@ impl Store {
                 .map_err(|error| pig_protocol::CoreError::TaskStore {
                     detail: error.to_string(),
                 })?;
+        let requested: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM session_deletions WHERE session_id = ?1)",
+                params![id],
+                |row| row.get(0),
+            )
+            .map_err(|error| pig_protocol::CoreError::TaskStore {
+                detail: format!("Failed to verify session deletion request for {id}: {error}"),
+            })?;
+        if !requested {
+            return Err(pig_protocol::CoreError::TaskStore {
+                detail: format!("Session {id} has no durable deletion request"),
+            });
+        }
         transaction
             .execute("DELETE FROM sessions WHERE id = ?1", params![id])
             .map_err(|error| pig_protocol::CoreError::TaskStore {
@@ -292,6 +317,7 @@ impl Store {
             "file_originals",
             "pending_queue",
             "execution_claims",
+            "execution_receipts",
             "background_tasks",
             "task_notifications",
             "runtime_agents",
@@ -311,33 +337,18 @@ impl Store {
                 })?;
         }
         transaction
+            .execute(
+                "DELETE FROM session_deletions WHERE session_id = ?1",
+                params![id],
+            )
+            .map_err(|error| pig_protocol::CoreError::TaskStore {
+                detail: format!("Failed to clear deletion request for session {id}: {error}"),
+            })?;
+        transaction
             .commit()
             .map_err(|error| pig_protocol::CoreError::TaskStore {
                 detail: error.to_string(),
             })
-    }
-
-    /// Delete a session: cascade-clears usage / todos / file_changes / file_originals.
-    /// The rollout JSONL file is deleted by the caller (the handle may still be in use mid-turn)
-    pub fn delete_session(&self, id: &str) {
-        let _ = self
-            .conn
-            .execute("DELETE FROM sessions WHERE id = ?1", params![id]);
-        for table in [
-            "turn_usage",
-            "api_usage",
-            "todos",
-            "file_changes",
-            "file_originals",
-            "pending_queue",
-            "execution_claims",
-        ] {
-            let _ = self.conn.execute(
-                &format!("DELETE FROM {table} WHERE session_id = ?1"),
-                params![id],
-            );
-        }
-        let _ = self.delete_session_tasks(id);
     }
 
     pub fn get_session(&self, id: &str) -> Option<SessionMeta> {
@@ -356,7 +367,11 @@ impl Store {
     /// Sorted by updated_at descending (sidebar list order).
     pub fn sorted_sessions(&self) -> Vec<SessionMeta> {
         let mut stmt = match self.conn.prepare(&format!(
-            "SELECT {} FROM sessions ORDER BY updated_at DESC",
+            "SELECT {} FROM sessions
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM session_deletions WHERE session_id = sessions.id
+             )
+             ORDER BY updated_at DESC",
             Self::SESSION_COLUMNS
         )) {
             Ok(stmt) => stmt,
@@ -809,7 +824,7 @@ mod tests {
 
     #[test]
     fn delete_session_cascades_all_tables() {
-        let (_dir, store) = open_test_store("delete");
+        let (_dir, mut store) = open_test_store("delete");
         let meta = SessionMeta {
             id: "s1".to_string(),
             title: "t".to_string(),
@@ -830,7 +845,10 @@ mod tests {
         store.set_todos("s1", "[]");
         store.upsert_file_change("s1", "a.rs", "d", 1, 1);
         store.upsert_file_original("s1", "a.rs", Some("old"));
-        store.delete_session("s1");
+        store
+            .request_session_deletion("s1")
+            .expect("request deletion");
+        store.delete_session_checked("s1").expect("delete session");
         assert!(
             store.get_session("s1").is_none(),
             "the sessions row should be deleted"
@@ -846,7 +864,10 @@ mod tests {
         assert!(store.file_changes("s1").is_empty());
         assert!(store.file_originals("s1").is_empty());
         // Deleting again does not error (idempotent)
-        store.delete_session("s1");
+        store
+            .request_session_deletion("s1")
+            .expect("request deletion");
+        store.delete_session_checked("s1").expect("delete session");
     }
 
     /// The durable turn identity makes usage recovery idempotent: a second
@@ -952,7 +973,7 @@ mod tests {
 
     #[test]
     fn api_usage_stores_each_call_and_cascades() {
-        let (_dir, store) = open_test_store("api-usage");
+        let (_dir, mut store) = open_test_store("api-usage");
         let mut first = crate::api_usage::ApiUsageRecord {
             session_id: "s1".to_string(),
             source: "main".to_string(),
@@ -1063,7 +1084,10 @@ mod tests {
             .unwrap();
         assert_eq!(missing_usage, 0);
 
-        store.delete_session("s1");
+        store
+            .request_session_deletion("s1")
+            .expect("request deletion");
+        store.delete_session_checked("s1").expect("delete session");
         let remaining: i64 = store
             .conn
             .query_row("SELECT COUNT(*) FROM api_usage", [], |row| row.get(0))

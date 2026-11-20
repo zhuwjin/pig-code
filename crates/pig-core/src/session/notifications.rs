@@ -49,6 +49,7 @@ impl Session {
                 .expect("notification receipt lock")
                 .contains_key(&notification.id)
                 && ids.contains(&notification.id)
+                && !crate::task::task_wait_is_pending(&self.state, &notification.task_id)
         });
         if notifications.is_empty() {
             self.refresh_notification_queue(mailbox, tx);

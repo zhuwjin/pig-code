@@ -531,7 +531,10 @@ async fn subagent_happy_path() {
         2,
         "root and child both use AgentRuntime"
     );
-    assert!(runtime_rows.iter().all(|row| row.1 == "completed"));
+    assert!(
+        runtime_rows.iter().all(|row| row.1 == "completed"),
+        "runtime terminal rows: {runtime_rows:?}"
+    );
     let child = runtime_rows
         .iter()
         .find(|row| row.0 == agent_id)
@@ -1893,8 +1896,8 @@ async fn subagent_stop_then_resume_succeeds_after_driver_settles() {
         None,
     )
     .await;
-    let (resumed, resumed_error) =
-        agent_end_with(&collected, "call_agent_2").expect("resume Agent ToolCallEnd");
+    let (resumed, resumed_error) = agent_end_with(&collected, "call_agent_2")
+        .unwrap_or_else(|| panic!("resume Agent ToolCallEnd: {collected:#?}"));
     assert!(
         !resumed_error,
         "resume after a settled stop should succeed: {resumed}"
@@ -3128,7 +3131,8 @@ async fn running_nested_parent_consumes_automatic_notification_without_waking_ro
         &agent,
         &sid,
         &format!("{} NESTED_BG_STEER", mock::SUBAGENT_TRIGGER),
-        ExecMode::Auto,
+        // Keep the direct parent running even when a host cannot run a sandbox.
+        ExecMode::Full,
         None,
     )
     .await;
@@ -3141,7 +3145,8 @@ async fn running_nested_parent_consumes_automatic_notification_without_waking_ro
     assert!(
         !events
             .iter()
-            .any(|event| matches!(event, Event::TaskNotificationBatch { .. }))
+            .any(|event| matches!(event, Event::TaskNotificationBatch { .. })),
+        "a nested terminal notification must not wake the root: {events:#?}"
     );
     let child_id = parse_agent_id(output).to_string();
     let nested = nested_tool_record(&data_dir, &sid, &child_id, "Agent");

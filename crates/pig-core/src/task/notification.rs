@@ -27,6 +27,28 @@ pub enum TaskChange {
     },
 }
 
+pub(crate) fn publish_change(sender: &async_channel::Sender<TaskChange>, change: TaskChange) {
+    let (session_id, task_id, terminal) = match &change {
+        TaskChange::Snapshot { session_id, task } => (
+            session_id.clone(),
+            task.as_ref().map(|task| task.summary.id.clone()),
+            false,
+        ),
+        TaskChange::Terminal {
+            session_id, task, ..
+        } => (session_id.clone(), Some(task.summary.id.clone()), true),
+    };
+    if let Err(error) = sender.send_blocking(change) {
+        tracing::error!(
+            %session_id,
+            task_id = task_id.as_deref().unwrap_or(""),
+            terminal,
+            error = ?error,
+            "task change could not reach the session manager"
+        );
+    }
+}
+
 pub fn snapshot_change(session_id: &str, entry: &TaskEntry) -> TaskChange {
     TaskChange::Snapshot {
         session_id: session_id.to_string(),

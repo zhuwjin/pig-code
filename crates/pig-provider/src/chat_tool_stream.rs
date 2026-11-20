@@ -142,13 +142,13 @@ impl ChatToolStream {
         Self::default()
     }
 
-    pub(crate) fn push(
+    pub(crate) async fn push(
         &mut self,
         wire_index: Option<usize>,
         id: Option<&str>,
         name: Option<&str>,
         arguments: Option<&str>,
-        tx: &tokio::sync::mpsc::UnboundedSender<ProviderEvent>,
+        tx: &tokio::sync::mpsc::Sender<ProviderEvent>,
     ) {
         let wire_id = non_blank(id);
         let has_blank_name = name.is_some_and(|value| value.trim().is_empty());
@@ -198,17 +198,17 @@ impl ChatToolStream {
             self.calls[slot].call.name = name.to_string();
         }
         if !self.calls[slot].started && self.calls[slot].has_name() {
-            self.start(slot, tx);
+            self.start(slot, tx).await;
         }
         if let Some(index) = wire_index {
             self.associate_index(slot, index);
         }
-        self.append_arguments(slot, arguments, tx);
+        self.append_arguments(slot, arguments, tx).await;
     }
 
-    pub(crate) fn finish(
+    pub(crate) async fn finish(
         mut self,
-        tx: &tokio::sync::mpsc::UnboundedSender<ProviderEvent>,
+        tx: &tokio::sync::mpsc::Sender<ProviderEvent>,
     ) -> Result<Vec<ToolCall>, CoreError> {
         let all_indexed = self.calls.iter().all(|call| call.wire_index.is_some());
         let mut order: Vec<usize> = (0..self.calls.len()).collect();
@@ -222,10 +222,12 @@ impl ChatToolStream {
         for slot in order {
             let call = &mut self.calls[slot];
             if call.started && !call.delta_buffer.is_empty() {
-                let _ = tx.send(ProviderEvent::ToolCallDelta {
-                    index: slot,
-                    delta: std::mem::take(&mut call.delta_buffer),
-                });
+                let _ = tx
+                    .send(ProviderEvent::ToolCallDelta {
+                        index: slot,
+                        delta: std::mem::take(&mut call.delta_buffer),
+                    })
+                    .await;
             }
         }
 
@@ -301,25 +303,27 @@ impl ChatToolStream {
         }
     }
 
-    fn start(&mut self, slot: usize, tx: &tokio::sync::mpsc::UnboundedSender<ProviderEvent>) {
+    async fn start(&mut self, slot: usize, tx: &tokio::sync::mpsc::Sender<ProviderEvent>) {
         let call = &mut self.calls[slot];
         call.started = true;
-        let _ = tx.send(ProviderEvent::ToolCallStart {
-            index: slot,
-            id: call.call.id.clone(),
-            name: call.call.name.clone(),
-        });
+        let _ = tx
+            .send(ProviderEvent::ToolCallStart {
+                index: slot,
+                id: call.call.id.clone(),
+                name: call.call.name.clone(),
+            })
+            .await;
         let deferred = std::mem::take(&mut call.deferred_deltas);
         for fragment in deferred {
-            self.push_live_delta(slot, &fragment, tx);
+            self.push_live_delta(slot, &fragment, tx).await;
         }
     }
 
-    fn append_arguments(
+    async fn append_arguments(
         &mut self,
         slot: usize,
         arguments: Option<&str>,
-        tx: &tokio::sync::mpsc::UnboundedSender<ProviderEvent>,
+        tx: &tokio::sync::mpsc::Sender<ProviderEvent>,
     ) {
         let Some(fragment) = arguments.filter(|fragment| !fragment.is_empty()) else {
             return;
@@ -328,25 +332,27 @@ impl ChatToolStream {
         call.call.arguments.push_str(fragment);
         call.argument_state.append(fragment);
         if call.started {
-            self.push_live_delta(slot, fragment, tx);
+            self.push_live_delta(slot, fragment, tx).await;
         } else {
             call.deferred_deltas.push(fragment.to_string());
         }
     }
 
-    fn push_live_delta(
+    async fn push_live_delta(
         &mut self,
         slot: usize,
         fragment: &str,
-        tx: &tokio::sync::mpsc::UnboundedSender<ProviderEvent>,
+        tx: &tokio::sync::mpsc::Sender<ProviderEvent>,
     ) {
         let buffer = &mut self.calls[slot].delta_buffer;
         buffer.push_str(fragment);
         if has_line_break(fragment) || buffer.len() >= DELTA_FLUSH_BYTES {
-            let _ = tx.send(ProviderEvent::ToolCallDelta {
-                index: slot,
-                delta: std::mem::take(buffer),
-            });
+            let _ = tx
+                .send(ProviderEvent::ToolCallDelta {
+                    index: slot,
+                    delta: std::mem::take(buffer),
+                })
+                .await;
         }
     }
 
@@ -493,7 +499,13 @@ fn has_line_break(fragment: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn collect(rx: &mut tokio::sync::mpsc::UnboundedReceiver<ProviderEvent>) -> Vec<ProviderEvent> {
+    macro_rules! push {
+        ($stream:expr, $($args:tt)*) => {
+            ($stream).push($($args)*).await
+        };
+    }
+
+    fn collect(rx: &mut tokio::sync::mpsc::Receiver<ProviderEvent>) -> Vec<ProviderEvent> {
         let mut events = Vec::new();
         while let Ok(event) = rx.try_recv() {
             events.push(event);
@@ -530,20 +542,41 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn repeated_id_and_late_name_start_once_and_reassemble() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    #[tokio::test]
+    async fn repeated_id_and_late_name_start_once_and_reassemble() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(256);
         let mut stream = ChatToolStream::new();
-        stream.push(Some(3), Some("dup"), None, Some(r#"{"path":"a"#), &tx);
-        stream.push(Some(3), Some("dup"), None, Some(r#".txt""#), &tx);
+        push!(
+            &mut stream,
+            Some(3),
+            Some("dup"),
+            None,
+            Some(r#"{"path":"a"#),
+            &tx
+        );
+        push!(
+            &mut stream,
+            Some(3),
+            Some("dup"),
+            None,
+            Some(r#".txt""#),
+            &tx
+        );
         assert!(collect(&mut rx).is_empty());
 
-        stream.push(Some(3), Some("dup"), Some("Write"), Some("}"), &tx);
+        push!(
+            &mut stream,
+            Some(3),
+            Some("dup"),
+            Some("Write"),
+            Some("}"),
+            &tx
+        );
         let events = collect(&mut rx);
         assert_eq!(starts(&events), vec![(0, "dup".into(), "Write".into())]);
         assert!(deltas(&events).is_empty());
 
-        let calls = stream.finish(&tx).expect("named call finishes");
+        let calls = stream.finish(&tx).await.expect("named call finishes");
         let events = collect(&mut rx);
         assert_eq!(deltas(&events), vec![(0, r#"{"path":"a.txt"}"#.into())]);
         assert_eq!(events.len(), 1, "no ToolCalls or Finished boundary");
@@ -552,48 +585,59 @@ mod tests {
         assert_eq!(calls[0].arguments, r#"{"path":"a.txt"}"#);
     }
 
-    #[test]
-    fn missing_id_gets_stable_canonical_id_and_late_wire_id_is_alias() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    #[tokio::test]
+    async fn missing_id_gets_stable_canonical_id_and_late_wire_id_is_alias() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(256);
         let mut stream = ChatToolStream::new();
-        stream.push(Some(0), None, Some("Read"), Some(r#"{"pa"#), &tx);
+        push!(
+            &mut stream,
+            Some(0),
+            None,
+            Some("Read"),
+            Some(r#"{"pa"#),
+            &tx
+        );
         let events = collect(&mut rx);
         let canonical = starts(&events)[0].1.clone();
         assert!(!canonical.is_empty());
 
-        stream.push(
+        push!(
+            &mut stream,
             Some(0),
             Some("late-wire-id"),
             None,
             Some(r#"th":"a"}"#),
             &tx,
         );
-        let calls = stream.finish(&tx).expect("named call finishes");
+        let calls = stream.finish(&tx).await.expect("named call finishes");
         assert_eq!(calls[0].id, canonical);
         assert_ne!(calls[0].id, "late-wire-id");
         assert_eq!(calls[0].arguments, r#"{"path":"a"}"#);
     }
 
-    #[test]
-    fn same_raw_index_separates_distinct_and_reused_ids() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    #[tokio::test]
+    async fn same_raw_index_separates_distinct_and_reused_ids() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(256);
         let mut stream = ChatToolStream::new();
-        stream.push(
+        push!(
+            &mut stream,
             Some(0),
             Some("dup"),
             Some("first"),
             Some(r#"{"value":"#),
             &tx,
         );
-        stream.push(
+        push!(
+            &mut stream,
             Some(0),
             Some("other"),
             Some("second"),
             Some(r#"{"value":2}"#),
             &tx,
         );
-        stream.push(Some(0), Some("dup"), None, Some("1}"), &tx);
-        stream.push(
+        push!(&mut stream, Some(0), Some("dup"), None, Some("1}"), &tx);
+        push!(
+            &mut stream,
             Some(0),
             Some("dup"),
             Some("first"),
@@ -601,7 +645,7 @@ mod tests {
             &tx,
         );
 
-        let calls = stream.finish(&tx).expect("all calls are named");
+        let calls = stream.finish(&tx).await.expect("all calls are named");
         assert_eq!(calls.len(), 3);
         assert_eq!(calls[0].id, "dup");
         assert_eq!(calls[1].id, "other");
@@ -619,25 +663,27 @@ mod tests {
         assert_eq!(start_slots, vec![0, 1, 2]);
     }
 
-    #[test]
-    fn complete_same_name_structured_start_creates_new_call() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    #[tokio::test]
+    async fn complete_same_name_structured_start_creates_new_call() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(256);
         let mut stream = ChatToolStream::new();
-        stream.push(
+        push!(
+            &mut stream,
             Some(0),
             None,
             Some("same_tool"),
             Some(r#"{"value":1}"#),
             &tx,
         );
-        stream.push(
+        push!(
+            &mut stream,
             Some(0),
             None,
             Some("same_tool"),
             Some(r#"{"value":2}"#),
             &tx,
         );
-        let calls = stream.finish(&tx).expect("both calls are named");
+        let calls = stream.finish(&tx).await.expect("both calls are named");
 
         assert_eq!(
             names_and_arguments(&calls),
@@ -650,68 +696,75 @@ mod tests {
         assert_eq!(starts(&collect(&mut rx)).len(), 2);
     }
 
-    #[test]
-    fn incomplete_nested_structured_start_is_continuation() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    #[tokio::test]
+    async fn incomplete_nested_structured_start_is_continuation() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(256);
         let mut stream = ChatToolStream::new();
-        stream.push(
+        push!(
+            &mut stream,
             Some(0),
             Some("call_1"),
             Some("calculate"),
             Some(r#"{"value":"#),
             &tx,
         );
-        stream.push(
+        push!(
+            &mut stream,
             Some(0),
             Some("call_1"),
             Some("calculate"),
             Some(r#"{"nested":true}}"#),
             &tx,
         );
-        let calls = stream.finish(&tx).expect("call is named");
+        let calls = stream.finish(&tx).await.expect("call is named");
 
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].arguments, r#"{"value":{"nested":true}}"#);
         assert_eq!(starts(&collect(&mut rx)).len(), 1);
     }
 
-    #[test]
-    fn same_index_interleaved_arguments_route_to_their_own_slots() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    #[tokio::test]
+    async fn same_index_interleaved_arguments_route_to_their_own_slots() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(256);
         let mut stream = ChatToolStream::new();
-        stream.push(
+        push!(
+            &mut stream,
             Some(9),
             Some("left"),
             Some("same"),
             Some(r#"{"left":"#),
             &tx,
         );
-        stream.push(
+        push!(
+            &mut stream,
             Some(9),
             Some("right"),
             Some("same"),
             Some(r#"{"right":"#),
             &tx,
         );
-        stream.push(Some(9), Some("left"), None, Some("1}\n"), &tx);
-        stream.push(Some(9), Some("right"), None, Some("2}\n"), &tx);
+        push!(&mut stream, Some(9), Some("left"), None, Some("1}\n"), &tx);
+        push!(&mut stream, Some(9), Some("right"), None, Some("2}\n"), &tx);
         let events = collect(&mut rx);
 
         assert_eq!(
             deltas(&events),
             vec![(0, "{\"left\":1}\n".into()), (1, "{\"right\":2}\n".into()),]
         );
-        let calls = stream.finish(&tx).expect("calls are named");
+        let calls = stream.finish(&tx).await.expect("calls are named");
         assert_eq!(calls[0].arguments, "{\"left\":1}\n");
         assert_eq!(calls[1].arguments, "{\"right\":2}\n");
     }
 
-    #[test]
-    fn permanently_missing_name_is_an_internal_error() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    #[tokio::test]
+    async fn permanently_missing_name_is_an_internal_error() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(256);
         let mut stream = ChatToolStream::new();
-        stream.push(Some(0), Some("call_1"), None, Some("{}"), &tx);
-        let error = stream.finish(&tx).expect_err("pending name must fail");
+        push!(&mut stream, Some(0), Some("call_1"), None, Some("{}"), &tx);
+        let error = stream
+            .finish(&tx)
+            .await
+            .expect_err("pending name must fail");
 
         assert!(matches!(
             error,
@@ -720,35 +773,47 @@ mod tests {
         assert!(collect(&mut rx).is_empty());
     }
 
-    #[test]
-    fn empty_nameless_delta_is_not_actual_pending_data() {
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    #[tokio::test]
+    async fn empty_nameless_delta_is_not_actual_pending_data() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(256);
         let mut stream = ChatToolStream::new();
-        stream.push(Some(0), None, None, Some(""), &tx);
-        let calls = stream.finish(&tx).expect("empty delta creates no call");
+        push!(&mut stream, Some(0), None, None, Some(""), &tx);
+        let calls = stream
+            .finish(&tx)
+            .await
+            .expect("empty delta creates no call");
         assert!(calls.is_empty());
     }
 
-    #[test]
-    fn ambiguous_unlabeled_fragment_does_not_pollute_calls() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    #[tokio::test]
+    async fn ambiguous_unlabeled_fragment_does_not_pollute_calls() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(256);
         let mut stream = ChatToolStream::new();
-        stream.push(
+        push!(
+            &mut stream,
             Some(0),
             Some("call_1"),
             Some("first"),
             Some(r#"{"a":"#),
             &tx,
         );
-        stream.push(
+        push!(
+            &mut stream,
             Some(1),
             Some("call_2"),
             Some("second"),
             Some(r#"{"b":"#),
             &tx,
         );
-        stream.push(None, None, None, Some(r#"{"polluted":true}"#), &tx);
-        let calls = stream.finish(&tx).expect("existing calls are named");
+        push!(
+            &mut stream,
+            None,
+            None,
+            None,
+            Some(r#"{"polluted":true}"#),
+            &tx
+        );
+        let calls = stream.finish(&tx).await.expect("existing calls are named");
 
         assert_eq!(
             names_and_arguments(&calls),
@@ -761,43 +826,86 @@ mod tests {
         );
     }
 
-    #[test]
-    fn fully_indexed_calls_finish_in_wire_index_and_sequence_order() {
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    #[tokio::test]
+    async fn fully_indexed_calls_finish_in_wire_index_and_sequence_order() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(256);
         let mut stream = ChatToolStream::new();
-        stream.push(Some(1), Some("b"), Some("second"), Some("{}"), &tx);
-        stream.push(Some(0), Some("a"), Some("first"), Some("{}"), &tx);
-        stream.push(Some(1), Some("c"), Some("third"), Some("{}"), &tx);
-        let calls = stream.finish(&tx).expect("calls are named");
+        push!(
+            &mut stream,
+            Some(1),
+            Some("b"),
+            Some("second"),
+            Some("{}"),
+            &tx
+        );
+        push!(
+            &mut stream,
+            Some(0),
+            Some("a"),
+            Some("first"),
+            Some("{}"),
+            &tx
+        );
+        push!(
+            &mut stream,
+            Some(1),
+            Some("c"),
+            Some("third"),
+            Some("{}"),
+            &tx
+        );
+        let calls = stream.finish(&tx).await.expect("calls are named");
         let names: Vec<&str> = calls.iter().map(|call| call.name.as_str()).collect();
         assert_eq!(names, vec!["first", "second", "third"]);
     }
 
-    #[test]
-    fn mixed_indexed_and_unindexed_calls_keep_insertion_order() {
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    #[tokio::test]
+    async fn mixed_indexed_and_unindexed_calls_keep_insertion_order() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(256);
         let mut stream = ChatToolStream::new();
-        stream.push(None, Some("a"), Some("first"), Some("{}"), &tx);
-        stream.push(Some(0), Some("b"), Some("second"), Some("{}"), &tx);
-        let calls = stream.finish(&tx).expect("calls are named");
+        push!(&mut stream, None, Some("a"), Some("first"), Some("{}"), &tx);
+        push!(
+            &mut stream,
+            Some(0),
+            Some("b"),
+            Some("second"),
+            Some("{}"),
+            &tx
+        );
+        let calls = stream.finish(&tx).await.expect("calls are named");
         let names: Vec<&str> = calls.iter().map(|call| call.name.as_str()).collect();
         assert_eq!(names, vec!["first", "second"]);
     }
 
-    #[test]
-    fn blank_name_continues_but_cannot_start_and_nonblank_values_are_preserved() {
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    #[tokio::test]
+    async fn blank_name_continues_but_cannot_start_and_nonblank_values_are_preserved() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(256);
         let mut stream = ChatToolStream::new();
-        stream.push(
+        push!(
+            &mut stream,
             Some(0),
             Some(" spaced "),
             Some(" same_tool "),
             Some(r#"{"value":"#),
             &tx,
         );
-        stream.push(Some(0), Some(" \n"), Some("   "), Some("0}"), &tx);
-        stream.push(Some(1), Some("ignored"), Some(""), Some("{}"), &tx);
-        let calls = stream.finish(&tx).expect("blank new name is ignored");
+        push!(
+            &mut stream,
+            Some(0),
+            Some(" \n"),
+            Some("   "),
+            Some("0}"),
+            &tx
+        );
+        push!(
+            &mut stream,
+            Some(1),
+            Some("ignored"),
+            Some(""),
+            Some("{}"),
+            &tx
+        );
+        let calls = stream.finish(&tx).await.expect("blank new name is ignored");
 
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].id, " spaced ");
@@ -805,23 +913,24 @@ mod tests {
         assert_eq!(calls[0].arguments, r#"{"value":0}"#);
     }
 
-    #[test]
-    fn late_name_replays_pending_arguments_with_line_and_size_flush_rules() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    #[tokio::test]
+    async fn late_name_replays_pending_arguments_with_line_and_size_flush_rules() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(256);
         let mut stream = ChatToolStream::new();
         let long = "x".repeat(DELTA_FLUSH_BYTES);
-        stream.push(
+        push!(
+            &mut stream,
             Some(0),
             Some("call_1"),
             None,
             Some(r#"{"content":"l1"#),
             &tx,
         );
-        stream.push(Some(0), None, None, Some(r#"\nl2"#), &tx);
-        stream.push(Some(0), None, None, Some(&long), &tx);
+        push!(&mut stream, Some(0), None, None, Some(r#"\nl2"#), &tx);
+        push!(&mut stream, Some(0), None, None, Some(&long), &tx);
         assert!(collect(&mut rx).is_empty());
 
-        stream.push(Some(0), None, Some("Write"), None, &tx);
+        push!(&mut stream, Some(0), None, Some("Write"), None, &tx);
         let events = collect(&mut rx);
         assert_eq!(starts(&events).len(), 1);
         assert_eq!(
@@ -829,8 +938,8 @@ mod tests {
             vec![(0, r#"{"content":"l1\nl2"#.into()), (0, long.clone())]
         );
 
-        stream.push(Some(0), None, None, Some("\"}"), &tx);
-        let calls = stream.finish(&tx).expect("late name completes call");
+        push!(&mut stream, Some(0), None, None, Some("\"}"), &tx);
+        let calls = stream.finish(&tx).await.expect("late name completes call");
         assert_eq!(deltas(&collect(&mut rx)), vec![(0, "\"}".into())]);
         assert_eq!(
             calls[0].arguments,
@@ -838,8 +947,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn argument_state_tracks_strings_escapes_and_mismatches() {
+    #[tokio::test]
+    async fn argument_state_tracks_strings_escapes_and_mismatches() {
         let mut state = ArgumentState::default();
         state.append(r#"{"value":"braces: } ] { [ and escaped quote: \"#);
         assert!(!state.has_complete_structured_value());
@@ -852,16 +961,19 @@ mod tests {
         assert!(!mismatch.has_complete_structured_value());
     }
 
-    #[test]
-    fn late_id_and_name_can_complete_an_already_complete_pending_call() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    #[tokio::test]
+    async fn late_id_and_name_can_complete_an_already_complete_pending_call() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(256);
         let mut stream = ChatToolStream::new();
-        stream.push(Some(0), None, None, Some("{}"), &tx);
-        stream.push(Some(0), Some("late"), Some("Read"), None, &tx);
+        push!(&mut stream, Some(0), None, None, Some("{}"), &tx);
+        push!(&mut stream, Some(0), Some("late"), Some("Read"), None, &tx);
         let events = collect(&mut rx);
         let canonical = starts(&events)[0].1.clone();
         assert_ne!(canonical, "late");
-        let calls = stream.finish(&tx).expect("late labels name pending call");
+        let calls = stream
+            .finish(&tx)
+            .await
+            .expect("late labels name pending call");
 
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].id, canonical);
@@ -869,15 +981,29 @@ mod tests {
         assert_eq!(calls[0].arguments, "{}");
     }
 
-    #[test]
-    fn repeated_named_empty_start_after_complete_creates_a_new_call() {
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    #[tokio::test]
+    async fn repeated_named_empty_start_after_complete_creates_a_new_call() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(256);
         let mut stream = ChatToolStream::new();
-        stream.push(Some(0), None, Some("Write"), None, &tx);
-        stream.push(Some(0), None, None, Some(r#"{"path":"a"}"#), &tx);
-        stream.push(Some(0), None, Some("Write"), None, &tx);
-        stream.push(Some(0), None, None, Some(r#"{"path":"b"}"#), &tx);
-        let calls = stream.finish(&tx).expect("both calls are named");
+        push!(&mut stream, Some(0), None, Some("Write"), None, &tx);
+        push!(
+            &mut stream,
+            Some(0),
+            None,
+            None,
+            Some(r#"{"path":"a"}"#),
+            &tx
+        );
+        push!(&mut stream, Some(0), None, Some("Write"), None, &tx);
+        push!(
+            &mut stream,
+            Some(0),
+            None,
+            None,
+            Some(r#"{"path":"b"}"#),
+            &tx
+        );
+        let calls = stream.finish(&tx).await.expect("both calls are named");
 
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].arguments, r#"{"path":"a"}"#);
@@ -885,33 +1011,55 @@ mod tests {
         assert_ne!(calls[0].id, calls[1].id);
     }
 
-    #[test]
-    fn blank_name_prefix_is_buffered_until_a_real_name_arrives() {
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    #[tokio::test]
+    async fn blank_name_prefix_is_buffered_until_a_real_name_arrives() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(256);
         let mut stream = ChatToolStream::new();
-        stream.push(Some(0), Some("call_1"), Some(""), Some(r#"{"pa"#), &tx);
-        stream.push(
+        push!(
+            &mut stream,
+            Some(0),
+            Some("call_1"),
+            Some(""),
+            Some(r#"{"pa"#),
+            &tx
+        );
+        push!(
+            &mut stream,
             Some(0),
             Some("call_1"),
             Some("Read"),
             Some(r#"th":"a"}"#),
             &tx,
         );
-        let calls = stream.finish(&tx).expect("late name completes call");
+        let calls = stream.finish(&tx).await.expect("late name completes call");
 
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "Read");
         assert_eq!(calls[0].arguments, r#"{"path":"a"}"#);
     }
 
-    #[test]
-    fn late_wire_index_participates_in_final_sorting() {
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    #[tokio::test]
+    async fn late_wire_index_participates_in_final_sorting() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(256);
         let mut stream = ChatToolStream::new();
-        stream.push(None, Some("b"), Some("second"), Some("{}"), &tx);
-        stream.push(Some(0), Some("a"), Some("first"), Some("{}"), &tx);
-        stream.push(Some(1), Some("b"), None, None, &tx);
-        let calls = stream.finish(&tx).expect("calls are named");
+        push!(
+            &mut stream,
+            None,
+            Some("b"),
+            Some("second"),
+            Some("{}"),
+            &tx
+        );
+        push!(
+            &mut stream,
+            Some(0),
+            Some("a"),
+            Some("first"),
+            Some("{}"),
+            &tx
+        );
+        push!(&mut stream, Some(1), Some("b"), None, None, &tx);
+        let calls = stream.finish(&tx).await.expect("calls are named");
 
         let ids: Vec<&str> = calls.iter().map(|call| call.id.as_str()).collect();
         assert_eq!(ids, vec!["a", "b"]);

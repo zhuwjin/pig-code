@@ -168,8 +168,8 @@ fn child_context_write_failure_is_sticky_and_carries_resume_guidance() {
             .as_ref()
             .expect("child")
             .persist_failure
-            .as_deref()
-            == Some(first.as_str()),
+            .as_ref()
+            == Some(&first),
         "the failure is remembered"
     );
     let second = persist_child_message(&mut drive, &mut ChatMsg::user("second".into()))
@@ -395,10 +395,28 @@ async fn managed_driver_catches_panic_and_settles_registry() {
 
 #[tokio::test]
 async fn uncooperative_local_run_is_dropped_after_stop_grace() {
-    struct SetOnDrop(std::sync::Arc<std::sync::atomic::AtomicBool>);
-    impl Drop for SetOnDrop {
+    struct ObserveExecutionDrop {
+        state: crate::task::SessionToolState,
+        task_id: String,
+        dropped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        status_at_drop: std::sync::Arc<std::sync::Mutex<Option<pig_protocol::TaskStatus>>>,
+    }
+    impl Drop for ObserveExecutionDrop {
         fn drop(&mut self) {
-            self.0.store(true, std::sync::atomic::Ordering::Release);
+            let status = self
+                .state
+                .tasks
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .iter()
+                .find(|entry| entry.id == self.task_id)
+                .map(|entry| entry.status);
+            *self
+                .status_at_drop
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = status;
+            self.dropped
+                .store(true, std::sync::atomic::Ordering::Release);
         }
     }
 
@@ -427,7 +445,13 @@ async fn uncooperative_local_run_is_dropped_after_stop_grace() {
     let cancel = CancellationToken::new();
     cancel.cancel();
     let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let mark_drop = SetOnDrop(dropped.clone());
+    let status_at_drop = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let mark_drop = ObserveExecutionDrop {
+        state: state.clone(),
+        task_id: task_id.clone(),
+        dropped: dropped.clone(),
+        status_at_drop: status_at_drop.clone(),
+    };
     let outcome = tokio::time::timeout(
         std::time::Duration::from_secs(1),
         life.drive(
@@ -444,6 +468,13 @@ async fn uncooperative_local_run_is_dropped_after_stop_grace() {
     assert!(outcome.result.is_cancelled());
     assert!(outcome.result.stop_reason.contains("grace period"));
     assert!(dropped.load(std::sync::atomic::Ordering::Acquire));
+    assert_eq!(
+        *status_at_drop
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        Some(pig_protocol::TaskStatus::Running),
+        "execution resources must drop before settlement and release"
+    );
     assert!(!state.agent_writer_active(&drive.agent.id));
     let status = state
         .tasks
@@ -461,7 +492,7 @@ async fn uncooperative_local_run_is_dropped_after_stop_grace() {
 /// notification through the Drop fallback.
 #[tokio::test]
 async fn background_driver_panic_before_run_notifies_once() {
-    let (task_tx, mut task_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (task_tx, task_rx) = async_channel::bounded(1024);
     let state = crate::task::SessionToolState::new(
         "s-test".into(),
         task_tx,
@@ -710,7 +741,7 @@ async fn child_termination_drops_only_its_approvals() {
 async fn local_backend_rejects_external_reconnect_before_running() {
     use crate::agent::AgentExecutionBackend as _;
 
-    let child = test_child_session("a-reconnect-1");
+    let mut child = test_child_session("a-reconnect-1");
     let identity = crate::agent::AgentRunIdentity {
         session_id: child.event_session_id().to_string(),
         agent_id: child.agent.id.clone(),
@@ -727,9 +758,13 @@ async fn local_backend_rejects_external_reconnect_before_running() {
         run: identity.clone(),
         sequence: 1,
     });
-    let result = Box::new(crate::agent::LocalAgentExecutionBackend::new(child))
-        .execute(request)
-        .await;
+    let state = child.state.clone();
+    let life = test_lifecycle(&state, &test_pending(), &mut child, None);
+    let result = Box::new(crate::agent::LocalAgentExecutionBackend::with_supervisor((
+        child, life,
+    )))
+    .start(request)
+    .await;
     assert!(matches!(
         result,
         Err(crate::agent::AgentBackendError::UnsupportedCapability {

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use pig_protocol::{Event, Op};
@@ -31,10 +31,82 @@ pub fn junction(link: &std::path::Path, target: &std::path::Path) {
     assert!(link.exists(), "junction {} is missing", link.display());
 }
 
+fn test_dir(name: &str) -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("test clock")
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "pig-core-{name}-{}-{nanos}-{sequence}",
+        std::process::id()
+    ))
+}
+
+#[allow(dead_code)]
+pub fn native_sandbox_usable() -> bool {
+    #[cfg(windows)]
+    {
+        return pig_core::task::sandbox_readiness().usable();
+    }
+    #[cfg(not(windows))]
+    true
+}
+
+#[allow(dead_code)]
+pub fn native_sandbox_refusal(output: &str) -> bool {
+    output.contains("process security environment")
+        || output.contains("cannot be sandboxed")
+        || output.contains("sandbox helper")
+}
+
+#[allow(dead_code)]
+pub async fn assert_native_sandbox_rejection() {
+    let (config_path, cwd, data_dir) = setup("native-sandbox-rejection");
+    let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir);
+    let session_id = new_session(&agent, cwd).await;
+    agent
+        .ops
+        .send(Op::SendMessage {
+            session_id,
+            content: mock::SCENARIO_SLOW_TRIGGER.to_string(),
+            files: vec![],
+            images: vec![],
+            permissions: pig_protocol::ExecMode::Auto.permissions(),
+            delivery: pig_protocol::MessageDelivery::Queue,
+        })
+        .await
+        .expect("send sandbox probe");
+    recv_until(&agent.events, Duration::from_secs(30), |event| {
+        matches!(event, Event::ToolCallEnd { output, .. } if native_sandbox_refusal(output))
+    })
+    .await;
+    assert!(!native_sandbox_usable());
+    agent.shutdown();
+}
+
+#[allow(dead_code)]
+pub fn outside_dir(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("workspace root")
+        .join("target")
+        .join("test-tmp")
+        .join(
+            test_dir(name)
+                .file_name()
+                .expect("test directory name")
+                .to_string_lossy()
+                .into_owned(),
+        )
+}
+
 #[allow(dead_code)]
 pub fn setup(name: &str) -> (PathBuf, PathBuf, PathBuf) {
     let port = mock::start_mock_server();
-    let dir = std::env::temp_dir().join(format!("pig-core-{name}-{}", std::process::id()));
+    let dir = test_dir(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join(mock::MOCK_FILE_NAME), mock::MOCK_FILE_CONTENT).unwrap();
@@ -76,7 +148,7 @@ pub fn setup_with_log(
     std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 ) {
     let (port, log) = mock::start_mock_server_with_log();
-    let dir = std::env::temp_dir().join(format!("pig-core-{name}-{}", std::process::id()));
+    let dir = test_dir(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join(mock::MOCK_FILE_NAME), mock::MOCK_FILE_CONTENT).unwrap();
@@ -121,7 +193,7 @@ pub async fn new_session(agent: &pig_core::AgentHandle, cwd: PathBuf) -> String 
         })
         .await
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let Ok(Ok(event)) = tokio::time::timeout(Duration::from_secs(1), agent.events.recv()).await
         else {

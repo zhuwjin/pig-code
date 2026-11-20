@@ -118,18 +118,10 @@ async fn run_with_read_roots(
     (out, is_error)
 }
 
-/// Creates a directory that is outside both the workspace and the system tmp
-/// (tmp is a permanent exemption, so a sibling under `%TEMP%` would not be
-/// outside the boundary). Its parent is the tmp parent — e.g.
-/// `%LOCALAPPDATA%` on Windows, `/tmp`'s parent on unix.
+/// Creates an isolated directory outside both the workspace and system tmp.
 fn outside_dir(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
     let _ = dir;
-    let base = std::env::temp_dir()
-        .parent()
-        .expect("tmp must have a parent")
-        .to_path_buf();
-    let path = base.join(format!("{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&path);
+    let path = common::outside_dir(name);
     std::fs::create_dir_all(&path).unwrap();
     path
 }
@@ -825,7 +817,7 @@ async fn plan_mode_blocks_writes() {
 
 /// Session state with extra read-only roots (for the data_dir/sessions allowlist test)
 fn state_with_extra_roots(roots: Vec<std::path::PathBuf>) -> SessionToolState {
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, _rx) = async_channel::bounded(1024);
     SessionToolState::new("test".to_string(), tx, roots, vec![])
 }
 

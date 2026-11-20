@@ -25,7 +25,7 @@ fn temp_dir(name: &str) -> std::path::PathBuf {
 /// session read root is `data_dir/sessions`, the spill dir is
 /// `data_dir/sessions/<session>/tool-results`).
 fn state_with_data_dir(session_id: &str, data_dir: &std::path::Path) -> SessionToolState {
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, _rx) = async_channel::bounded(1024);
     SessionToolState::new(
         session_id.to_string(),
         tx,
@@ -115,6 +115,16 @@ async fn bash(
     state: &SessionToolState,
     args: serde_json::Value,
 ) -> (String, bool) {
+    bash_with_profile(dir, tracker, state, args, Default::default()).await
+}
+
+async fn bash_with_profile(
+    dir: &std::path::Path,
+    tracker: &mut ChangeTracker,
+    state: &SessionToolState,
+    args: serde_json::Value,
+    sandbox_profile: pig_core::task::SandboxProfile,
+) -> (String, bool) {
     let (out, is_error, _, _, _) = tool::execute(
         &call("ExecCommand", args),
         ToolContext {
@@ -123,12 +133,20 @@ async fn bash(
             state,
             fs_grant: None,
             sandbox_override: Default::default(),
-            sandbox_profile: Default::default(),
+            sandbox_profile,
             additional_permissions: Default::default(),
         },
     )
     .await;
     (out, is_error)
+}
+
+async fn require_native_sandbox() -> bool {
+    if common::native_sandbox_usable() {
+        return true;
+    }
+    common::assert_native_sandbox_rejection().await;
+    false
 }
 
 async fn task_ctl(
@@ -158,6 +176,9 @@ async fn task_ctl(
 /// moving the sandbox boundary; `shell` selects the interpreter per call.
 #[tokio::test]
 async fn workdir_and_shell_override_are_honored() {
+    if !require_native_sandbox().await {
+        return;
+    }
     let dir = temp_dir("workdir-shell");
     let sub = dir.join("nested");
     std::fs::create_dir_all(&sub).unwrap();
@@ -226,6 +247,9 @@ fn timed_out_task_id(out: &str) -> String {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn foreground_env_injection() {
+    if !require_native_sandbox().await {
+        return;
+    }
     let dir = temp_dir("env");
     let mut tracker = ChangeTracker::default();
     let state = SessionToolState::for_test();
@@ -248,6 +272,9 @@ async fn foreground_env_injection() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn foreground_timeout_moves_to_background() {
+    if !require_native_sandbox().await {
+        return;
+    }
     let dir = temp_dir("timeout");
     let mut tracker = ChangeTracker::default();
     let state = SessionToolState::for_test();
@@ -293,6 +320,9 @@ async fn foreground_timeout_moves_to_background() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn timeout_task_completes_naturally() {
+    if !require_native_sandbox().await {
+        return;
+    }
     let dir = temp_dir("timeout-done");
     let mut tracker = ChangeTracker::default();
     let state = SessionToolState::for_test();
@@ -336,6 +366,9 @@ async fn timeout_task_completes_naturally() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn foreground_large_output_spills_to_disk() {
+    if !require_native_sandbox().await {
+        return;
+    }
     let dir = temp_dir("spill");
     let mut tracker = ChangeTracker::default();
     let state = SessionToolState::for_test();
@@ -466,6 +499,9 @@ async fn spill_stays_inside_the_session_data_dir_and_ignores_workspace_links() {
 #[cfg(windows)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn spill_ignores_a_workspace_metadata_junction() {
+    if !require_native_sandbox().await {
+        return;
+    }
     let workspace = temp_dir("spill-junction");
     let dummy = temp_dir("spill-junction-dummy");
     let data_dir = temp_dir("spill-junction-store");
@@ -509,6 +545,9 @@ async fn spill_ignores_a_workspace_metadata_junction() {
 /// the files apart.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn spills_do_not_collide_across_sessions_in_one_workspace() {
+    if !require_native_sandbox().await {
+        return;
+    }
     let workspace = temp_dir("spill-sessions");
     let data_dir = temp_dir("spill-sessions-store");
     let first = state_with_data_dir("s1", &data_dir);
@@ -559,18 +598,49 @@ async fn spills_do_not_collide_across_sessions_in_one_workspace() {
     let _ = std::fs::remove_dir_all(&data_dir);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stop_kills_process_group() {
+async fn assert_stop_kills_process_group(profile: pig_core::task::SandboxProfile) {
     let dir = temp_dir("pgroup");
     let mut tracker = ChangeTracker::default();
     let state = SessionToolState::for_test();
 
-    // Run "a child shell spawning a grandchild process" in the background: sleep 60 is a child of sh
-    let (out, is_error) = bash(
+    let started = dir.join("grandchild-started");
+    let late = dir.join("grandchild-late-write");
+    let command_path = |path: &std::path::Path| {
+        let text = path.display().to_string();
+        text.strip_prefix(r"\\?\").unwrap_or(&text).to_string()
+    };
+    let script = dir.join("grandchild.cmd");
+    std::fs::write(
+        &script,
+        format!(
+            "@echo off\r\necho started > \"{}\"\r\nping -n 2 127.0.0.1 >nul\r\necho late > \"{}\"\r\n",
+            command_path(&started),
+            command_path(&late)
+        ),
+    )
+    .expect("grandchild fixture");
+    let shell_path = |path: &std::path::Path| command_path(path).replace('\\', "/");
+    let command = match dialect() {
+        Dialect::Bash => format!(
+            "(touch \"{}\"; sleep 1; printf late > \"{}\") & wait",
+            shell_path(&started),
+            shell_path(&late)
+        ),
+        Dialect::PowerShell => format!(
+            "& $env:COMSPEC /c '{}'",
+            command_path(&script).replace('\'', "''")
+        ),
+        Dialect::Cmd => format!(
+            "start \"pig-grandchild\" /b cmd /c \"{}\" & ping -n 30 127.0.0.1 >nul",
+            command_path(&script)
+        ),
+    };
+    let (out, is_error) = bash_with_profile(
         &dir,
         &mut tracker,
         &state,
-        serde_json::json!({"command": "sleep 60 & wait", "run_in_background": true}),
+        serde_json::json!({"command": command, "run_in_background": true}),
+        profile,
     )
     .await;
     assert!(!is_error, "{out}");
@@ -579,6 +649,23 @@ async fn stop_kills_process_group() {
         .and_then(|rest| rest.split('.').next())
         .expect("background message contains task_id")
         .to_string();
+    let child_started = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !started.exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        child_started.is_ok(),
+        "grandchild did not start: {:?}",
+        state
+            .tasks
+            .lock()
+            .expect("tasks")
+            .iter()
+            .map(|task| (task.status, task.reason.clone(), task.output.clone()))
+            .collect::<Vec<_>>()
+    );
 
     let (out, is_error) = task_ctl(&dir, &mut tracker, &state, "TaskStop", &task_id).await;
     assert!(!is_error, "{out}");
@@ -592,6 +679,27 @@ async fn stop_kills_process_group() {
         "expected Killed: {:?}",
         entry.status
     );
+    assert!(entry.ended_at.is_some(), "stop returned before settlement");
+    drop(tasks);
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    assert!(
+        !late.exists(),
+        "a grandchild survived TaskStop and wrote after it returned"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_kills_process_group() {
+    if !require_native_sandbox().await {
+        return;
+    }
+    assert_stop_kills_process_group(Default::default()).await;
+}
+
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_kills_process_group_without_sandbox() {
+    assert_stop_kills_process_group(pig_core::task::SandboxProfile::Unrestricted).await;
 }
 
 // ---------- 4.3 Destructive command blocklist ----------
@@ -695,9 +803,9 @@ async fn dangerous_command_not_blocked_at_execute_layer() {
 /// State with a real notify channel (for_test drops the receiver, so notifications never arrive)
 fn notify_state() -> (
     SessionToolState,
-    tokio::sync::mpsc::UnboundedReceiver<pig_core::task::TaskChange>,
+    async_channel::Receiver<pig_core::task::TaskChange>,
 ) {
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, rx) = async_channel::bounded(1024);
     (SessionToolState::new("test".into(), tx, vec![], vec![]), rx)
 }
 
@@ -706,8 +814,11 @@ fn notify_state() -> (
 /// foreground command onto the screen as "background Bash · running".
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn foreground_command_not_leaked_into_snapshot() {
+    if !require_native_sandbox().await {
+        return;
+    }
     let dir = temp_dir("fg-snapshot");
-    let (state, mut rx) = notify_state();
+    let (state, rx) = notify_state();
 
     // The background task exits after 0.2s → its watcher notify lands inside the foreground command's execution window
     let bg_id = pig_core::task::spawn_background(&state, &dir, "sleep 0.2");
@@ -750,8 +861,11 @@ async fn foreground_command_not_leaked_into_snapshot() {
 /// Foreground timeout converts to background: the entry becomes visible to the snapshot immediately (Running) and a notify pushes it to the screen.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn timeout_conversion_visible_and_notified() {
+    if !require_native_sandbox().await {
+        return;
+    }
     let dir = temp_dir("fg-convert");
-    let (state, mut rx) = notify_state();
+    let (state, rx) = notify_state();
 
     let outcome =
         pig_core::task::run_foreground(&state, &dir, "sleep 5", std::time::Duration::from_secs(1))
@@ -782,8 +896,11 @@ async fn timeout_conversion_visible_and_notified() {
 /// entry and spill, leaving no "running" orphan.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancelled_foreground_leaves_no_trace() {
+    if !require_native_sandbox().await {
+        return;
+    }
     let dir = temp_dir("fg-cancel");
-    let (state, mut rx) = notify_state();
+    let (state, rx) = notify_state();
 
     let fg_state = state.clone();
     let fg_dir = dir.clone();
@@ -804,8 +921,9 @@ async fn cancelled_foreground_leaves_no_trace() {
     let _ = handle.await;
 
     // Guard cleanup: the notify arrives + registry/snapshot hold no leftovers
-    rx.recv()
+    tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
         .await
+        .expect("cancellation cleanup must finish within 10 seconds")
         .expect("cancel should trigger a cleanup notify");
     let raw_empty = state.tasks.lock().expect("tasks lock").is_empty();
     assert!(raw_empty, "registry should have no orphan entries");
@@ -819,6 +937,9 @@ async fn cancelled_foreground_leaves_no_trace() {
 /// Foreground output flood (seq ≈ 23MB > 16MiB): force-stopped at the limit; the finished output tail carries an explanation.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn foreground_output_cap_kills_command() {
+    if !require_native_sandbox().await {
+        return;
+    }
     let dir = temp_dir("cap16m-fg");
     let mut tracker = ChangeTracker::default();
     let state = SessionToolState::for_test();
@@ -845,6 +966,9 @@ async fn foreground_output_cap_kills_command() {
 /// does not overwrite it), and TaskOutput's tail keeps the note.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn background_output_cap_kills_and_notes() {
+    if !require_native_sandbox().await {
+        return;
+    }
     let dir = temp_dir("cap16m-bg");
     let mut tracker = ChangeTracker::default();
     let state = SessionToolState::for_test();
@@ -892,6 +1016,9 @@ async fn background_output_cap_kills_and_notes() {
 /// The sandboxed shell dialect takes effect and starts in the session workspace.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sandbox_shell_dialect_takes_effect() {
+    if !require_native_sandbox().await {
+        return;
+    }
     let dir = temp_dir("shell-dialect");
     let mut tracker = ChangeTracker::default();
     let state = SessionToolState::for_test();
@@ -928,6 +1055,9 @@ async fn sandbox_shell_dialect_takes_effect() {
 /// StreamDecoder decodes them as GBK instead of replacement characters.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gbk_fallback_decodes_native_output() {
+    if !require_native_sandbox().await {
+        return;
+    }
     if dialect() == Dialect::Cmd {
         return; // cmd has no reliable way to emit raw GBK bytes here
     }
@@ -1483,14 +1613,23 @@ mod windows_sandbox_tests {
     /// installs a weakened rule table must not be observed by another test
     /// mid-flight. An async semaphore rather than a `Mutex` because the guard
     /// is held across `await` (Clippy's `await_holding_lock` is right about that).
-    async fn sandbox_lock() -> tokio::sync::OwnedSemaphorePermit {
+    /// A host without PSEC proves the real refusal through the shared core path
+    /// instead of pretending that the success-path command ran.
+    async fn sandbox_lock() -> Option<tokio::sync::OwnedSemaphorePermit> {
         static LOCK: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
             std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(1)))
+        let permit = LOCK
+            .get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(1)))
             .clone()
             .acquire_owned()
             .await
-            .expect("sandbox test lock")
+            .expect("sandbox test lock");
+        if common::native_sandbox_usable() {
+            Some(permit)
+        } else {
+            common::assert_native_sandbox_rejection().await;
+            None
+        }
     }
 
     fn fixture(name: &str) -> (PathBuf, PathBuf) {
@@ -1642,7 +1781,9 @@ mod windows_sandbox_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn windows_sandbox_allows_workspace_and_system_binaries() {
-        let _guard = sandbox_lock().await;
+        let Some(_guard) = sandbox_lock().await else {
+            return;
+        };
         let (workspace, _) = fixture("workspace");
         let state = SessionToolState::for_test();
         std::fs::write(workspace.join("inside.txt"), "inside-ok").expect("write inside fixture");
@@ -1668,7 +1809,9 @@ mod windows_sandbox_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn windows_sandbox_reads_are_full_disk_but_writes_stay_inside() {
-        let _guard = sandbox_lock().await;
+        let Some(_guard) = sandbox_lock().await else {
+            return;
+        };
         let (workspace, outside) = fixture("outside");
         let state = SessionToolState::for_test();
         std::fs::write(outside.join("outside.txt"), "outside-visible")
@@ -1720,7 +1863,9 @@ mod windows_sandbox_tests {
     /// alias (full-disk read), the write is denied.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn windows_sandbox_junction_alias_keeps_the_write_boundary() {
-        let _guard = sandbox_lock().await;
+        let Some(_guard) = sandbox_lock().await else {
+            return;
+        };
         let (workspace, outside) = fixture("junction");
         let state = SessionToolState::for_test();
         std::fs::write(outside.join("outside.txt"), "OUTSIDE-READ").expect("write outside fixture");
@@ -1753,7 +1898,9 @@ mod windows_sandbox_tests {
     /// writes were allowed must be denied once the profile turns read-only.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn windows_sandbox_read_only_profile_denies_every_write() {
-        let _guard = sandbox_lock().await;
+        let Some(_guard) = sandbox_lock().await else {
+            return;
+        };
         let (workspace, outside) = fixture("read-only");
         let state = SessionToolState::for_test();
         std::fs::write(workspace.join("input.txt"), "READ-ONLY-OK").expect("write fixture");
@@ -1843,7 +1990,9 @@ mod windows_sandbox_tests {
     /// workspace boundary for other commands) is unaffected.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn windows_sandbox_additional_write_root_is_granted_for_one_command() {
-        let _guard = sandbox_lock().await;
+        let Some(_guard) = sandbox_lock().await else {
+            return;
+        };
         let (workspace, outside) = fixture("escalation");
         let state = SessionToolState::for_test();
         // The sensitive-file table is the seeded `[[sandbox.deny]]` config, not
@@ -1938,7 +2087,9 @@ mod windows_sandbox_tests {
     /// `require_escalated` takes when read denials are active.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn windows_escalated_restrictions_widen_writes_but_keep_denies() {
-        let _guard = sandbox_lock().await;
+        let Some(_guard) = sandbox_lock().await else {
+            return;
+        };
         let (workspace, outside) = fixture("escalated-restrictions");
         let state = SessionToolState::for_test();
         install_seeded_settings();
@@ -1977,7 +2128,9 @@ mod windows_sandbox_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn windows_sandbox_sensitive_files_keep_exceptions() {
-        let _guard = sandbox_lock().await;
+        let Some(_guard) = sandbox_lock().await else {
+            return;
+        };
         let (workspace, _) = fixture("sensitive");
         let state = SessionToolState::for_test();
         // The sensitive-file table is the seeded `[[sandbox.deny]]` config, not
@@ -2025,7 +2178,9 @@ mod windows_sandbox_tests {
     /// permissions).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn windows_sandbox_applies_configured_deny_read_rules() {
-        let _guard = sandbox_lock().await;
+        let Some(_guard) = sandbox_lock().await else {
+            return;
+        };
         let (workspace, _) = fixture("deny-read-config");
         let state = SessionToolState::for_test();
         let vault = workspace.join("vault");
@@ -2074,7 +2229,9 @@ mod windows_sandbox_tests {
     /// what makes it configurable.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn windows_sandbox_filesystem_entries_except_one_file() {
-        let _guard = sandbox_lock().await;
+        let Some(_guard) = sandbox_lock().await else {
+            return;
+        };
         let (workspace, _) = fixture("filesystem-entries");
         let state = SessionToolState::for_test();
         let vault = workspace.join("vault");
@@ -2117,7 +2274,9 @@ mod windows_sandbox_tests {
     /// real one.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn windows_sandbox_approved_credential_file_is_writable() {
-        let _guard = sandbox_lock().await;
+        let Some(_guard) = sandbox_lock().await else {
+            return;
+        };
         let (workspace, outside) = fixture("credential-file");
         let state = SessionToolState::for_test();
         let profile = outside.join("profile");
@@ -2221,7 +2380,9 @@ mod windows_sandbox_tests {
     /// it. Pinned against the real kernel.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn windows_sandbox_credential_directory_needs_an_approval_to_list() {
-        let _guard = sandbox_lock().await;
+        let Some(_guard) = sandbox_lock().await else {
+            return;
+        };
         let (workspace, outside) = fixture("credential-listing");
         let state = SessionToolState::for_test();
         let profile = outside.join("profile");
@@ -2324,7 +2485,9 @@ mod windows_sandbox_tests {
     /// the policy names — so "readable per policy" is not "readable per kernel".
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn windows_sandbox_denies_paths_the_policy_text_allows() {
-        let _guard = sandbox_lock().await;
+        let Some(_guard) = sandbox_lock().await else {
+            return;
+        };
         let (workspace, _) = fixture("policy-vs-kernel");
         let state = SessionToolState::for_test();
 
@@ -2364,7 +2527,9 @@ mod windows_sandbox_tests {
     /// contents do not.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn windows_sandbox_credential_directory_listing_can_be_approved() {
-        let _guard = sandbox_lock().await;
+        let Some(_guard) = sandbox_lock().await else {
+            return;
+        };
         let (workspace, outside) = fixture("cred-listing");
         let state = SessionToolState::for_test();
         let profile = outside.join("profile");
@@ -2446,7 +2611,9 @@ mod windows_sandbox_tests {
     /// pointing at a weakened table and pollute the following tests.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn windows_sandbox_a_deny_group_can_be_deleted() {
-        let _guard = sandbox_lock().await;
+        let Some(_guard) = sandbox_lock().await else {
+            return;
+        };
         let (workspace, _) = fixture("deleted-group");
         let state = SessionToolState::for_test();
         std::fs::write(workspace.join(".env"), "DELETED-GROUP-VISIBLE").expect("write env fixture");
@@ -2485,7 +2652,9 @@ mod windows_sandbox_tests {
     /// model write there is code execution on the next launch.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn windows_sandbox_protects_workspace_metadata() {
-        let _guard = sandbox_lock().await;
+        let Some(_guard) = sandbox_lock().await else {
+            return;
+        };
         let (workspace, _) = fixture("metadata");
         let state = SessionToolState::for_test();
 
@@ -2559,7 +2728,9 @@ mod windows_sandbox_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn windows_sandbox_background_commands_use_the_same_boundary() {
-        let _guard = sandbox_lock().await;
+        let Some(_guard) = sandbox_lock().await else {
+            return;
+        };
         let (workspace, outside) = fixture("background");
         let state = SessionToolState::for_test();
         let mut tracker = ChangeTracker::default();
@@ -2607,7 +2778,9 @@ mod windows_sandbox_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn windows_sandbox_preserves_the_exit_code() {
-        let _guard = sandbox_lock().await;
+        let Some(_guard) = sandbox_lock().await else {
+            return;
+        };
         let (workspace, _) = fixture("exit-code");
         let state = SessionToolState::for_test();
         let command = if shell_kind() == "cmd" {

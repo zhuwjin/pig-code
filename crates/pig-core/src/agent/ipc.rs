@@ -1,7 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use futures_util::future::BoxFuture;
@@ -12,9 +11,14 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 
 use super::runtime::new_runtime_id;
+use super::{
+    AgentBackendError, AgentBackendResult, AgentExecutionCapability, AgentExecutionCursor,
+    AgentExecutionHandle, AgentExecutionIdentity, AgentExecutionInput, AgentExecutionReceipt,
+    AgentExecutionRelease, AgentExecutionStop, AgentExecutionUpdate,
+};
 use crate::AgentHandle;
 
-pub const IPC_PROTOCOL_VERSION: u32 = 1;
+pub const IPC_PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -44,6 +48,7 @@ pub struct IpcRunSpec {
     pub cwd: PathBuf,
     pub data_dir: PathBuf,
     pub prompt: String,
+    pub resume_from_run_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -91,52 +96,330 @@ struct IpcResponse {
 }
 
 struct WorkerRun {
-    _agent: AgentHandle,
+    agent: tokio::sync::Mutex<Option<AgentHandle>>,
+    execution: Mutex<AgentExecutionIdentity>,
     session_id: String,
     ops: async_channel::Sender<Op>,
-    events: Mutex<Vec<IpcRunEvent>>,
-    latest_sequence: AtomicU64,
-    terminal: Mutex<Option<IpcRunResult>>,
-    text: Mutex<String>,
+    output: Mutex<WorkerRunOutput>,
+    journal: PathBuf,
 }
 
 #[derive(Default)]
+struct WorkerRunOutput {
+    events: Vec<IpcRunEvent>,
+    terminal: Option<IpcRunResult>,
+    text: String,
+    queued: usize,
+    steering: usize,
+    turns: usize,
+    usage: (u64, u64, u64),
+    started: bool,
+}
+
+impl WorkerRun {
+    fn new(
+        session_id: String,
+        ops: async_channel::Sender<Op>,
+        journal: PathBuf,
+        execution: AgentExecutionIdentity,
+    ) -> Self {
+        Self {
+            agent: tokio::sync::Mutex::new(None),
+            execution: Mutex::new(execution),
+            session_id,
+            ops,
+            output: Mutex::new(WorkerRunOutput::default()),
+            journal,
+        }
+    }
+
+    fn authorize(&self, execution: &AgentExecutionIdentity) -> Result<(), String> {
+        let current = self
+            .execution
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if &*current == execution {
+            return Ok(());
+        }
+        Err(format!(
+            "stale_attempt: run {} is owned by attempt {}, not {}",
+            execution.run.run_id, current.attempt, execution.attempt
+        ))
+    }
+
+    fn record_event(&self, event: Event) -> Result<u64, String> {
+        use std::io::Write as _;
+
+        let mut output = self
+            .output
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let sequence = output.events.last().map_or(1, |event| event.sequence + 1);
+        let record = IpcRunEvent { sequence, event };
+        let encoded = serde_json::to_string(&record).map_err(|error| error.to_string())?;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.journal)
+            .map_err(|error| error.to_string())?;
+        writeln!(file, "{encoded}").map_err(|error| error.to_string())?;
+        file.sync_data().map_err(|error| error.to_string())?;
+        output.fold_event(&record.event, &self.session_id);
+        output.events.push(record);
+        Ok(sequence)
+    }
+
+    fn output(&self) -> std::sync::MutexGuard<'_, WorkerRunOutput> {
+        self.output
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+impl WorkerRunOutput {
+    fn fold_event(&mut self, event: &Event, session_id: &str) {
+        match event {
+            Event::TextDelta { delta, .. } => self.text.push_str(delta),
+            Event::QueueChanged { items, .. } => self.queued = items.len(),
+            Event::SteerChanged { items, .. } => self.steering = items.len(),
+            Event::TurnStarted { .. } => {
+                self.started = true;
+                self.terminal = None;
+            }
+            Event::TurnComplete {
+                stats,
+                finish_reason,
+                ..
+            } => {
+                let stats = stats.clone().unwrap_or_default();
+                self.turns = self.turns.saturating_add(stats.api_steps as usize);
+                self.usage.0 = self.usage.0.saturating_add(stats.input);
+                self.usage.1 = self.usage.1.saturating_add(stats.cache_read);
+                self.usage.2 = self.usage.2.saturating_add(stats.output);
+                self.terminal = (self.queued == 0 && self.steering == 0).then(|| {
+                    let stop_reason = finish_reason
+                        .as_ref()
+                        .map_or_else(|| "completed".to_string(), |reason| format!("{reason:?}"));
+                    IpcRunResult {
+                        status: "completed".to_string(),
+                        stop_reason,
+                        text: self.text.clone(),
+                        turns: self.turns,
+                        usage: self.usage,
+                    }
+                });
+            }
+            Event::AgentControl { event }
+                if event.kind == "run_settled" && event.agent_id.as_deref() == Some(session_id) =>
+            {
+                let status = event
+                    .payload
+                    .get("status")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("failed");
+                if status != "completed" {
+                    self.terminal = Some(IpcRunResult {
+                        status: status.to_string(),
+                        stop_reason: event
+                            .payload
+                            .get("stop_reason")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or(status)
+                            .to_string(),
+                        text: self.text.clone(),
+                        turns: self.turns,
+                        usage: self.usage,
+                    });
+                }
+            }
+            Event::Error {
+                error, fatal: true, ..
+            } if !self.started => {
+                self.terminal = Some(IpcRunResult {
+                    status: "failed".to_string(),
+                    stop_reason: pig_provider::core_error_en(error),
+                    text: self.text.clone(),
+                    turns: self.turns,
+                    usage: self.usage,
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct WorkerRunRecord {
+    run_id: String,
+    session_id: String,
+    execution: AgentExecutionIdentity,
+    spec: IpcRunSpec,
+}
+
 struct WorkerState {
     runs: Mutex<HashMap<String, Arc<WorkerRun>>>,
+    state_dir: PathBuf,
 }
 
 impl WorkerState {
-    fn run(&self, run_id: &str) -> Result<Arc<WorkerRun>, String> {
+    fn new(state_dir: PathBuf) -> Self {
+        Self {
+            runs: Mutex::new(HashMap::new()),
+            state_dir,
+        }
+    }
+
+    fn record_path(&self, run_id: &str) -> PathBuf {
+        self.run_dir(run_id).join("run.json")
+    }
+
+    fn journal_path(&self, run_id: &str) -> PathBuf {
+        self.run_dir(run_id).join("events.jsonl")
+    }
+
+    fn run_dir(&self, run_id: &str) -> PathBuf {
+        use sha2::{Digest as _, Sha256};
+
+        let key = format!("{:x}", Sha256::digest(run_id.as_bytes()));
+        self.state_dir.join("runs").join(key)
+    }
+}
+
+impl WorkerState {
+    fn persist_record(&self, record: &WorkerRunRecord) -> Result<(), String> {
+        let path = self.record_path(&record.run_id);
+        std::fs::create_dir_all(path.parent().expect("worker run parent"))
+            .map_err(|error| error.to_string())?;
+        let bytes = serde_json::to_vec(record).map_err(|error| error.to_string())?;
+        crate::tool::atomic_write(&path, &bytes)
+    }
+
+    fn restore(&self, run_id: &str) -> Result<Arc<WorkerRun>, String> {
+        let path = self.record_path(run_id);
+        if !path.is_file() {
+            return Err(format!("IPC run {run_id} is not registered"));
+        }
+        let record: WorkerRunRecord =
+            serde_json::from_slice(&std::fs::read(&path).map_err(|error| error.to_string())?)
+                .map_err(|error| error.to_string())?;
+        if record.run_id != run_id {
+            return Err(format!("IPC run record identity mismatch for {run_id}"));
+        }
+        let journal = self.journal_path(run_id);
+        let events = if journal.is_file() {
+            std::fs::read_to_string(&journal)
+                .map_err(|error| error.to_string())?
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(|line| {
+                    serde_json::from_str::<IpcRunEvent>(line).map_err(|error| error.to_string())
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            Vec::new()
+        };
+        for (index, event) in events.iter().enumerate() {
+            if event.sequence != index as u64 + 1 {
+                return Err(format!(
+                    "IPC run {run_id} has a non-contiguous event journal"
+                ));
+            }
+        }
+        let (ops, _) = async_channel::bounded(256);
+        let run = Arc::new(WorkerRun::new(
+            record.session_id,
+            ops,
+            journal,
+            record.execution,
+        ));
+        {
+            let mut output = run.output();
+            for event in &events {
+                output.fold_event(&event.event, &run.session_id);
+            }
+            if output.terminal.is_none() {
+                output.terminal = Some(IpcRunResult {
+                    status: "failed".to_string(),
+                    stop_reason: "worker restarted before the run settled".to_string(),
+                    text: output.text.clone(),
+                    turns: 0,
+                    usage: (0, 0, 0),
+                });
+            }
+            output.events = events;
+        }
         self.runs
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(run_id.to_string(), run.clone());
+        Ok(run)
+    }
+
+    fn remove_records(&self, run_id: &str) -> Result<(), String> {
+        let directory = self.run_dir(run_id);
+        if directory.exists() {
+            std::fs::remove_dir_all(directory).map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    fn run(&self, run_id: &str) -> Result<Arc<WorkerRun>, String> {
+        let existing = self
+            .runs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(run_id)
-            .cloned()
-            .ok_or_else(|| format!("IPC run {run_id} is not registered"))
+            .cloned();
+        match existing {
+            Some(run) => Ok(run),
+            None => self.restore(run_id),
+        }
     }
 
     fn info(&self, run_id: &str) -> Result<IpcRunInfo, String> {
         let run = self.run(run_id)?;
+        let output = run.output();
         Ok(IpcRunInfo {
             session_id: run.session_id.clone(),
-            latest_sequence: run.latest_sequence.load(Ordering::Acquire),
-            terminal: run
-                .terminal
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .clone(),
+            latest_sequence: output.events.last().map_or(0, |event| event.sequence),
+            terminal: output.terminal.clone(),
         })
     }
 
-    async fn start(&self, run_id: String, spec: IpcRunSpec) -> Result<IpcRunInfo, String> {
+    async fn start(
+        &self,
+        execution: AgentExecutionIdentity,
+        spec: IpcRunSpec,
+    ) -> Result<IpcRunInfo, String> {
+        let run_id = execution.run.run_id.clone();
         if self
             .runs
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .contains_key(&run_id)
+            || self.record_path(&run_id).is_file()
         {
             return Err(format!("IPC run {run_id} already exists"));
         }
+        if spec.prompt.trim().is_empty() {
+            return Err("IPC run requires a non-empty prompt".to_string());
+        }
+        let resume_session_id = if let Some(source_id) = &spec.resume_from_run_id {
+            if source_id == &run_id {
+                return Err("IPC run cannot resume from itself".to_string());
+            }
+            let source = self.run(source_id)?;
+            if source.output().terminal.is_none() {
+                return Err(format!("IPC source run {source_id} is still active"));
+            }
+            let source_agent = source.agent.lock().await.take();
+            if let Some(source_agent) = source_agent {
+                source_agent.close().await?;
+            }
+            Some(source.session_id.clone())
+        } else {
+            None
+        };
         let credentials = if std::env::var_os("PIG_SELFTEST").is_some() {
             Arc::new(crate::credentials::CredentialManager::mock())
         } else {
@@ -146,31 +429,54 @@ impl WorkerState {
         };
         let cwd = spec.cwd.clone();
         let agent = crate::spawn_agent_with_data_dir_and_credentials(
-            spec.config_path,
-            spec.cwd,
-            spec.data_dir,
+            spec.config_path.clone(),
+            spec.cwd.clone(),
+            spec.data_dir.clone(),
             credentials,
         );
-        agent
-            .ops
-            .send(Op::NewSession {
-                cwd,
-                provider_id: None,
-                model_id: None,
-                reasoning_level: None,
-                permissions: Some(pig_protocol::PermissionSettings::default()),
-                plan_enabled: None,
-            })
-            .await
-            .map_err(|error| error.to_string())?;
-        let events = agent.events.clone();
+        if let Some(session_id) = &resume_session_id {
+            agent
+                .ops
+                .send(Op::OpenSession {
+                    session_id: session_id.clone(),
+                })
+                .await
+                .map_err(|error| error.to_string())?;
+        } else {
+            agent
+                .ops
+                .send(Op::NewSession {
+                    cwd,
+                    provider_id: None,
+                    model_id: None,
+                    reasoning_level: None,
+                    permissions: Some(pig_protocol::PermissionSettings::default()),
+                    plan_enabled: None,
+                })
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        let startup_events = agent.events.clone();
         let session_id = tokio::time::timeout(std::time::Duration::from_secs(30), async {
             loop {
-                match events.recv().await.map_err(|error| error.to_string())? {
-                    Event::SessionConfigured { session_id, .. } => return Ok(session_id),
-                    Event::Error {
-                        error, fatal: true, ..
-                    } => {
+                match startup_events
+                    .recv()
+                    .await
+                    .map_err(|error| error.to_string())?
+                {
+                    Event::SessionReplayComplete { session_id }
+                        if resume_session_id.as_ref() == Some(&session_id) =>
+                    {
+                        return Ok(session_id);
+                    }
+                    Event::SessionConfigured { session_id, .. } if resume_session_id.is_none() => {
+                        return Ok(session_id);
+                    }
+                    Event::SessionReplayComplete { .. } => {
+                        return Err("IPC worker opened an unexpected session".to_string());
+                    }
+                    Event::SessionConfigured { .. } => {}
+                    Event::Error { error, .. } => {
                         return Err(pig_provider::core_error_en(&error));
                     }
                     _ => {}
@@ -179,26 +485,45 @@ impl WorkerState {
         })
         .await
         .map_err(|_| "timed out waiting for IPC worker session".to_string())??;
-        let run = Arc::new(WorkerRun {
-            ops: agent.ops.clone(),
-            _agent: agent,
+        drop(startup_events);
+        let events = agent.events.clone();
+        let run = Arc::new(WorkerRun::new(
+            session_id.clone(),
+            agent.ops.clone(),
+            self.journal_path(&run_id),
+            execution.clone(),
+        ));
+        *run.agent.lock().await = Some(agent);
+        if let Err(error) = self.persist_record(&WorkerRunRecord {
+            run_id: run_id.clone(),
             session_id: session_id.clone(),
-            events: Mutex::new(Vec::new()),
-            latest_sequence: AtomicU64::new(0),
-            terminal: Mutex::new(None),
-            text: Mutex::new(String::new()),
-        });
+            execution: execution.clone(),
+            spec: spec.clone(),
+        }) {
+            let agent = run.agent.lock().await.take();
+            if let Some(agent) = agent {
+                agent.close().await?;
+            }
+            return Err(error);
+        }
         self.runs
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(run_id.clone(), run.clone());
-        tokio::spawn(collect_events(run.clone()));
+        tokio::spawn(collect_events(events, run.clone()));
+        if resume_session_id.is_some() {
+            run.ops
+                .send(Op::ResumeQueue {
+                    session_id: session_id.clone(),
+                })
+                .await
+                .map_err(|error| error.to_string())?;
+        }
         run.ops
-            .send(Op::SendMessage {
+            .send(Op::SendExecutionMessage {
                 session_id,
-                content: spec.prompt,
-                files: Vec::new(),
-                images: Vec::new(),
+                message_id: format!("{run_id}:initial"),
+                content: spec.prompt.clone(),
                 permissions: pig_protocol::PermissionSettings::default(),
                 delivery: MessageDelivery::Queue,
             })
@@ -207,23 +532,72 @@ impl WorkerState {
         self.info(&run_id)
     }
 
-    async fn send(&self, run_id: &str, text: String) -> Result<IpcRunInfo, String> {
+    fn reconnect(&self, execution: AgentExecutionIdentity) -> Result<IpcRunInfo, String> {
+        let run_id = execution.run.run_id.clone();
+        let run = self.run(&run_id)?;
+        let mut current = run
+            .execution
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *current == execution {
+            return self.info(&run_id);
+        }
+        if current.run != execution.run || execution.attempt <= current.attempt {
+            return Err(format!(
+                "stale_attempt: run {run_id} is owned by attempt {}, not {}",
+                current.attempt, execution.attempt
+            ));
+        }
+        let mut record: WorkerRunRecord = serde_json::from_slice(
+            &std::fs::read(self.record_path(&run_id)).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        record.execution = execution.clone();
+        self.persist_record(&record)?;
+        *current = execution;
+        self.info(&run_id)
+    }
+
+    async fn send(
+        &self,
+        run_id: &str,
+        execution: &AgentExecutionIdentity,
+        input: AgentExecutionInput,
+    ) -> Result<IpcRunInfo, String> {
         let run = self.run(run_id)?;
-        *run.terminal
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-        run.text
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clear();
+        run.authorize(execution)?;
+        if run.agent.lock().await.is_none() {
+            return Err(format!(
+                "IPC run {run_id} has no live execution after worker restart"
+            ));
+        }
+        if run.output().terminal.is_some() {
+            return Err(format!("IPC run {run_id} has already settled"));
+        }
+        if input.message_id.is_empty() {
+            return Err("IPC execution input requires a non-empty message_id".to_string());
+        }
+        let text = input
+            .payload
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "IPC execution input requires a text field".to_string())?
+            .to_string();
+        let delivery = input
+            .payload
+            .get("delivery")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|error| error.to_string())?
+            .unwrap_or(MessageDelivery::Steer);
         run.ops
-            .send(Op::SendMessage {
+            .send(Op::SendExecutionMessage {
                 session_id: run.session_id.clone(),
+                message_id: input.message_id,
                 content: text,
-                files: Vec::new(),
-                images: Vec::new(),
                 permissions: pig_protocol::PermissionSettings::default(),
-                delivery: MessageDelivery::Queue,
+                delivery,
             })
             .await
             .map_err(|error| error.to_string())?;
@@ -232,27 +606,27 @@ impl WorkerState {
 
     fn events(&self, run_id: &str, after: u64) -> Result<IpcEventBatch, String> {
         let run = self.run(run_id)?;
-        let events = run
+        let output = run.output();
+        let events = output
             .events
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .iter()
             .filter(|event| event.sequence > after)
             .cloned()
             .collect();
         Ok(IpcEventBatch {
             events,
-            latest_sequence: run.latest_sequence.load(Ordering::Acquire),
-            terminal: run
-                .terminal
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .clone(),
+            latest_sequence: output.events.last().map_or(0, |event| event.sequence),
+            terminal: output.terminal.clone(),
         })
     }
 
-    async fn stop(&self, run_id: &str) -> Result<IpcRunInfo, String> {
+    async fn stop(
+        &self,
+        run_id: &str,
+        execution: &AgentExecutionIdentity,
+    ) -> Result<IpcRunInfo, String> {
         let run = self.run(run_id)?;
+        run.authorize(execution)?;
         run.ops
             .send(Op::Interrupt {
                 session_id: run.session_id.clone(),
@@ -262,32 +636,26 @@ impl WorkerState {
         self.info(run_id)
     }
 
-    fn release(&self, run_id: &str, force: bool) -> Result<(), String> {
-        let run = self
-            .runs
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(run_id)
-            .cloned();
-        let Some(run) = run else {
-            return Ok(());
-        };
-        if !force
-            && run
-                .terminal
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .is_none()
-        {
+    async fn release(
+        &self,
+        run_id: &str,
+        execution: &AgentExecutionIdentity,
+        force: bool,
+    ) -> Result<(), String> {
+        let run = self.run(run_id)?;
+        run.authorize(execution)?;
+        if !force && run.output().terminal.is_none() {
             return Err(format!("IPC run {run_id} is still active"));
         }
-        let removed = self
-            .runs
+        let agent = run.agent.lock().await.take();
+        if let Some(agent) = agent {
+            agent.close().await?;
+        }
+        self.runs
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(run_id);
-        drop(removed);
-        Ok(())
+        self.remove_records(run_id)
     }
 
     async fn dispatch(
@@ -300,23 +668,25 @@ impl WorkerState {
                 Ok(serde_json::to_value(IPC_CAPABILITIES).map_err(|error| error.to_string())?)
             }
             "start" => {
-                let run_id = params["run_id"]
-                    .as_str()
-                    .ok_or("run_id is required")?
-                    .to_string();
+                let execution: AgentExecutionIdentity =
+                    serde_json::from_value(params["execution"].clone())
+                        .map_err(|error| error.to_string())?;
                 let spec: IpcRunSpec = serde_json::from_value(params["spec"].clone())
                     .map_err(|error| error.to_string())?;
-                Ok(serde_json::to_value(self.start(run_id, spec).await?)
+                Ok(serde_json::to_value(self.start(execution, spec).await?)
                     .map_err(|error| error.to_string())?)
             }
             "send" => {
                 let run_id = params["run_id"].as_str().ok_or("run_id is required")?;
-                let text = params["text"]
-                    .as_str()
-                    .ok_or("text is required")?
-                    .to_string();
-                Ok(serde_json::to_value(self.send(run_id, text).await?)
-                    .map_err(|error| error.to_string())?)
+                let execution: AgentExecutionIdentity =
+                    serde_json::from_value(params["execution"].clone())
+                        .map_err(|error| error.to_string())?;
+                let input: AgentExecutionInput = serde_json::from_value(params["input"].clone())
+                    .map_err(|error| error.to_string())?;
+                Ok(
+                    serde_json::to_value(self.send(run_id, &execution, input).await?)
+                        .map_err(|error| error.to_string())?,
+                )
             }
             "events" => {
                 let run_id = params["run_id"].as_str().ok_or("run_id is required")?;
@@ -326,17 +696,30 @@ impl WorkerState {
             }
             "stop" => {
                 let run_id = params["run_id"].as_str().ok_or("run_id is required")?;
-                Ok(serde_json::to_value(self.stop(run_id).await?)
+                let execution: AgentExecutionIdentity =
+                    serde_json::from_value(params["execution"].clone())
+                        .map_err(|error| error.to_string())?;
+                Ok(serde_json::to_value(self.stop(run_id, &execution).await?)
                     .map_err(|error| error.to_string())?)
             }
-            "reconnect" => {
+            "info" => {
                 let run_id = params["run_id"].as_str().ok_or("run_id is required")?;
                 Ok(serde_json::to_value(self.info(run_id)?).map_err(|error| error.to_string())?)
             }
+            "reconnect" => {
+                let execution: AgentExecutionIdentity =
+                    serde_json::from_value(params["execution"].clone())
+                        .map_err(|error| error.to_string())?;
+                Ok(serde_json::to_value(self.reconnect(execution)?)
+                    .map_err(|error| error.to_string())?)
+            }
             "release" => {
                 let run_id = params["run_id"].as_str().ok_or("run_id is required")?;
+                let execution: AgentExecutionIdentity =
+                    serde_json::from_value(params["execution"].clone())
+                        .map_err(|error| error.to_string())?;
                 let force = params["force"].as_bool().unwrap_or(false);
-                self.release(run_id, force)?;
+                self.release(run_id, &execution, force).await?;
                 Ok(serde_json::json!({ "released": true }))
             }
             other => Err(format!("unknown IPC method: {other}")),
@@ -344,77 +727,20 @@ impl WorkerState {
     }
 }
 
-async fn collect_events(run: Arc<WorkerRun>) {
-    let receiver = run._agent.events.clone();
+async fn collect_events(receiver: async_channel::Receiver<Event>, run: Arc<WorkerRun>) {
     while let Ok(event) = receiver.recv().await {
-        match &event {
-            Event::TextDelta { delta, .. } => run
-                .text
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push_str(delta),
-            Event::TurnComplete {
-                stats,
-                finish_reason,
-                ..
-            } => {
-                let stats = stats.clone().unwrap_or_default();
-                let stop_reason = finish_reason
-                    .as_ref()
-                    .map_or_else(|| "completed".to_string(), |reason| format!("{reason:?}"));
-                *run.terminal
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(IpcRunResult {
-                    status: "completed".to_string(),
-                    stop_reason,
-                    text: run
-                        .text
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .clone(),
-                    turns: stats.api_steps as usize,
-                    usage: (stats.input, stats.cache_read, stats.output),
-                });
-            }
-            Event::TurnAborted { .. } => {
-                *run.terminal
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(IpcRunResult {
-                    status: "cancelled".to_string(),
-                    stop_reason: "cancelled".to_string(),
-                    text: run
-                        .text
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .clone(),
-                    turns: 0,
-                    usage: (0, 0, 0),
-                });
-            }
-            Event::Error {
-                error, fatal: true, ..
-            } => {
-                *run.terminal
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(IpcRunResult {
-                    status: "failed".to_string(),
-                    stop_reason: pig_provider::core_error_en(error),
-                    text: run
-                        .text
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .clone(),
-                    turns: 0,
-                    usage: (0, 0, 0),
-                });
-            }
-            _ => {}
+        if let Err(error) = run.record_event(event) {
+            tracing::warn!(%error, "failed to persist IPC worker event");
+            let mut output = run.output();
+            output.terminal = Some(IpcRunResult {
+                status: "failed".to_string(),
+                stop_reason: format!("failed to persist IPC worker event: {error}"),
+                text: output.text.clone(),
+                turns: 0,
+                usage: (0, 0, 0),
+            });
+            break;
         }
-        let sequence = run.latest_sequence.fetch_add(1, Ordering::AcqRel) + 1;
-        run.events
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push(IpcRunEvent { sequence, event });
     }
 }
 
@@ -460,8 +786,8 @@ async fn read_worker_connection(
     Ok(())
 }
 
-pub async fn serve_ipc_worker(listener: TcpListener) -> Result<(), String> {
-    let state = Arc::new(WorkerState::default());
+pub async fn serve_ipc_worker(listener: TcpListener, state_dir: PathBuf) -> Result<(), String> {
+    let state = Arc::new(WorkerState::new(state_dir));
     loop {
         let (stream, _) = listener.accept().await.map_err(|error| error.to_string())?;
         let state = state.clone();
@@ -521,7 +847,7 @@ pub async fn ipc_capabilities(
 
 pub async fn ipc_start_with_requirements(
     address: SocketAddr,
-    run_id: &str,
+    execution: AgentExecutionIdentity,
     spec: IpcRunSpec,
     requirements: std::collections::BTreeSet<IpcCapability>,
 ) -> Result<IpcRunInfo, String> {
@@ -534,7 +860,7 @@ pub async fn ipc_start_with_requirements(
     let value = ipc_call(
         address,
         "start",
-        serde_json::json!({ "run_id": run_id, "spec": spec }),
+        serde_json::json!({ "execution": execution, "spec": spec }),
     )
     .await?;
     serde_json::from_value(value).map_err(|error| error.to_string())
@@ -542,12 +868,12 @@ pub async fn ipc_start_with_requirements(
 
 pub async fn ipc_start(
     address: SocketAddr,
-    run_id: &str,
+    execution: AgentExecutionIdentity,
     spec: IpcRunSpec,
 ) -> Result<IpcRunInfo, String> {
     ipc_start_with_requirements(
         address,
-        run_id,
+        execution,
         spec,
         [
             IpcCapability::Start,
@@ -564,12 +890,13 @@ pub async fn ipc_start(
 pub async fn ipc_send(
     address: SocketAddr,
     run_id: &str,
-    text: String,
+    execution: &AgentExecutionIdentity,
+    input: AgentExecutionInput,
 ) -> Result<IpcRunInfo, String> {
     let value = ipc_call(
         address,
         "send",
-        serde_json::json!({ "run_id": run_id, "text": text }),
+        serde_json::json!({ "run_id": run_id, "execution": execution, "input": input }),
     )
     .await?;
     serde_json::from_value(value).map_err(|error| error.to_string())
@@ -589,29 +916,337 @@ pub async fn ipc_events(
     serde_json::from_value(value).map_err(|error| error.to_string())
 }
 
-pub async fn ipc_stop(address: SocketAddr, run_id: &str) -> Result<IpcRunInfo, String> {
-    let value = ipc_call(address, "stop", serde_json::json!({ "run_id": run_id })).await?;
-    serde_json::from_value(value).map_err(|error| error.to_string())
-}
-
-pub async fn ipc_reconnect(address: SocketAddr, run_id: &str) -> Result<IpcRunInfo, String> {
+pub async fn ipc_stop(
+    address: SocketAddr,
+    execution: &AgentExecutionIdentity,
+) -> Result<IpcRunInfo, String> {
     let value = ipc_call(
         address,
-        "reconnect",
-        serde_json::json!({ "run_id": run_id }),
+        "stop",
+        serde_json::json!({ "run_id": execution.run.run_id, "execution": execution }),
     )
     .await?;
     serde_json::from_value(value).map_err(|error| error.to_string())
 }
 
-pub async fn ipc_release(address: SocketAddr, run_id: &str, force: bool) -> Result<(), String> {
+pub async fn ipc_reconnect(address: SocketAddr, run_id: &str) -> Result<IpcRunInfo, String> {
+    let value = ipc_call(address, "info", serde_json::json!({ "run_id": run_id })).await?;
+    serde_json::from_value(value).map_err(|error| error.to_string())
+}
+
+pub async fn ipc_reconnect_execution(
+    address: SocketAddr,
+    execution: AgentExecutionIdentity,
+) -> Result<IpcRunInfo, String> {
+    let value = ipc_call(
+        address,
+        "reconnect",
+        serde_json::json!({ "execution": execution }),
+    )
+    .await?;
+    serde_json::from_value(value).map_err(|error| error.to_string())
+}
+
+pub async fn ipc_release(
+    address: SocketAddr,
+    execution: &AgentExecutionIdentity,
+    force: bool,
+) -> Result<(), String> {
     ipc_call(
         address,
         "release",
-        serde_json::json!({ "run_id": run_id, "force": force }),
+        serde_json::json!({
+            "run_id": execution.run.run_id,
+            "execution": execution,
+            "force": force,
+        }),
     )
     .await
     .map(|_| ())
+}
+
+fn ipc_execution_error(detail: String) -> AgentBackendError {
+    if detail.starts_with("stale_attempt:") {
+        AgentBackendError::InvalidContext(detail)
+    } else {
+        AgentBackendError::Disconnected(detail)
+    }
+}
+
+fn ipc_handle_result(result: IpcRunResult) -> Result<AgentBackendResult, AgentBackendError> {
+    let status = match result.status.as_str() {
+        "completed" => pig_protocol::AgentRunStatus::Completed,
+        "cancelled" => pig_protocol::AgentRunStatus::Cancelled,
+        "failed" => pig_protocol::AgentRunStatus::Failed,
+        other => {
+            return Err(AgentBackendError::Failed(format!(
+                "IPC returned unknown run status {other}"
+            )));
+        }
+    };
+    Ok(AgentBackendResult {
+        status,
+        stop_reason: result.stop_reason,
+        text: result.text,
+        turns: result.turns,
+        queued: false,
+        usage: result.usage,
+    })
+}
+
+pub struct IpcAgentExecutionHandle {
+    address: SocketAddr,
+    identity: AgentExecutionIdentity,
+    cursor: AgentExecutionCursor,
+    pending: VecDeque<IpcRunEvent>,
+    terminal: Option<(AgentExecutionCursor, AgentBackendResult)>,
+    detached: Option<AgentExecutionReceipt>,
+    released: Option<AgentExecutionRelease>,
+    stop_requested: bool,
+}
+
+impl IpcAgentExecutionHandle {
+    pub async fn start(
+        address: SocketAddr,
+        identity: AgentExecutionIdentity,
+        spec: IpcRunSpec,
+    ) -> Result<Self, AgentBackendError> {
+        ipc_start_with_requirements(
+            address,
+            identity.clone(),
+            spec,
+            [
+                IpcCapability::Start,
+                IpcCapability::Send,
+                IpcCapability::Stop,
+                IpcCapability::Events,
+                IpcCapability::Reconnect,
+            ]
+            .into_iter()
+            .collect(),
+        )
+        .await
+        .map_err(AgentBackendError::Disconnected)?;
+        Ok(Self::new(address, identity, 0))
+    }
+
+    pub async fn reconnect(
+        address: SocketAddr,
+        identity: AgentExecutionIdentity,
+        cursor: AgentExecutionCursor,
+    ) -> Result<Self, AgentBackendError> {
+        ipc_reconnect_execution(address, identity.clone())
+            .await
+            .map_err(ipc_execution_error)?;
+        Ok(Self::new(address, identity, cursor.sequence))
+    }
+
+    fn new(address: SocketAddr, identity: AgentExecutionIdentity, sequence: u64) -> Self {
+        let cursor = AgentExecutionCursor {
+            attempt: identity.attempt,
+            backend_epoch: identity.backend_epoch.clone(),
+            sequence,
+        };
+        Self {
+            address,
+            identity,
+            cursor,
+            pending: VecDeque::new(),
+            terminal: None,
+            detached: None,
+            released: None,
+            stop_requested: false,
+        }
+    }
+
+    fn cursor(&self, sequence: u64) -> AgentExecutionCursor {
+        AgentExecutionCursor {
+            attempt: self.identity.attempt,
+            backend_epoch: self.identity.backend_epoch.clone(),
+            sequence,
+        }
+    }
+
+    fn receipt(&self) -> AgentExecutionReceipt {
+        AgentExecutionReceipt {
+            cursor: self.cursor.clone(),
+        }
+    }
+
+    fn check_active(&self) -> Result<(), AgentBackendError> {
+        if self.detached.is_some() {
+            return Err(AgentBackendError::Disconnected(
+                "IPC execution is detached".to_string(),
+            ));
+        }
+        if self.terminal.is_some() {
+            return Err(AgentBackendError::InvalidContext(
+                "IPC execution has already settled".to_string(),
+            ));
+        }
+        if self.stop_requested {
+            return Err(AgentBackendError::InvalidContext(
+                "IPC execution is stopping".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl AgentExecutionHandle for IpcAgentExecutionHandle {
+    fn identity(&self) -> &AgentExecutionIdentity {
+        &self.identity
+    }
+
+    fn capabilities(&self) -> std::collections::BTreeSet<AgentExecutionCapability> {
+        [
+            AgentExecutionCapability::Background,
+            AgentExecutionCapability::Steer,
+            AgentExecutionCapability::Reconnect,
+            AgentExecutionCapability::Stop,
+            AgentExecutionCapability::Detach,
+        ]
+        .into_iter()
+        .collect()
+    }
+
+    fn send(
+        &mut self,
+        input: AgentExecutionInput,
+    ) -> BoxFuture<'_, Result<AgentExecutionReceipt, AgentBackendError>> {
+        Box::pin(async move {
+            self.check_active()?;
+            ipc_send(
+                self.address,
+                &self.identity.run.run_id,
+                &self.identity,
+                input,
+            )
+            .await
+            .map_err(ipc_execution_error)?;
+            Ok(self.receipt())
+        })
+    }
+
+    fn stop(
+        &mut self,
+        stop: AgentExecutionStop,
+    ) -> BoxFuture<'_, Result<AgentExecutionReceipt, AgentBackendError>> {
+        Box::pin(async move {
+            self.check_active()?;
+            match stop {
+                AgentExecutionStop::Graceful { .. } => {}
+                AgentExecutionStop::Force { .. } => {
+                    return Err(AgentBackendError::UnsupportedCapability {
+                        backend_id: "ipc".to_string(),
+                        capability: AgentExecutionCapability::ForceStop,
+                    });
+                }
+            }
+            ipc_stop(self.address, &self.identity)
+                .await
+                .map_err(ipc_execution_error)?;
+            self.stop_requested = true;
+            Ok(self.receipt())
+        })
+    }
+
+    fn detach(&mut self) -> BoxFuture<'_, Result<AgentExecutionReceipt, AgentBackendError>> {
+        Box::pin(async move {
+            if let Some(receipt) = &self.detached {
+                return Ok(receipt.clone());
+            }
+            let receipt = self.receipt();
+            self.detached = Some(receipt.clone());
+            Ok(receipt)
+        })
+    }
+
+    fn next(&mut self) -> BoxFuture<'_, Result<AgentExecutionUpdate, AgentBackendError>> {
+        Box::pin(async move {
+            if self.detached.is_some() {
+                return Err(AgentBackendError::Disconnected(
+                    "IPC execution is detached".to_string(),
+                ));
+            }
+            loop {
+                if let Some(output) = self.pending.pop_front() {
+                    self.cursor = self.cursor(output.sequence);
+                    return Ok(AgentExecutionUpdate::Output {
+                        sequence: output.sequence,
+                        event: output.event,
+                    });
+                }
+                if let Some((cursor, result)) = &self.terminal {
+                    self.cursor = cursor.clone();
+                    return Ok(AgentExecutionUpdate::Settled {
+                        cursor: cursor.clone(),
+                        result: result.clone(),
+                    });
+                }
+                let batch = match ipc_events(
+                    self.address,
+                    &self.identity.run.run_id,
+                    self.cursor.sequence,
+                )
+                .await
+                {
+                    Ok(batch) => batch,
+                    Err(detail) => {
+                        return Ok(AgentExecutionUpdate::Disconnected {
+                            cursor: self.cursor.clone(),
+                            detail,
+                        });
+                    }
+                };
+                self.pending.extend(batch.events);
+                if let Some(terminal) = batch.terminal {
+                    let cursor = self.cursor(batch.latest_sequence);
+                    self.terminal = Some((cursor, ipc_handle_result(terminal)?));
+                }
+                if self.pending.is_empty() && self.terminal.is_none() {
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
+            }
+        })
+    }
+
+    fn release(&mut self) -> BoxFuture<'_, Result<AgentExecutionRelease, AgentBackendError>> {
+        Box::pin(async move {
+            if let Some(released) = &self.released {
+                return Ok(released.clone());
+            }
+            if self.terminal.is_none() {
+                let info = ipc_reconnect_execution(self.address, self.identity.clone())
+                    .await
+                    .map_err(ipc_execution_error)?;
+                let terminal = info.terminal.ok_or_else(|| {
+                    AgentBackendError::InvalidContext(
+                        "IPC execution must settle before release".to_string(),
+                    )
+                })?;
+                let cursor = self.cursor(info.latest_sequence);
+                self.terminal = Some((cursor, ipc_handle_result(terminal)?));
+                self.pending.clear();
+            }
+            ipc_release(self.address, &self.identity, false)
+                .await
+                .map_err(ipc_execution_error)?;
+            let cursor = self
+                .terminal
+                .as_ref()
+                .map(|(cursor, _)| cursor.clone())
+                .unwrap_or_else(|| self.cursor.clone());
+            self.cursor = cursor.clone();
+            let released = AgentExecutionRelease {
+                identity: self.identity.clone(),
+                cursor,
+                released_at_ms: crate::model_io::now_ms(),
+            };
+            self.released = Some(released.clone());
+            Ok(released)
+        })
+    }
 }
 
 pub struct IpcAgentBackendFactory {
@@ -634,6 +1269,7 @@ impl super::AgentBackendFactory for IpcAgentBackendFactory {
             super::AgentExecutionCapability::Resume,
             super::AgentExecutionCapability::Reconnect,
             super::AgentExecutionCapability::Stop,
+            super::AgentExecutionCapability::Detach,
         ]
         .into_iter()
         .collect()
@@ -665,100 +1301,158 @@ impl super::AgentExecutionBackend for IpcAgentExecutionBackend {
             super::AgentExecutionCapability::Resume,
             super::AgentExecutionCapability::Reconnect,
             super::AgentExecutionCapability::Stop,
+            super::AgentExecutionCapability::Detach,
         ]
         .into_iter()
         .collect()
     }
 
-    fn execute(
+    fn start(
         self: Box<Self>,
         request: super::AgentExecutionRequest,
-    ) -> BoxFuture<'static, Result<super::AgentBackendResult, super::AgentBackendError>> {
+    ) -> BoxFuture<'static, Result<Box<dyn AgentExecutionHandle>, AgentBackendError>> {
         Box::pin(async move {
-            let run_id = request.identity.run_id.clone();
-            let info = match request.activation {
+            if request.identity != request.execution.run {
+                return Err(AgentBackendError::Failed(
+                    "IPC execution identity mismatch".to_string(),
+                ));
+            }
+            let execution = request.execution.clone();
+            match request.activation {
                 super::AgentExecutionActivation::Start => {
-                    ipc_start_with_requirements(
-                        self.address,
-                        &run_id,
-                        self.spec,
-                        request
-                            .required_capabilities
-                            .iter()
-                            .filter_map(|capability| match capability {
-                                super::AgentExecutionCapability::Steer => Some(IpcCapability::Send),
-                                super::AgentExecutionCapability::Resume => {
-                                    Some(IpcCapability::Resume)
-                                }
-                                super::AgentExecutionCapability::Reconnect => {
-                                    Some(IpcCapability::Reconnect)
-                                }
-                                super::AgentExecutionCapability::Stop => Some(IpcCapability::Stop),
-                                _ => None,
-                            })
-                            .collect(),
-                    )
-                    .await
-                }
-                super::AgentExecutionActivation::Resume => {
-                    ipc_send(self.address, &run_id, self.spec.prompt).await
+                    let handle =
+                        IpcAgentExecutionHandle::start(self.address, execution, self.spec).await?;
+                    Ok(Box::new(handle) as Box<dyn AgentExecutionHandle>)
                 }
                 super::AgentExecutionActivation::Reconnect => {
-                    ipc_reconnect(self.address, &run_id).await
-                }
-            }
-            .map_err(super::AgentBackendError::Disconnected)?;
-            let mut cursor = request.cursor.as_ref().map_or_else(
-                || {
-                    if request.activation == super::AgentExecutionActivation::Reconnect {
-                        info.latest_sequence
-                    } else {
-                        0
-                    }
-                },
-                |cursor| cursor.sequence,
-            );
-            loop {
-                let batch = tokio::select! {
-                    biased;
-                    _ = request.cancel.cancelled() => {
-                        return Err(super::AgentBackendError::Disconnected(
-                            "IPC polling stopped; the remote run remains active".to_string(),
+                    let cursor = request.cursor.ok_or_else(|| {
+                        AgentBackendError::InvalidContext(
+                            "IPC reconnect requires an event cursor".to_string(),
+                        )
+                    })?;
+                    if cursor.run != request.identity {
+                        return Err(AgentBackendError::Failed(
+                            "IPC reconnect cursor identity mismatch".to_string(),
                         ));
                     }
-                    batch = ipc_events(self.address, &run_id, cursor) => {
-                        batch.map_err(super::AgentBackendError::Disconnected)?
-                    }
-                };
-                for output in batch.events {
-                    request
-                        .events
-                        .send(output.event)
-                        .await
-                        .map_err(|error| super::AgentBackendError::Failed(error.to_string()))?;
+                    let handle = IpcAgentExecutionHandle::reconnect(
+                        self.address,
+                        execution.clone(),
+                        AgentExecutionCursor {
+                            attempt: execution.attempt,
+                            backend_epoch: execution.backend_epoch.clone(),
+                            sequence: cursor.sequence,
+                        },
+                    )
+                    .await?;
+                    Ok(Box::new(handle) as Box<dyn AgentExecutionHandle>)
                 }
-                cursor = batch.latest_sequence;
-                if let Some(result) = batch.terminal {
-                    let status = match result.status.as_str() {
-                        "completed" => pig_protocol::AgentRunStatus::Completed,
-                        "cancelled" => pig_protocol::AgentRunStatus::Cancelled,
-                        "failed" => pig_protocol::AgentRunStatus::Failed,
-                        other => {
-                            return Err(super::AgentBackendError::Failed(format!(
-                                "IPC returned unknown run status {other}"
-                            )));
-                        }
-                    };
-                    return Ok(super::AgentBackendResult {
-                        status,
-                        stop_reason: result.stop_reason,
-                        text: result.text,
-                        turns: result.turns,
-                        usage: result.usage,
-                    });
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::AgentRunIdentity;
+
+    #[test]
+    fn failed_journal_write_does_not_publish_or_advance_cursor() {
+        let root = std::env::temp_dir().join(new_runtime_id("ipc-journal-fault"));
+        let journal = root.join("events.jsonl");
+        std::fs::create_dir_all(&journal).expect("journal fault injection directory");
+        let (ops, _receiver) = async_channel::unbounded();
+        let run = WorkerRun::new(
+            "session".into(),
+            ops,
+            journal,
+            AgentExecutionIdentity {
+                run: AgentRunIdentity {
+                    session_id: "session".into(),
+                    agent_id: "agent".into(),
+                    run_id: "run".into(),
+                },
+                attempt: 1,
+                backend_epoch: "epoch".into(),
+            },
+        );
+        let error = run
+            .record_event(Event::TextDelta {
+                session_id: "session".into(),
+                item_id: "item".into(),
+                delta: "must not become visible".into(),
+            })
+            .expect_err("writing a file over a directory must fail");
+        assert!(!error.is_empty());
+        let output = run.output();
+        assert!(output.events.is_empty());
+        assert!(output.text.is_empty());
+        assert!(output.terminal.is_none());
+        drop(output);
+        std::fs::remove_dir_all(root).expect("remove journal fault injection directory");
+    }
+
+    #[test]
+    fn terminal_worker_output_waits_for_the_root_run_settlement() {
+        let mut output = WorkerRunOutput::default();
+        output.fold_event(
+            &Event::TurnStarted {
+                session_id: "root".into(),
+                turn_id: "turn".into(),
+                run: None,
+            },
+            "root",
+        );
+        output.fold_event(
+            &Event::TurnAborted {
+                session_id: "root".into(),
+                run: None,
+            },
+            "root",
+        );
+        assert!(output.terminal.is_none());
+        let settled = |agent_id: &str| Event::AgentControl {
+            event: pig_protocol::AgentControlEvent {
+                session_id: "root".into(),
+                sequence: 1,
+                event_id: "settled".into(),
+                kind: "run_settled".into(),
+                agent_id: Some(agent_id.into()),
+                run_id: Some("run".into()),
+                attempt: Some(1),
+                backend_epoch: Some("epoch".into()),
+                payload: serde_json::json!({"status":"cancelled", "stop_reason":"cancelled"}),
+                created_at_ms: 1,
+            },
+        };
+        output.fold_event(&settled("child"), "root");
+        assert!(output.terminal.is_none(), "a child cannot settle the root");
+        output.fold_event(&settled("root"), "root");
+        assert_eq!(
+            output
+                .terminal
+                .as_ref()
+                .map(|result| result.status.as_str()),
+            Some("cancelled")
+        );
+
+        let mut rejected = WorkerRunOutput::default();
+        rejected.fold_event(
+            &Event::Error {
+                session_id: Some("root".into()),
+                error: pig_protocol::CoreError::NoModelConfigured,
+                fatal: true,
+            },
+            "root",
+        );
+        assert_eq!(
+            rejected
+                .terminal
+                .as_ref()
+                .map(|result| result.status.as_str()),
+            Some("failed"),
+            "a pre-start rejection must not wait forever"
+        );
     }
 }

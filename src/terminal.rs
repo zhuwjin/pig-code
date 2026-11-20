@@ -75,7 +75,7 @@ impl OutputBuffer {
     }
 }
 
-/// NSH 0.5.0's VT treats `CSI < u` (kitty keyboard query) as `CSI u` (restore cursor).
+/// NSH 0.6.0's VT treats `CSI < u` (kitty keyboard query) as `CSI u` (restore cursor).
 /// Drop the query until the emulator checks its intermediates, keeping a split
 /// sequence for the next read.
 fn filter_kitty_keyboard(text: &str) -> (String, String) {

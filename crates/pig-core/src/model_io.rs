@@ -100,9 +100,8 @@ pub fn model_io_path(sessions_dir: &Path, session_id: &str) -> PathBuf {
     sessions_dir.join(format!("{session_id}.model-io.jsonl"))
 }
 
-/// Per-session trace file size cap. When exceeded (and full retention is off)
-/// the file is RESET to the current record, keeping diagnostics from ever
-/// threatening the disk (ZCode's rollout cap is 64MB)
+/// Per-session trace file size cap. When the next record would exceed it,
+/// the file is RESET to the current record, keeping diagnostics bounded.
 pub const MAX_SESSION_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Append one call record. Creates the directory if missing; failure returns
@@ -113,14 +112,14 @@ pub const MAX_SESSION_BYTES: u64 = 64 * 1024 * 1024;
 /// `record.input` is the tail past `input_offset`); it is only cloned into the
 /// record when the size cap resets the file (a reset record must be
 /// self-contained — the previous record it would reference is deleted).
-/// `full_retention` skips the size cap entirely (diagnostic mode).
+/// Full-input diagnostic mode is selected by the caller's projection; it does
+/// not disable the trace file quota.
 pub fn append(
     sessions_dir: &Path,
     session_id: &str,
     record: &mut ModelIoRecord,
     full_input: &[ModelIoMessage],
     max_session_bytes: u64,
-    full_retention: bool,
 ) -> Result<(), String> {
     use std::io::Write as _;
     std::fs::create_dir_all(sessions_dir).map_err(|e| {
@@ -131,15 +130,22 @@ pub fn append(
     })?;
     let path = model_io_path(sessions_dir, session_id);
     let existing_bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-    let reset = !full_retention && existing_bytes >= max_session_bytes;
+    let line = serde_json::to_string(record).map_err(|e| e.to_string())?;
+    let reset = existing_bytes > 0
+        && existing_bytes.saturating_add(line.len() as u64 + 1) > max_session_bytes;
     let line = if reset {
         record.input = full_input.to_vec();
         record.input_offset = 0;
         record.file_reset = true;
         serde_json::to_string(record).map_err(|e| e.to_string())?
     } else {
-        serde_json::to_string(record).map_err(|e| e.to_string())?
+        line
     };
+    if (line.len() as u64 + 1) > max_session_bytes {
+        return Err(format!(
+            "model io record exceeds the {max_session_bytes}-byte trace quota"
+        ));
+    }
     let line = format!("{line}\n");
     let mut file = std::fs::OpenOptions::new()
         .create(true)
@@ -312,7 +318,6 @@ mod tests {
             &mut record.clone(),
             &record.input,
             MAX_SESSION_BYTES,
-            false,
         )
         .unwrap();
         append(
@@ -321,7 +326,6 @@ mod tests {
             &mut record.clone(),
             &record.input,
             MAX_SESSION_BYTES,
-            false,
         )
         .unwrap();
         let path = model_io_path(&dir, "s1");
@@ -369,26 +373,10 @@ mod tests {
             },
         ];
         let first_full = first.input.clone();
-        append(
-            &dir,
-            "s1",
-            &mut first,
-            &first_full,
-            MAX_SESSION_BYTES,
-            false,
-        )
-        .unwrap();
+        append(&dir, "s1", &mut first, &first_full, MAX_SESSION_BYTES).unwrap();
         // The delta record's full projection = prefix 2 + its 2 new entries
         let second_full = [first.input.as_slice(), second.input.as_slice()].concat();
-        append(
-            &dir,
-            "s1",
-            &mut second,
-            &second_full,
-            MAX_SESSION_BYTES,
-            false,
-        )
-        .unwrap();
+        append(&dir, "s1", &mut second, &second_full, MAX_SESSION_BYTES).unwrap();
         let all = read_all(&model_io_path(&dir, "s1"));
         assert_eq!(all.len(), 2);
         // First record is full
@@ -471,9 +459,8 @@ mod tests {
         assert_eq!(calls[0].arguments, big_args, "tool-call arguments whole");
     }
 
-    /// Size-cap reset: once the session file reaches the cap, the next append
-    /// rewrites the file with just that record — which must carry the FULL
-    /// input (offset 0, file_reset marker); full retention never resets
+    /// The next record that would exceed the quota resets the trace and carries
+    /// full input. Oversized single records fail without erasing prior traces.
     #[test]
     fn append_resets_when_session_cap_exceeded() {
         let dir = std::env::temp_dir().join(format!("pig-model-io-reset-{}", std::process::id()));
@@ -493,7 +480,7 @@ mod tests {
         ];
         // First record: huge cap, plain append (the delta baseline)
         let first_full = first.input.clone();
-        append(&dir, "s1", &mut first, &first_full, u64::MAX, false).unwrap();
+        append(&dir, "s1", &mut first, &first_full, u64::MAX).unwrap();
 
         // Second record stores a delta (offset 2) but lands on a file already
         // past the tiny cap → reset: rewritten file, FULL input, marked
@@ -506,7 +493,15 @@ mod tests {
         }];
         second.input_offset = 2;
         let full = [first.input.as_slice(), second.input.as_slice()].concat();
-        append(&dir, "s1", &mut second, &full, 1, false).unwrap();
+        let mut reset_record = second.clone();
+        reset_record.input = full.clone();
+        reset_record.input_offset = 0;
+        reset_record.file_reset = true;
+        let reset_quota = serde_json::to_string(&reset_record)
+            .expect("reset record")
+            .len() as u64
+            + 1;
+        append(&dir, "s1", &mut second, &full, reset_quota).unwrap();
         let all = read_all(&model_io_path(&dir, "s1"));
         assert_eq!(all.len(), 1, "the file was reset to the current record");
         assert!(all[0].file_reset, "the reset record is marked");
@@ -518,14 +513,17 @@ mod tests {
             "the reset record carries the FULL input, not the delta"
         );
 
-        // Full retention with the same tiny cap appends instead of resetting
+        // Full-input diagnostic mode cannot bypass the quota; a rejected
+        // oversized record must not erase the previous valid trace.
         let mut third = sample();
         third.turn = "t1-s2".into();
         let third_full = third.input.clone();
-        append(&dir, "s1", &mut third, &third_full, 1, true).unwrap();
+        let error = append(&dir, "s1", &mut third, &third_full, 1)
+            .expect_err("a single oversized diagnostic record is rejected");
+        assert!(error.contains("trace quota"));
         let all = read_all(&model_io_path(&dir, "s1"));
-        assert_eq!(all.len(), 2, "full retention skips the size cap");
-        assert!(!all[1].file_reset);
+        assert_eq!(all.len(), 1, "the existing valid trace is preserved");
+        assert_eq!(all[0].turn, "t1-s1");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

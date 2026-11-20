@@ -185,18 +185,9 @@ impl Session {
             let tx_bg = tx.clone();
             let task_cancel = child_cancel.clone();
             let backends = child.state.backends.clone();
-            let scheduler = child.state.scheduler.clone();
             handles.push(tokio::spawn(async move {
-                let child_task = crate::agent::execute_local(
-                    backends,
-                    child,
-                    tx_bg,
-                    task_cancel,
-                    crate::agent::AgentExecutionActivation::Start,
-                );
-                let managed = life
-                    .drive(&child_cancel, scheduler.acquire(&child_cancel), child_task)
-                    .await;
+                let managed =
+                    crate::agent::execute_local(backends, child, tx_bg, task_cancel, life).await;
                 (ix, managed)
             }));
         }
@@ -352,14 +343,7 @@ impl Session {
             // background=true)
             let card = self.emit_child_card(&child, parent_item_id, tx, true);
             let queued = cards.len() >= slots_available;
-            spawn_detached_child(
-                child,
-                task_id.clone(),
-                child_cancel,
-                tx.clone(),
-                None,
-                crate::agent::AgentExecutionActivation::Start,
-            );
+            spawn_detached_child(child, task_id.clone(), child_cancel, tx.clone(), None);
             cards.push(card);
             receipt.push(crate::agent::SwarmReceiptChild {
                 description,

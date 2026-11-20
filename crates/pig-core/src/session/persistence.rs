@@ -7,7 +7,51 @@ impl Session {
         tx: &async_channel::Sender<Event>,
     ) {
         self.state.agents.touch_activity(&self.agent.id);
-        emit_bg(self.event_session_id(), tx, build);
+        let event = build(self.event_session_id().to_string());
+        let event = match event {
+            Event::Error {
+                session_id,
+                error,
+                fatal,
+            } => Event::Error {
+                session_id,
+                error: error.with_context(self.error_context()),
+                fatal,
+            },
+            other => other,
+        };
+        emit_bg(self.event_session_id(), tx, |_| event);
+    }
+
+    fn error_context(&self) -> pig_protocol::CoreErrorContext {
+        let run_id = self.agent.run.as_ref().and_then(|run| run.run_id.clone());
+        let attempt = run_id.as_ref().and_then(|run_id| {
+            self.state
+                .agents
+                .runtime_snapshot()
+                .and_then(|snapshot| {
+                    snapshot
+                        .attempts
+                        .into_iter()
+                        .find(|attempt| &attempt.run_id == run_id)
+                })
+                .map(|attempt| attempt.attempt)
+        });
+        pig_protocol::CoreErrorContext {
+            session_id: self.event_session_id().to_string(),
+            agent_id: self.agent.id.clone(),
+            run_id,
+            attempt,
+            call_id: None,
+        }
+    }
+
+    pub(super) fn durable_history_failure(&self) -> Option<CoreError> {
+        self.rollout_failure.clone().or_else(|| {
+            self.subagent
+                .as_ref()
+                .and_then(|subagent| subagent.persist_failure.clone())
+        })
     }
 
     pub(super) fn record(&mut self, record: &RolloutRecord) {
@@ -162,6 +206,29 @@ impl Session {
             snapshot: snapshot.clone(),
         });
         self.recorded_prompt = Some(snapshot);
+    }
+
+    pub(super) fn settle_execution_claim(&mut self) {
+        let Some(request_id) = self.run_state.execution_claim.clone() else {
+            return;
+        };
+        let Some(store) = self.state.task_store.clone() else {
+            self.run_state.execution_claim = None;
+            return;
+        };
+        let result = store
+            .lock()
+            .expect("store lock")
+            .clear_execution_claim(&self.event_session_id().to_string(), &request_id);
+        match result {
+            Ok(()) => self.run_state.execution_claim = None,
+            Err(error) => {
+                tracing::error!(%request_id, error = ?error, "failed to settle the execution claim");
+                if self.rollout_failure.is_none() {
+                    self.rollout_failure = Some(error);
+                }
+            }
+        }
     }
 
     pub(super) fn touch_index(&mut self) {

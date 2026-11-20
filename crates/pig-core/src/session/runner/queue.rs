@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
+use futures_util::StreamExt as _;
 use futures_util::stream::FuturesUnordered;
 use pig_protocol::{CoreError, Event};
 use pig_provider::ResolvedModel;
@@ -147,6 +148,10 @@ pub(super) fn start_turn_inner(
             },
         });
     };
+    if let Some(error) = session.durable_history_failure() {
+        entry.session = Some(session);
+        return Err(StartTurnFailure { message, error });
+    }
     if !notification_only && let Some(store) = entry.state.task_store.clone() {
         if let Err(error) =
             crate::session::pending::claim_pending_execution(&store, &session_id, &message)
@@ -156,6 +161,7 @@ pub(super) fn start_turn_inner(
         }
         entry.active_claim = Some(message.id.clone());
     }
+    session.run_state.execution_claim = (!notification_only).then(|| message.id.clone());
     // Enforce the single-source invariant before any resolution: the Session
     // and the entry share one `Arc<RuntimeConfig>`, so a refresh that happened
     // mid-turn is installed here (a trust change still goes through the one
@@ -262,7 +268,7 @@ pub(super) fn start_queued_head(
 /// Stop every active task of a session through the existing task lifecycle
 /// (token cancellation for subagents, process-tree kill for shells). Used by
 /// session deletion so a removed session leaves no background executor behind.
-pub(super) fn stop_session_tasks(entry: &SessionEntry) {
+pub(super) async fn stop_session_tasks(entry: &SessionEntry) -> Result<(), String> {
     entry.state.agents.close_all();
     let running: Vec<String> = entry
         .state
@@ -270,22 +276,58 @@ pub(super) fn stop_session_tasks(entry: &SessionEntry) {
         .lock()
         .expect("task registry lock")
         .iter()
-        .filter(|task| {
-            matches!(
-                task.status,
-                pig_protocol::TaskStatus::Queued | pig_protocol::TaskStatus::Running
-            )
-        })
+        .filter(|task| task.needs_stop())
         .map(|task| task.id.clone())
         .collect();
+    let mut stops = FuturesUnordered::new();
     for id in running {
-        let _ = crate::task::stop_task_with_agents(
-            &entry.state.tasks,
-            &id,
-            &entry.state.task_notify,
-            &entry.state.session_id,
-            Some(&entry.state.agents),
-        );
+        stops.push(async move {
+            crate::task::stop_task_with_agents(
+                &entry.state.tasks,
+                &id,
+                &entry.state.task_notify,
+                &entry.state.session_id,
+                Some(&entry.state.agents),
+            )
+            .await
+        });
+    }
+    let mut failures = Vec::new();
+    while let Some(result) = stops.next().await {
+        if let Err(error) = result {
+            failures.push(error);
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
+}
+
+pub(super) async fn stop_session_tasks_until_idle(
+    entry: SessionEntry,
+    event_tx: async_channel::Sender<Event>,
+) {
+    loop {
+        match stop_session_tasks(&entry).await {
+            Ok(()) => return,
+            Err(detail) => {
+                emit(
+                    &event_tx,
+                    Event::Error {
+                        session_id: Some(entry.state.session_id.clone()),
+                        error: CoreError::TaskStore {
+                            detail: format!(
+                                "Shell task cleanup is incomplete; deletion remains pending and will retry: {detail}"
+                            ),
+                        },
+                        fatal: false,
+                    },
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        }
     }
 }
 
@@ -300,6 +342,7 @@ impl Manager {
         images: Vec<pig_protocol::PendingImage>,
         permissions: pig_protocol::PermissionSettings,
         delivery: pig_protocol::MessageDelivery,
+        message_id: Option<String>,
         turns: &mut FuturesUnordered<TurnFuture>,
     ) {
         let store = self.store.clone();
@@ -317,7 +360,40 @@ impl Manager {
         };
         // Record the latest permissions: notification-only turns use them (queued case included)
         entry.last_permissions = permissions;
-        let id = next_queue_id(&mut entry.queue_seq);
+        if let Some(id) = &message_id {
+            if entry.active_claim.as_deref() == Some(id.as_str()) {
+                return;
+            }
+            match store
+                .lock()
+                .expect("store lock")
+                .execution_receipt(&session_id, id)
+            {
+                Ok(true) => return,
+                Ok(false) => {}
+                Err(error) => {
+                    emit(
+                        &event_tx,
+                        Event::Error {
+                            session_id: Some(session_id.clone()),
+                            error,
+                            fatal: true,
+                        },
+                    );
+                    return;
+                }
+            }
+            if entry
+                .pending
+                .lock()
+                .expect("pending lock")
+                .iter()
+                .any(|message| &message.id == id)
+            {
+                return;
+            }
+        }
+        let id = message_id.unwrap_or_else(|| next_queue_id(&mut entry.queue_seq));
         // Turn in progress -> two lanes of one list. Steer
         // (explicit request, steerable chat turn in flight,
         // text-only, within the cap) injects into the running
@@ -342,6 +418,7 @@ impl Manager {
                     held: false,
                     recovered: false,
                 });
+            persist_pending(&store, &session_id, &entry.pending);
             let queue_items = queue_snapshot(&entry.pending);
             emit(
                 &event_tx,
@@ -360,7 +437,6 @@ impl Manager {
                     },
                 );
             }
-            persist_pending(&store, &session_id, &entry.pending);
             return;
         }
         let mut message = PendingMessage {
@@ -966,17 +1042,8 @@ impl Manager {
 mod tests {
     use super::*;
 
-    #[test]
-    fn deleting_a_session_stops_queued_subagents() {
-        let state = crate::task::SessionToolState::for_test();
-        let cancel = CancellationToken::new();
-        let task_id = crate::task::register_agent_task_queued(
-            &state,
-            "queued child".into(),
-            cancel.clone(),
-            "a-queued".into(),
-        );
-        let entry = SessionEntry {
+    fn entry_for(state: &crate::task::SessionToolState) -> SessionEntry {
+        SessionEntry {
             session: None,
             plugin_dispatcher: crate::plugins::PluginToolset::new(
                 &crate::plugins::PluginRegistry::shared(std::env::temp_dir()),
@@ -1004,8 +1071,21 @@ mod tests {
             steerable: false,
             mcp_status: None,
             plugin_surfaces_stale: false,
-        };
-        stop_session_tasks(&entry);
+        }
+    }
+
+    #[tokio::test]
+    async fn deleting_a_session_stops_queued_subagents() {
+        let state = crate::task::SessionToolState::for_test();
+        let cancel = CancellationToken::new();
+        let task_id = crate::task::register_agent_task_queued(
+            &state,
+            "queued child".into(),
+            cancel.clone(),
+            "a-queued".into(),
+        );
+        let entry = entry_for(&state);
+        stop_session_tasks(&entry).await.expect("stop queued task");
         let tasks = state.tasks.lock().expect("task registry lock");
         let task = tasks
             .iter()
@@ -1013,5 +1093,46 @@ mod tests {
             .expect("queued task");
         assert_eq!(task.status, pig_protocol::TaskStatus::Killed);
         assert!(cancel.is_cancelled());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn deleting_a_session_waits_for_real_shell_quiescence() {
+        let root = std::env::temp_dir().join(format!(
+            "pig-delete-shell-{}-{}",
+            std::process::id(),
+            crate::model_io::now_ms()
+        ));
+        std::fs::create_dir_all(&root).expect("test workspace");
+        let state = crate::task::SessionToolState::for_test();
+        let entry = entry_for(&state);
+        let command = if cfg!(windows) {
+            "Start-Sleep -Seconds 30"
+        } else {
+            "sleep 30 & wait"
+        };
+        let task_id = crate::task::spawn_background(&state, &root, command);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(6),
+            stop_session_tasks(&entry),
+        )
+        .await
+        .expect("bounded shell cleanup")
+        .expect("shell cleanup");
+        let tasks = state.tasks.lock().expect("task registry lock");
+        let task = tasks
+            .iter()
+            .find(|task| task.id == task_id)
+            .expect("shell task");
+        assert_eq!(
+            task.status,
+            pig_protocol::TaskStatus::Killed,
+            "unexpected shell outcome; reason: {:?}; output: {}",
+            task.reason,
+            task.output
+        );
+        assert!(task.ended_at.is_some());
+        assert!(!task.needs_stop());
+        drop(tasks);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

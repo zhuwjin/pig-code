@@ -1297,7 +1297,7 @@ async fn marker_append_failure_keeps_the_live_history_and_reports() {
     let store = Arc::new(Mutex::new(
         crate::store::Store::open(&data_dir).expect("store"),
     ));
-    let (task_tx, _task_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (task_tx, _task_rx) = async_channel::bounded(1024);
     let meta = SessionMeta {
         id: "s-marker".into(),
         title: String::new(),
@@ -1385,11 +1385,8 @@ async fn marker_append_failure_keeps_the_live_history_and_reports() {
     assert!(
         events.iter().any(|event| matches!(
             event,
-            Event::Error {
-                error: CoreError::RolloutWrite { .. },
-                fatal: false,
-                ..
-            }
+            Event::Error { error, fatal: false, .. }
+                if matches!(error.semantic_error(), CoreError::RolloutWrite { .. })
         )),
         "the sticky rollout error is surfaced: {events:#?}"
     );

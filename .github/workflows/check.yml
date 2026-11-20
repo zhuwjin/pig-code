@@ -1,8 +1,11 @@
 name: check
 
 on:
-  push:
-  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   check:
@@ -17,13 +20,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install NSH
-        run: cargo install nsh-cli --version 0.5.1 --locked
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: "true"
+      - name: Install NSH (macOS and Linux)
+        if: runner.os != 'Windows'
+        env:
+          NSH_VERSION: v0.6.0
+        run: |
+          curl -fsSL https://nsh.dev/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Install NSH (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          NSH_VERSION: v0.6.0
+        run: |
+          irm https://nsh.dev/install.ps1 | iex
+          Add-Content -Path $env:GITHUB_PATH -Value "$env:LOCALAPPDATA\nsh\bin"
+      - name: Verify NSH installation
+        run: nsh --version
       - name: Install Linux test fonts
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install --yes fonts-dejavu-core
+          sudo apt-get install --yes fonts-dejavu-core pkg-config libfontconfig-dev
       - name: Check all Rust targets
         run: cargo check --all-targets
       - name: Run Rust tests

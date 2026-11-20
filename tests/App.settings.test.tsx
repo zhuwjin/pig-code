@@ -13,6 +13,7 @@ test("opens model settings, lists models and tests the connection", async () => 
   const app = await openApp();
   await app.press("id:settings-open");
   await app.waitFor("id:settings-page");
+  await app.waitFor("id:provider-edit-mock", { timeout: 10000 });
   expect(app.texts()).toContain("模型设置");
   expect(app.texts()).toContain("Mock");
   expect(app.texts()).toContain("mock-model");
@@ -140,6 +141,10 @@ test("creates, edits and deletes providers and models through real config", asyn
   await app.press("id:model-delete-custom-1-mock-copy-model");
   await app.waitFor("id:model-delete-custom-1-mock-copy-model", { state: "gone" });
   await app.press("id:provider-delete-custom-1");
+  await app.waitFor("确认删除");
+  await app.type("id:provider-name", " Stable");
+  await app.waitFor("Mock Copy Renamed Stable");
+  await app.waitFor("确认删除");
   await app.press("id:provider-delete-custom-1");
   await app.waitFor("id:provider-select-custom-1", { state: "gone" });
 });
@@ -167,10 +172,12 @@ test("adds a preset provider and maintains models in the fleet table", async () 
 test("stores and clears provider keys without exposing them in the page", async () => {
   const app = await openApp();
   await app.press("id:settings-open");
+  await app.waitFor("id:provider-edit-mock", { timeout: 10000 });
   await app.press("id:provider-edit-mock");
   await app.press("id:provider-toggle-mask");
   await app.press("id:provider-toggle-mask");
   await app.type("id:provider-api-key", "selftest-secret");
+  await app.wait(600);
   await app.waitUntil(() => app.value("id:provider-api-key") === "", { timeout: 20000 });
   expect(app.texts()).not.toContain("selftest-secret");
 

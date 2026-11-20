@@ -34,6 +34,8 @@ pub(crate) enum ServerMode {
     /// tool result carries the trigger gets a typed overflow; after the retry
     /// (trigger compacted away) the tool call and the next text are normal.
     SingleRoundOverflow,
+    /// The same overflow boundary after a real Write side effect.
+    SideEffectOverflow,
     /// A typed overflow whose only omitted work is smaller than the generated
     /// summary: the compaction estimate grows, so the existing guard must
     /// surface the typed error instead of retrying.
@@ -127,6 +129,10 @@ fn text_stream(text: &str, total: u64) -> String {
 }
 
 fn tool_call_stream(total: u64) -> String {
+    tool_call_stream_for("Read", serde_json::json!({"path": "README.mock.md"}), total)
+}
+
+fn tool_call_stream_for(tool: &str, arguments: serde_json::Value, total: u64) -> String {
     sse_response(&[
         format!(
             "data: {}",
@@ -140,8 +146,8 @@ fn tool_call_stream(total: u64) -> String {
                     "id": "call_srv_1",
                     "type": "function",
                     "function": {
-                        "name": "Read",
-                        "arguments": "{\"path\":\"README.mock.md\"}",
+                        "name": tool,
+                        "arguments": arguments.to_string(),
                     },
                 }]}}],
             })
@@ -314,21 +320,38 @@ pub(crate) fn start_server(mode: ServerMode) -> TestServer {
                         summary_response()
                     }
                 }
-                ServerMode::SingleRoundOverflow => {
+                ServerMode::SingleRoundOverflow | ServerMode::SideEffectOverflow => {
+                    let awaiting_tool = if matches!(mode, ServerMode::SideEffectOverflow) {
+                        !body.contains("call_srv_1")
+                    } else {
+                        !body.contains("\"role\":\"tool\"")
+                    };
                     if !streaming {
                         summary_response()
                     } else if body.contains(mock::CONTEXT_OVERFLOW_STREAM_TRIGGER)
                         && body.contains("\"role\":\"tool\"")
+                        && body.contains("call_srv_1")
                     {
                         if overflow_seen.swap(true, Ordering::SeqCst) {
                             text_stream("SERVER_OVERFLOW_RECOVERED", 100)
                         } else {
                             overflow_response()
                         }
-                    } else if !body.contains("\"role\":\"tool\"")
-                        && !body.contains("Earlier context compacted")
-                    {
-                        tool_call_stream(100)
+                    } else if awaiting_tool && !body.contains("Earlier context compacted") {
+                        if matches!(mode, ServerMode::SideEffectOverflow) {
+                            let command = if cfg!(windows) {
+                                "[System.IO.File]::WriteAllText('overflow-side-effect.txt', 'written once'); for ($i = 0; $i -lt 2000; $i++) { [Console]::WriteLine('payload line') }"
+                            } else {
+                                "printf 'written once' > overflow-side-effect.txt; for i in $(seq 1 2000); do echo 'payload line'; done"
+                            };
+                            tool_call_stream_for(
+                                "ExecCommand",
+                                serde_json::json!({"command": command}),
+                                100,
+                            )
+                        } else {
+                            tool_call_stream(100)
+                        }
                     } else {
                         text_stream("SERVER_OVERFLOW_RECOVERED", 100)
                     }
@@ -399,10 +422,8 @@ pub(crate) fn last_was_typed_overflow(events: &[Event]) -> bool {
     events.iter().any(|event| {
         matches!(
             event,
-            Event::Error {
-                error: pig_protocol::CoreError::ContextWindowExceeded { .. },
-                ..
-            }
+            Event::Error { error, .. }
+                if matches!(error.semantic_error(), pig_protocol::CoreError::ContextWindowExceeded { .. })
         )
     })
 }

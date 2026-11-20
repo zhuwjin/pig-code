@@ -36,12 +36,13 @@ type Command = Box<dyn FnOnce(&mut RuntimeState) + Send + 'static>;
 #[derive(Clone)]
 pub struct AgentRuntime {
     session_id: String,
-    commands: mpsc::UnboundedSender<Command>,
+    commands: mpsc::Sender<Command>,
     events: broadcast::Sender<RuntimeControlEvent>,
     backends: Arc<super::super::AgentBackendRegistry>,
+    pub(super) executions: super::execution::ExecutionTable,
 }
 
-struct RuntimeState {
+pub(super) struct RuntimeState {
     session_id: String,
     store: Arc<Mutex<Store>>,
     agents: BTreeMap<String, RuntimeAgent>,
@@ -52,6 +53,7 @@ struct RuntimeState {
     closed: bool,
     events: broadcast::Sender<RuntimeControlEvent>,
     stop_hooks: BTreeMap<String, tokio_util::sync::CancellationToken>,
+    watchdog_ticks: bool,
     projections: super::RuntimeProjectionRegistry,
 }
 
@@ -74,7 +76,7 @@ impl AgentRuntime {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .runtime_snapshot(&session_id)?;
-        let (commands, receiver) = mpsc::unbounded_channel();
+        let (commands, receiver) = mpsc::channel(256);
         let (events, _) = broadcast::channel(1024);
         let mut state = RuntimeState {
             agents: snapshot
@@ -103,6 +105,7 @@ impl AgentRuntime {
             closed: false,
             events: events.clone(),
             stop_hooks: BTreeMap::new(),
+            watchdog_ticks: true,
             projections: Default::default(),
         };
         state.recover_interrupted_local_runs()?;
@@ -120,6 +123,7 @@ impl AgentRuntime {
             commands,
             events,
             backends,
+            executions: Default::default(),
         })
     }
 
@@ -164,7 +168,7 @@ impl AgentRuntime {
         self.events.subscribe()
     }
 
-    async fn dispatch<R>(
+    pub(super) async fn dispatch<R>(
         &self,
         operation: impl FnOnce(&mut RuntimeState) -> Result<R, RuntimeError> + Send + 'static,
     ) -> Result<R, RuntimeError>
@@ -182,6 +186,7 @@ impl AgentRuntime {
         });
         self.commands
             .send(command)
+            .await
             .map_err(|_| RuntimeError::ChannelClosed)?;
         response.await.map_err(|_| RuntimeError::ChannelClosed)?
     }
@@ -203,8 +208,11 @@ impl AgentRuntime {
             let _ = reply.send(result);
         });
         self.commands
-            .send(command)
-            .map_err(|_| RuntimeError::ChannelClosed)?;
+            .try_send(command)
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => RuntimeError::Busy,
+                mpsc::error::TrySendError::Closed(_) => RuntimeError::ChannelClosed,
+            })?;
         response.recv().map_err(|_| RuntimeError::ChannelClosed)?
     }
 
@@ -271,18 +279,6 @@ impl AgentRuntime {
     ) -> Result<ExecutionAttempt, RuntimeError> {
         self.dispatch_blocking(move |state| {
             state.release_execution(&run_id, attempt, &backend_epoch)
-        })
-    }
-
-    pub(crate) fn release_current_execution_blocking(
-        &self,
-        run_id: String,
-    ) -> Result<ExecutionAttempt, RuntimeError> {
-        self.dispatch_blocking(move |state| {
-            let attempt = state.attempts.get(&run_id).cloned().ok_or_else(|| {
-                RuntimeError::NotFound(format!("Run {run_id} has no execution attempt"))
-            })?;
-            state.release_execution(&run_id, attempt.attempt, &attempt.backend_epoch)
         })
     }
 
@@ -466,6 +462,24 @@ impl AgentRuntime {
             .await
     }
 
+    #[cfg(test)]
+    fn disable_watchdog_ticks_blocking(&self) {
+        self.dispatch_blocking(|state| {
+            state.watchdog_ticks = false;
+            Ok(())
+        })
+        .expect("disable watchdog ticks");
+    }
+
+    #[cfg(test)]
+    fn check_watchdogs_at_blocking(&self, now_ms: u64) {
+        self.dispatch_blocking(move |state| {
+            state.check_watchdogs(now_ms);
+            Ok(())
+        })
+        .expect("check watchdogs at injected time");
+    }
+
     pub fn check_watchdogs_blocking(&self) -> Result<(), RuntimeError> {
         self.dispatch_blocking(|state| {
             state.check_watchdogs(crate::model_io::now_ms());
@@ -540,7 +554,7 @@ const WATCHDOG_TICK: std::time::Duration = std::time::Duration::from_millis(5);
 #[cfg(not(test))]
 const WATCHDOG_TICK: std::time::Duration = std::time::Duration::from_millis(250);
 
-async fn run_commands(mut state: RuntimeState, mut commands: mpsc::UnboundedReceiver<Command>) {
+async fn run_commands(mut state: RuntimeState, mut commands: mpsc::Receiver<Command>) {
     let mut watchdog = tokio::time::interval(WATCHDOG_TICK);
     watchdog.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -553,7 +567,11 @@ async fn run_commands(mut state: RuntimeState, mut commands: mpsc::UnboundedRece
                     break;
                 }
             }
-            _ = watchdog.tick() => state.check_watchdogs(crate::model_io::now_ms()),
+            _ = watchdog.tick() => {
+                if state.watchdog_ticks {
+                    state.check_watchdogs(crate::model_io::now_ms());
+                }
+            }
         }
     }
 }
@@ -891,7 +909,7 @@ impl RuntimeState {
         Ok(attempt)
     }
 
-    fn set_connection_state(
+    pub(super) fn set_connection_state(
         &mut self,
         run_id: &str,
         state: RuntimeConnectionState,
@@ -1338,6 +1356,34 @@ impl RuntimeState {
         Ok(run)
     }
 
+    pub(super) fn run_is_active(&self, run_id: &str) -> bool {
+        self.runs
+            .get(run_id)
+            .is_some_and(|run| run.status.is_active())
+    }
+
+    pub(super) fn execution_identity(
+        &self,
+        run_id: &str,
+    ) -> Result<crate::agent::AgentExecutionIdentity, RuntimeError> {
+        let run = self
+            .runs
+            .get(run_id)
+            .ok_or_else(|| RuntimeError::NotFound(format!("Run {run_id} is not registered")))?;
+        let attempt = self.attempts.get(run_id).ok_or_else(|| {
+            RuntimeError::NotFound(format!("Run {run_id} has no execution attempt"))
+        })?;
+        Ok(crate::agent::AgentExecutionIdentity {
+            run: crate::agent::AgentRunIdentity {
+                session_id: run.session_id.clone(),
+                agent_id: run.agent_id.clone(),
+                run_id: run.run_id.clone(),
+            },
+            attempt: attempt.attempt,
+            backend_epoch: attempt.backend_epoch.clone(),
+        })
+    }
+
     fn current_attempt(
         &self,
         run_id: &str,
@@ -1357,11 +1403,31 @@ impl RuntimeState {
         Ok(current.clone())
     }
 
-    fn release_execution(
+    pub(super) fn release_execution(
         &mut self,
         run_id: &str,
         attempt: u64,
         backend_epoch: &str,
+    ) -> Result<ExecutionAttempt, RuntimeError> {
+        self.release_execution_inner(run_id, attempt, backend_epoch, None)
+    }
+
+    pub(super) fn release_execution_at(
+        &mut self,
+        run_id: &str,
+        attempt: u64,
+        backend_epoch: &str,
+        cursor: u64,
+    ) -> Result<ExecutionAttempt, RuntimeError> {
+        self.release_execution_inner(run_id, attempt, backend_epoch, Some(cursor))
+    }
+
+    fn release_execution_inner(
+        &mut self,
+        run_id: &str,
+        attempt: u64,
+        backend_epoch: &str,
+        cursor: Option<u64>,
     ) -> Result<ExecutionAttempt, RuntimeError> {
         let execution = self.current_attempt(run_id, attempt, backend_epoch)?;
         let run = self
@@ -1377,11 +1443,14 @@ impl RuntimeState {
             return Ok(execution);
         }
         let mut released = execution;
+        if let Some(cursor) = cursor {
+            released.last_event_seq = cursor;
+        }
         released.released_at_ms = Some(crate::model_io::now_ms());
         self.commit_execution_attempt(released, RuntimeEventKind::ExecutionReleased)
     }
 
-    fn request_stop(
+    pub(super) fn request_stop(
         &mut self,
         run_id: &str,
         attempt: u64,
@@ -1430,7 +1499,7 @@ impl RuntimeState {
         Ok(run)
     }
 
-    fn settle_run(
+    pub(super) fn settle_run(
         &mut self,
         run_id: &str,
         attempt: u64,
@@ -2082,6 +2151,7 @@ mod tests {
     async fn watchdog_activity_delays_idle_and_survives_restart() {
         let (root, store) = store("watchdog-heartbeat");
         let runtime = AgentRuntime::spawn("s8".to_string(), store.clone()).expect("runtime");
+        runtime.disable_watchdog_ticks_blocking();
         runtime
             .register_agent(agent("s8", "s8", None))
             .await
@@ -2089,18 +2159,18 @@ mod tests {
         let mut request = start("s8", "watchdog-heartbeat");
         request.watchdog = watchdog(None, Some(60), super::super::RunWatchdogAction::Observe);
         let (run, _) = runtime.start_run(request).await.expect("run");
-        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        let started_at = runtime.snapshot_blocking().expect("snapshot").runs[0].last_activity_at_ms;
+        runtime.check_watchdogs_at_blocking(started_at + 30);
         runtime
             .record_run_activity_blocking(run.run_id.clone())
             .expect("activity");
-        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
-        runtime.check_watchdogs_blocking().expect("active run");
+        let activity = runtime.snapshot_blocking().expect("snapshot").runs[0].last_activity_at_ms;
+        runtime.check_watchdogs_at_blocking(activity + 59);
         assert!(
             runtime.snapshot_blocking().expect("snapshot").runs[0]
                 .watchdog_alerts
                 .is_empty()
         );
-        let activity = runtime.snapshot_blocking().expect("snapshot").runs[0].last_activity_at_ms;
         runtime.shutdown().await.expect("shutdown");
 
         let restored = AgentRuntime::spawn("s8".to_string(), store).expect("restored");
@@ -2164,6 +2234,42 @@ mod tests {
             runtime.register_agent(agent("s2", "s2", None)).await,
             Err(RuntimeError::ChannelClosed | RuntimeError::Closed)
         ));
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
+mod capacity_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn bounded_command_queue_backpressures_async_and_rejects_blocking_when_full() {
+        let root = std::env::temp_dir().join(format!(
+            "pig-runtime-capacity-{}-{}",
+            std::process::id(),
+            crate::model_io::now_ms()
+        ));
+        let store = Arc::new(Mutex::new(Store::open(&root).expect("store")));
+        let runtime = AgentRuntime::spawn_root("capacity-session".into(), store).expect("runtime");
+        let mut permits = Vec::new();
+        while let Ok(permit) = runtime.commands.try_reserve() {
+            permits.push(permit);
+        }
+        assert_eq!(permits.len(), 256);
+        assert!(matches!(
+            runtime.snapshot_blocking(),
+            Err(RuntimeError::Busy)
+        ));
+
+        let waiting = runtime.snapshot();
+        tokio::pin!(waiting);
+        tokio::select! {
+            result = &mut waiting => panic!("async command bypassed a full queue: {result:?}"),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
+        }
+        drop(permits);
+        waiting.await.expect("async command after capacity");
+        runtime.shutdown().await.expect("shutdown");
         let _ = std::fs::remove_dir_all(root);
     }
 }

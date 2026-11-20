@@ -651,7 +651,7 @@ pub(crate) fn spawn_shell_with_profile(
     sandbox_override: sandbox::SandboxOverride,
     profile: crate::task::SandboxProfile,
     additional: &crate::task::AdditionalPermissions,
-) -> std::io::Result<tokio::process::Child> {
+) -> std::io::Result<super::process::ManagedChild> {
     if profile == crate::task::SandboxProfile::Unrestricted && sandbox::network_blocked_for(state) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
@@ -673,8 +673,8 @@ pub(crate) fn spawn_shell_with_profile(
     process
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
+        .stderr(std::process::Stdio::piped());
+    super::process::spawn(&mut process)
 }
 
 #[cfg(test)]

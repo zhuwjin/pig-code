@@ -54,12 +54,11 @@ async fn recall_excludes_turn_and_keeps_stats() {
 
     // Tombstone semantics: marker appended, the recalled content NOT erased,
     // and both turns' TurnStats records intact
-    let rollout = std::fs::read_to_string(
-        data_dir
-            .join("sessions")
-            .join(format!("{session_id}.jsonl")),
-    )
-    .unwrap();
+    let rollout_path = data_dir
+        .join("sessions")
+        .join(format!("{session_id}.jsonl"));
+    let rollout = std::fs::read_to_string(&rollout_path)
+        .unwrap_or_else(|error| panic!("read rollout {}: {error}", rollout_path.display()));
     assert!(
         rollout.contains("\"type\":\"recall\""),
         "rollout should carry the recall marker: {rollout}"
@@ -245,7 +244,7 @@ async fn recall_busy_rejected_and_empty_session() {
     .await;
     assert!(
         rejected.iter().any(
-            |e| matches!(e, Event::Error { error, .. } if *error == CoreError::RecallTurnInFlight)
+            |e| matches!(e, Event::Error { error, .. } if error.semantic_error() == &CoreError::RecallTurnInFlight)
         ),
         "busy recall should be rejected with RecallTurnInFlight: {rejected:#?}"
     );
@@ -296,7 +295,7 @@ async fn recall_busy_rejected_and_empty_session() {
     .await;
     assert!(
         empty.iter().any(
-            |e| matches!(e, Event::Error { error, .. } if *error == CoreError::NothingToRecall)
+            |e| matches!(e, Event::Error { error, .. } if error.semantic_error() == &CoreError::NothingToRecall)
         ),
         "recall with no user message should error NothingToRecall: {empty:#?}"
     );

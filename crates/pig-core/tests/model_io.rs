@@ -149,5 +149,6 @@ async fn model_io_written_per_step() {
         api_totals,
         "turn aggregation is unchanged"
     );
-    let _ = std::fs::remove_dir_all(data_dir.parent().unwrap().parent().unwrap());
+    agent.shutdown();
+    let _ = std::fs::remove_dir_all(data_dir.parent().expect("test root"));
 }

@@ -5,9 +5,9 @@ use crate::anthropic::{anthropic_request_tools, to_anthropic_messages};
 use crate::events::ProviderEvent;
 use crate::openai::{openai_request_tools, to_openai_messages};
 
-#[test]
-fn finish_filters_nameless_tool_calls() {
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+#[tokio::test]
+async fn finish_filters_nameless_tool_calls() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(256);
     let calls = vec![
         ToolCall {
             id: "a".into(),
@@ -20,7 +20,7 @@ fn finish_filters_nameless_tool_calls() {
             arguments: "{}".into(),
         },
     ];
-    finish(&tx, calls, pig_protocol::FinishReason::Stop);
+    finish(&tx, calls, pig_protocol::FinishReason::Stop).await;
     match rx.try_recv() {
         Ok(ProviderEvent::ToolCalls(calls)) => {
             assert_eq!(calls.len(), 1, "nameless calls should be filtered");
@@ -169,11 +169,11 @@ fn user_message_with_images_both_formats() {
     assert_eq!(blocks[2]["text"], "view image");
 }
 
-#[test]
-fn finish_all_nameless_emits_no_tool_calls() {
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+#[tokio::test]
+async fn finish_all_nameless_emits_no_tool_calls() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(256);
     let calls = vec![ToolCall::default()];
-    finish(&tx, calls, pig_protocol::FinishReason::Stop);
+    finish(&tx, calls, pig_protocol::FinishReason::Stop).await;
     assert!(matches!(rx.try_recv(), Ok(ProviderEvent::Finished(_))));
     assert!(
         rx.try_recv().is_err(),

@@ -170,6 +170,15 @@ pub enum Op {
         #[serde(default)]
         delivery: MessageDelivery,
     },
+    /// Execution input with a stable mailbox identity and delivery intent.
+    SendExecutionMessage {
+        session_id: String,
+        message_id: String,
+        content: String,
+        permissions: PermissionSettings,
+        #[serde(default)]
+        delivery: MessageDelivery,
+    },
     Interrupt {
         session_id: String,
     },

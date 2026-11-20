@@ -14,6 +14,7 @@ pub(crate) struct ApprovalRequest {
     pub call_id: String,
     pub request_id: String,
     pub cwd: std::path::PathBuf,
+    pub permissions: pig_protocol::PermissionSettings,
     pub tool: String,
     pub action: serde_json::Value,
     pub detail: String,
@@ -126,7 +127,8 @@ impl PolicyApprovalReviewer {
                 &request.call_id,
                 &request.action,
             );
-            let deny = !request.cwd.is_absolute()
+            let deny = request.permissions.approval == pig_protocol::ApprovalPolicy::Never
+                || !request.cwd.is_absolute()
                 || request.danger_key.is_some()
                 || !request.requested_write_roots.is_empty()
                 || !structured_identity.0.is_empty() && structured_identity.4.is_null();
@@ -185,8 +187,17 @@ impl ApprovalReviewer for FallbackApprovalReviewer {
             match tokio::time::timeout(timeout, primary.review(request.clone(), events.clone()))
                 .await
             {
-                Ok(Ok(reply)) => Ok(reply),
-                Ok(Err(_)) | Err(_) => fallback.review(request, events).await,
+                Ok(Ok(reply)) if reply.decision != ApprovalDecision::DeferToUser => Ok(reply),
+                Ok(Ok(_)) | Ok(Err(_)) | Err(_) => match fallback.review(request, events).await {
+                    Ok(ApprovalReply {
+                        decision: ApprovalDecision::DeferToUser,
+                        ..
+                    }) => Err(ApprovalReviewError {
+                        detail: "the user reviewer returned DeferToUser without a decision"
+                            .to_string(),
+                    }),
+                    result => result,
+                },
             }
         })
     }
@@ -205,6 +216,7 @@ mod tests {
             call_id: "call-1".into(),
             request_id: "s1-approval-1".into(),
             cwd: std::env::temp_dir(),
+            permissions: pig_protocol::PermissionSettings::default(),
             tool: "Write".into(),
             action: serde_json::json!({ "path": "file.txt" }),
             detail: "write file".into(),
@@ -249,6 +261,10 @@ mod tests {
             assert_eq!(request.turn_id.as_deref(), Some("turn-1"));
             assert_eq!(request.call_id, "call-1");
             assert_eq!(request.action["path"], "file.txt");
+            assert_eq!(
+                request.permissions,
+                pig_protocol::PermissionSettings::default()
+            );
             Ok(ApprovalReply {
                 decision: ApprovalDecision::Reject,
                 feedback: Some("policy denied".to_string()),
@@ -257,6 +273,19 @@ mod tests {
         let (events, _receiver) = async_channel::unbounded();
         let reply = reviewer
             .review(request(), events)
+            .await
+            .expect("policy reply");
+        assert_eq!(reply.decision, ApprovalDecision::Reject);
+    }
+
+    #[tokio::test]
+    async fn workspace_policy_cannot_override_a_never_approval_policy() {
+        let reviewer = PolicyApprovalReviewer::workspace_policy();
+        let mut request = request();
+        request.permissions.approval = pig_protocol::ApprovalPolicy::Never;
+        let (events, _receiver) = async_channel::unbounded();
+        let reply = reviewer
+            .review(request, events)
             .await
             .expect("policy reply");
         assert_eq!(reply.decision, ApprovalDecision::Reject);

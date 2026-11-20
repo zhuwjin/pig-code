@@ -201,7 +201,7 @@ Package hooks reuse the existing `HookSet`/`HookRunner` and `HooksConfig`:
 
 A backend Engine has a 64 MiB memory budget, operation and call-time budgets, and no canvas-operation allowance. Loading and health checks have independent deadlines. Tool and service requests have concurrency limits, and private storage is limited to 1 MiB per plugin scope. These values are limits enforced by the host, not measurements of actual memory or CPU use.
 
-NSH does not currently expose per-Engine real memory or CPU measurements. Runtime metrics therefore report pending, timed-out and cancelled requests, dropped log events, network bytes and storage bytes rather than presenting resource budgets as observed usage.
+NSH does not currently expose per-Engine total memory or CPU-time measurements. Its performance monitor provides per-Engine JS heap, object and node counts plus engine-thread busy time, while the process sampler's CPU and memory cover the whole host process. Runtime metrics therefore report pending, timed-out and cancelled requests, dropped log events, network bytes and storage bytes rather than presenting resource budgets or process-wide samples as a plugin's observed usage.
 
 ## Host services
 

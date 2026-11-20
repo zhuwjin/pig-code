@@ -16,6 +16,9 @@
 pub mod api_log;
 pub mod mock;
 
+#[cfg(test)]
+mod contract;
+
 mod anthropic;
 mod chat;
 mod chat_tool_stream;
@@ -70,6 +73,15 @@ pub fn core_error_en(error: &pig_protocol::CoreError) -> String {
             format!("Context window exceeded: {detail}")
         }
         pig_protocol::CoreError::Internal { detail } => detail.clone(),
+        pig_protocol::CoreError::HistoryLimitExceeded {
+            limit_bytes,
+            used_bytes,
+            attempted_bytes,
+            ..
+        } => format!(
+            "Durable history quota exceeded ({limit_bytes} bytes; used {used_bytes}, attempted {attempted_bytes}); start a new session"
+        ),
+        pig_protocol::CoreError::Contextual { error, .. } => core_error_en(error),
         pig_protocol::CoreError::Unknown => "Unknown error".to_string(),
         // Other variants never go through the model channel (UI-only); fall back to the Debug shape for diagnosability
         other => format!("{other:?}"),

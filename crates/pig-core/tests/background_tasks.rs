@@ -20,6 +20,10 @@ async fn send(agent: &pig_core::AgentHandle, sid: &str, text: &str) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shell_notification_reaches_model_once_for_every_wire_format() {
+    if !crate::common::native_sandbox_usable() {
+        crate::common::assert_native_sandbox_rejection().await;
+        return;
+    }
     for (name, api_format) in [
         ("chat", "OpenAiChat"),
         ("responses", "OpenAiResponses"),
@@ -43,7 +47,11 @@ async fn shell_notification_reaches_model_once_for_every_wire_format() {
 
         let note = automatic_notification(&agent, "b1", pig_protocol::TaskStatus::Completed).await;
         assert_eq!(note.kind, pig_protocol::TaskKind::Shell);
-        assert_eq!(note.status, pig_protocol::TaskStatus::Completed);
+        assert_eq!(
+            note.status,
+            pig_protocol::TaskStatus::Completed,
+            "background command failed: {note:?}"
+        );
         assert_eq!(note.exit_code, Some(0));
         let Some(pig_protocol::TaskNotificationOutput::Preview { text, .. }) = &note.output else {
             panic!("{name}: small command output should be a preview")
@@ -91,6 +99,10 @@ async fn shell_notification_reaches_model_once_for_every_wire_format() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn task_wait_delivery_suppresses_automatic_notification() {
+    if !crate::common::native_sandbox_usable() {
+        crate::common::assert_native_sandbox_rejection().await;
+        return;
+    }
     let (config_path, cwd, data_dir, requests) = setup_with_log("background-task-wait");
     let agent =
         pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir.clone());
@@ -230,6 +242,10 @@ fn assert_delivery(data_dir: &std::path::Path, notification_id: &str, channel: &
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn consecutive_background_scenarios_work_for_every_wire_format() {
+    if !crate::common::native_sandbox_usable() {
+        crate::common::assert_native_sandbox_rejection().await;
+        return;
+    }
     for (name, api_format) in [
         ("chat", "OpenAiChat"),
         ("responses", "OpenAiResponses"),

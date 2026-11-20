@@ -85,7 +85,7 @@ struct SessionParts {
     pending_questions: PendingQuestions,
     store: Arc<Mutex<Store>>,
     data_dir: PathBuf,
-    task_notify: tokio::sync::mpsc::UnboundedSender<crate::task::TaskChange>,
+    task_notify: async_channel::Sender<crate::task::TaskChange>,
     runtime: Option<Arc<crate::config::RuntimeConfig>>,
     session_start_source: &'static str,
 }
@@ -202,7 +202,7 @@ impl Session {
         store: Arc<Mutex<Store>>,
         sessions_dir: &Path,
         data_dir: PathBuf,
-        task_notify: tokio::sync::mpsc::UnboundedSender<crate::task::TaskChange>,
+        task_notify: async_channel::Sender<crate::task::TaskChange>,
         plugins: &crate::plugins::SharedPluginRegistry,
         runtime: Option<Arc<crate::config::RuntimeConfig>>,
     ) -> Result<Self, CoreError> {
@@ -242,7 +242,7 @@ impl Session {
         pending_questions: PendingQuestions,
         store: Arc<Mutex<Store>>,
         data_dir: PathBuf,
-        task_notify: tokio::sync::mpsc::UnboundedSender<crate::task::TaskChange>,
+        task_notify: async_channel::Sender<crate::task::TaskChange>,
         plugins: &crate::plugins::SharedPluginRegistry,
         runtime: Option<Arc<crate::config::RuntimeConfig>>,
     ) -> Result<(Self, Vec<RolloutRecord>), CoreError> {

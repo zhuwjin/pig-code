@@ -12,7 +12,7 @@
 //! memory only (the registry's rolling window plus the TaskSummary tail), and
 //! the first larger chunk creates the file with the buffered prefix. The
 //! opened handle is then held for later chunks instead of reopening the file
-//! per chunk. Failures stay silent, matching the old best-effort behavior: a
+//! per chunk. Failures are retained and surfaced through the task; a
 //! command must still return its output if the spill cannot be persisted.
 
 use std::io::Write as _;
@@ -47,6 +47,7 @@ pub(crate) struct Spill {
     written: u64,
     /// A failed open is final: do not buffer or retry for this task.
     failed: bool,
+    failure: Option<String>,
 }
 
 impl Spill {
@@ -55,13 +56,22 @@ impl Spill {
         // belongs to an earlier run and must not be shown or appended to. The
         // new task owns the id; removing the path also drops a planted link
         // instead of following it.
-        let _ = std::fs::remove_file(&path);
+        let failure = match std::fs::remove_file(&path) {
+            Ok(()) => None,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => Some(format!(
+                "Failed to persist task spill {}: failed to replace previous output: {error}",
+                path.display()
+            )),
+        };
+        let failed = failure.is_some();
         Self {
             path,
             file: None,
             pending: Vec::new(),
             written: 0,
-            failed: false,
+            failed,
+            failure,
         }
     }
 
@@ -72,6 +82,7 @@ impl Spill {
             pending: Vec::new(),
             written: 0,
             failed: true,
+            failure: None,
         }
     }
 
@@ -81,65 +92,72 @@ impl Spill {
 
     /// Append raw output bytes; the first chunk that pushes the total past the
     /// threshold creates the file and writes the buffered prefix too.
-    pub(crate) fn append(&mut self, chunk: &[u8]) {
-        if self.failed || chunk.is_empty() {
-            return;
+    pub(crate) fn append(&mut self, chunk: &[u8]) -> Result<(), String> {
+        if chunk.is_empty() {
+            return Ok(());
         }
-        if self.file.is_none() {
+        if self.failed {
+            return self.failure.clone().map_or(Ok(()), Err);
+        }
+        let result = if self.file.is_none() {
             self.pending.extend_from_slice(chunk);
             if self.pending.len() <= SPILL_THRESHOLD_BYTES {
-                return;
+                return Ok(());
             }
-            if !self.open() {
-                self.failed = true;
-                self.pending.clear();
-                return;
-            }
-            let pending = std::mem::take(&mut self.pending);
-            self.write(&pending);
+            self.open().and_then(|()| {
+                let pending = std::mem::take(&mut self.pending);
+                self.write(&pending)
+            })
         } else {
-            self.write(chunk);
+            self.write(chunk)
+        };
+        if let Err(error) = result {
+            let error = format!(
+                "Failed to persist task spill {}: {error}",
+                self.path.display()
+            );
+            self.failed = true;
+            self.failure = Some(error.clone());
+            return Err(error);
         }
+        Ok(())
     }
 
-    fn open(&mut self) -> bool {
-        let Some(parent) = self.path.parent() else {
-            return false;
-        };
-        if std::fs::create_dir_all(parent).is_err() {
-            return false;
-        }
-        match std::fs::OpenOptions::new()
+    fn open(&mut self) -> Result<(), String> {
+        let parent = self
+            .path
+            .parent()
+            .ok_or_else(|| "spill path has no parent".to_string())?;
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        let file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)
-        {
-            Ok(file) => {
-                self.file = Some(file);
-                self.written = 0;
-                true
-            }
-            Err(_) => false,
-        }
+            .map_err(|error| error.to_string())?;
+        self.file = Some(file);
+        self.written = 0;
+        Ok(())
     }
 
-    fn write(&mut self, chunk: &[u8]) {
+    fn write(&mut self, chunk: &[u8]) -> Result<(), String> {
         let Some(file) = self.file.as_mut() else {
-            return;
+            return Err("spill file is not open".to_string());
         };
         if self.written >= MAX_SPILL_BYTES {
-            return;
+            return Ok(());
         }
         let remaining = (MAX_SPILL_BYTES - self.written) as usize;
         if chunk.len() <= remaining {
-            if file.write_all(chunk).is_ok() {
-                self.written += chunk.len() as u64;
-            }
+            file.write_all(chunk).map_err(|error| error.to_string())?;
+            self.written += chunk.len() as u64;
         } else {
-            let _ = file.write_all(&chunk[..remaining]);
-            let _ = file.write_all(TRUNCATED_NOTICE.as_bytes());
+            file.write_all(&chunk[..remaining])
+                .map_err(|error| error.to_string())?;
+            file.write_all(TRUNCATED_NOTICE.as_bytes())
+                .map_err(|error| error.to_string())?;
             self.written = MAX_SPILL_BYTES;
         }
+        Ok(())
     }
 }
 
@@ -191,19 +209,19 @@ mod tests {
         let mut spill = Spill::new(path.clone());
 
         let below = vec![b'a'; SPILL_THRESHOLD_BYTES];
-        spill.append(&below);
+        spill.append(&below).expect("buffered output");
         assert!(
             !path.exists(),
             "output up to the threshold must not create a spill file"
         );
 
-        spill.append(b"b");
+        spill.append(b"b").expect("cross spill threshold");
         let text = std::fs::read_to_string(&path).expect("the crossing chunk creates the file");
         assert_eq!(text.len(), SPILL_THRESHOLD_BYTES + 1);
         assert!(text.starts_with("aaaa"), "the buffered prefix is written");
         assert!(text.ends_with('b'));
 
-        spill.append(b"tail");
+        spill.append(b"tail").expect("append spill tail");
         assert!(
             std::fs::read_to_string(&path)
                 .expect("later chunks use the held handle")
@@ -219,10 +237,10 @@ mod tests {
         let mut spill = Spill::new(path.clone());
 
         let start = vec![b'a'; SPILL_THRESHOLD_BYTES + 1];
-        spill.append(&start);
+        spill.append(&start).expect("start capped spill");
         let fill = vec![b'b'; MAX_SPILL_BYTES as usize];
-        spill.append(&fill);
-        spill.append(b"after-the-cap");
+        spill.append(&fill).expect("fill capped spill");
+        spill.append(b"after-the-cap").expect("cap remains stable");
 
         let text = std::fs::read_to_string(&path).expect("spill exists");
         assert!(text.len() as u64 >= MAX_SPILL_BYTES);
@@ -232,15 +250,17 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_spill_stays_silent_and_never_retries() {
+    fn a_failed_spill_is_visible_and_never_retries() {
         let root = fixture("failed");
         let blocker = root.join("blocked");
         std::fs::write(&blocker, "file").expect("blocking file");
         let mut spill = Spill::new(blocker.join("tool-results").join("b1.log"));
 
         let chunk = vec![b'a'; SPILL_THRESHOLD_BYTES + 1];
-        spill.append(&chunk);
-        spill.append(b"more");
+        let first = spill.append(&chunk).expect_err("spill error is visible");
+        let second = spill.append(b"more").expect_err("same retained failure");
+        assert_eq!(first, second);
+        assert!(first.contains("Failed to persist task spill"));
         assert!(
             blocker.is_file(),
             "a path that cannot become a directory leaves no trace"

@@ -295,7 +295,7 @@ impl Session {
         _rt: &mut StepRuntime,
         cancel: &CancellationToken,
     ) -> (
-        tokio::sync::mpsc::UnboundedReceiver<ProviderEvent>,
+        tokio::sync::mpsc::Receiver<ProviderEvent>,
         tokio::task::JoinHandle<()>,
     ) {
         let mut request_config = self.agent.config().clone();
@@ -313,7 +313,7 @@ impl Session {
         {
             control = control.with_structured_output(schema);
         }
-        let (child_tx, child_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (child_tx, child_rx) = tokio::sync::mpsc::channel(256);
         let task = tokio::spawn(pig_provider::stream_chat(
             request_config,
             self.agent.history.clone(),
@@ -520,7 +520,7 @@ impl Session {
                 ..Default::default()
             },
         ) {
-            tracing::warn!(agent_id = %self.agent.id, "{error}");
+            tracing::warn!(agent_id = %self.agent.id, error = ?error, "subagent context persistence failed");
             return CommitAction::Terminal(crate::session::engine::StepOutcome::Failed);
         }
         self.agent.history.push(assistant);
@@ -668,7 +668,7 @@ impl Session {
                     ..Default::default()
                 },
             ) {
-                tracing::warn!(agent_id = %self.agent.id, "{error}");
+                tracing::warn!(agent_id = %self.agent.id, error = ?error, "subagent context persistence failed");
                 return crate::session::engine::StepOutcome::Failed;
             }
             self.agent.history.push(message);
@@ -683,7 +683,7 @@ impl Session {
                     &mut message,
                     crate::agent::AgentMsgMeta::default(),
                 ) {
-                    tracing::warn!(agent_id = %self.agent.id, "{error}");
+                    tracing::warn!(agent_id = %self.agent.id, error = ?error, "subagent context persistence failed");
                     return crate::session::engine::StepOutcome::Failed;
                 }
                 self.agent.history.push(message);
@@ -731,7 +731,7 @@ impl Session {
                 if let Err(error) =
                     persist_child_tool_starts(self, &calls, &rt.step_item_ids, call_ix, end)
                 {
-                    tracing::warn!(agent_id = %self.agent.id, "{error}");
+                    tracing::warn!(agent_id = %self.agent.id, error = ?error, "subagent context persistence failed");
                     return crate::session::engine::StepOutcome::Failed;
                 }
                 match self
@@ -749,7 +749,7 @@ impl Session {
             if let Err(error) =
                 persist_child_tool_starts(self, &calls, &rt.step_item_ids, call_ix, call_ix + 1)
             {
-                tracing::warn!(agent_id = %self.agent.id, "{error}");
+                tracing::warn!(agent_id = %self.agent.id, error = ?error, "subagent context persistence failed");
                 return crate::session::engine::StepOutcome::Failed;
             }
             let summary = tool::summarize(child_call);
@@ -790,7 +790,7 @@ impl Session {
                     &mut message,
                     crate::agent::AgentMsgMeta::default(),
                 ) {
-                    tracing::warn!(agent_id = %self.agent.id, "{error}");
+                    tracing::warn!(agent_id = %self.agent.id, error = ?error, "subagent context persistence failed");
                     return crate::session::engine::StepOutcome::Failed;
                 }
                 self.agent.history.push(message);
@@ -830,7 +830,7 @@ impl Session {
                             &mut message,
                             meta,
                         ) {
-                            tracing::warn!(agent_id = %self.agent.id, "{error}");
+                            tracing::warn!(agent_id = %self.agent.id, error = ?error, "subagent context persistence failed");
                             return crate::session::engine::StepOutcome::Failed;
                         }
                         self.agent.history.push(message);
@@ -852,7 +852,7 @@ impl Session {
                                 &mut message,
                                 result_meta,
                             ) {
-                                tracing::warn!(agent_id = %self.agent.id, "{error}");
+                                tracing::warn!(agent_id = %self.agent.id, error = ?error, "subagent context persistence failed");
                                 return crate::session::engine::StepOutcome::Failed;
                             }
                             self.agent.history.push(message);
@@ -911,7 +911,7 @@ impl Session {
                             &mut message,
                             crate::agent::AgentMsgMeta::default(),
                         ) {
-                            tracing::warn!(agent_id = %self.agent.id, "{error}");
+                            tracing::warn!(agent_id = %self.agent.id, error = ?error, "subagent context persistence failed");
                             return crate::session::engine::StepOutcome::Failed;
                         }
                         self.agent.history.push(message);
@@ -929,7 +929,7 @@ impl Session {
                         &mut message,
                         crate::agent::AgentMsgMeta::default(),
                     ) {
-                        tracing::warn!(agent_id = %self.agent.id, "{error}");
+                        tracing::warn!(agent_id = %self.agent.id, error = ?error, "subagent context persistence failed");
                         return crate::session::engine::StepOutcome::Failed;
                     }
                     self.agent.history.push(message);
@@ -964,7 +964,7 @@ impl Session {
                             ..Default::default()
                         },
                     ) {
-                        tracing::warn!(agent_id = %self.agent.id, "{error}");
+                        tracing::warn!(agent_id = %self.agent.id, error = ?error, "subagent context persistence failed");
                         return crate::session::engine::StepOutcome::Failed;
                     }
                     self.agent.history.push(message);

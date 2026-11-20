@@ -415,6 +415,10 @@ impl AgentExecutionRegistry {
         }
     }
 
+    pub(crate) fn execution_runtime(&self) -> Option<super::runtime::AgentRuntime> {
+        self.runtime.clone()
+    }
+
     pub(crate) fn update_agent_context(
         &self,
         agent_id: &str,
@@ -662,10 +666,6 @@ impl AgentExecutionRegistry {
                 tracing::warn!(%agent_id, %run_id, %error, "runtime run settlement failed");
                 return false;
             }
-            if let Err(error) = runtime.release_current_execution_blocking(run_id.to_string()) {
-                tracing::warn!(%agent_id, %run_id, %error, "runtime execution release failed");
-                return false;
-            }
         }
         let mut nodes = self.lock();
         let Some(node) = nodes.get_mut(agent_id) else {
@@ -690,55 +690,6 @@ impl AgentExecutionRegistry {
         };
         self.finish_supervision(node);
         true
-    }
-
-    pub(crate) fn recover_lost_child(
-        &self,
-        agent: super::runtime::RuntimeAgent,
-        run_id: String,
-    ) -> Result<(), String> {
-        let Some(runtime) = &self.runtime else {
-            return Ok(());
-        };
-        let agent_id = agent.agent_id.clone();
-        let parent_agent_id = agent
-            .parent_agent_id
-            .clone()
-            .ok_or_else(|| format!("Recovered child {} has no parent", agent.agent_id))?;
-        runtime
-            .register_agent_blocking(agent)
-            .map_err(|error| error.to_string())?;
-        let (run, _) = runtime
-            .start_run_blocking(super::runtime::StartRun {
-                run_id: Some(run_id.clone()),
-                agent_id,
-                backend_id: "local".into(),
-                required_capabilities: Default::default(),
-                initiator: super::runtime::AgentInitiator::Agent {
-                    agent_id: parent_agent_id,
-                    run_id: String::new(),
-                },
-                idempotency_key: Some(format!("agent-run:{run_id}")),
-                causation_id: Some(run_id),
-                correlation_id: Some(self.session_id.clone()),
-                queued: false,
-                watchdog: Default::default(),
-            })
-            .map_err(|error| error.to_string())?;
-        if run.status.is_active() {
-            runtime
-                .settle_current_run_blocking(
-                    run.run_id.clone(),
-                    super::runtime::RuntimeRunStatus::Lost,
-                    Some("Recovered from an orphaned Agent conversation".into()),
-                    (0, 0, 0),
-                )
-                .map_err(|error| error.to_string())?;
-        }
-        runtime
-            .release_current_execution_blocking(run.run_id)
-            .map_err(|error| error.to_string())?;
-        Ok(())
     }
 
     pub(crate) fn restore(&self, mut node: AgentNode) {

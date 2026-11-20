@@ -274,6 +274,7 @@ impl Manager {
             Vec::new(),
             permissions,
             delivery,
+            None,
             turns,
         );
         Some(Ok(serde_json::json!({ "accepted": true })))
@@ -630,7 +631,7 @@ impl Manager {
                 detail: format!("no running subagent `{agent_id}` in this session"),
             }
         })?;
-        crate::task::stop_task_with_agents(
+        crate::task::request_task_stop_with_agents(
             &entry.state.tasks,
             &task_id,
             &entry.state.task_notify,

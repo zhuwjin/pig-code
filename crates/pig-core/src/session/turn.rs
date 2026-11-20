@@ -131,6 +131,17 @@ impl Session {
             });
         }
         let cancel = control.cancel_token();
+        if let Some(error) = self.durable_history_failure() {
+            self.emit(
+                |session_id| Event::Error {
+                    session_id: Some(session_id),
+                    error,
+                    fatal: true,
+                },
+                tx,
+            );
+            return self.root_result(crate::session::AgentRunStatus::Failed);
+        }
         self.register_run_cancel(cancel);
         // ---- SessionStart hooks (once per Session instance, at the first
         // turn; the turn's cancel token covers the run). Nothing to block at
@@ -364,10 +375,10 @@ impl Session {
             if let Some(reminder) = reminder {
                 user_text = format!("{reminder}\n\n{user_text}");
             }
-            if self.agent.history.len() == 1 {
-                // First message: seed the title (first 30 chars as fallback) and
-                // generate a model title async; if manually renamed (title_custom),
-                // neither overwrites
+            let first_message = self.agent.history.len() == 1;
+            if first_message {
+                // First message: seed the title (first 30 chars as fallback); if
+                // manually renamed (title_custom), do not overwrite it.
                 let title = seed_title(&content);
                 let id = self.agent.id.clone();
                 self.store
@@ -379,7 +390,6 @@ impl Session {
                         }
                         meta.updated_at = now_secs();
                     });
-                spawn_title_generation(&self.store, &self.agent.id, &content, config, tx);
             }
             // Rollout stores the original text only (files go in a separate field;
             // the "referenced files" suffix is gone — the UI renders inline chips
@@ -466,8 +476,6 @@ impl Session {
             } else {
                 image_refs.clone()
             };
-            self.agent.history.push(user_msg);
-            self.user_ixs.push(Some(self.agent.history.len() - 1));
             // The event and the clean rollout fields carry display text; sent_* preserves the model-facing form.
             let nums = crate::rollout::image_nums(&image_refs);
             // The turn's first user message was accepted just before this point;
@@ -483,6 +491,22 @@ impl Session {
                 model_text: Some(model_text),
                 sent_input_image: Some(config.input_image),
             });
+            if let Some(error) = self.durable_history_failure() {
+                self.emit(
+                    |session_id| Event::Error {
+                        session_id: Some(session_id),
+                        error,
+                        fatal: true,
+                    },
+                    tx,
+                );
+                return self.root_result(crate::session::AgentRunStatus::Failed);
+            }
+            self.agent.history.push(user_msg);
+            self.user_ixs.push(Some(self.agent.history.len() - 1));
+            if first_message {
+                spawn_title_generation(&self.store, &self.agent.id, &content, config, tx);
+            }
             self.emit(
                 |session_id| Event::UserMessage {
                     session_id,
@@ -507,6 +531,17 @@ impl Session {
         // The user message, prompt snapshot and hook contexts must be durable
         // (real sync, not flush) before any model request sees them.
         self.sync_rollout();
+        if let Some(error) = self.durable_history_failure() {
+            self.emit(
+                |session_id| Event::Error {
+                    session_id: Some(session_id),
+                    error,
+                    fatal: true,
+                },
+                tx,
+            );
+            return self.root_result(crate::session::AgentRunStatus::Failed);
+        }
         self.report_rollout_failure(tx);
 
         let mut step = 0usize;
@@ -602,18 +637,15 @@ impl Session {
                     self.sync_rollout();
                     self.report_rollout_failure(tx);
                     let run = self.run_envelope();
-                    self.emit(
-                        |session_id| Event::TurnComplete {
-                            session_id,
-                            duration_ms,
-                            run,
-                            stats,
-                            finish_reason,
-                        },
-                        tx,
-                    );
+                    let mut outcome = self.root_result(crate::session::AgentRunStatus::Completed);
+                    outcome.completion = Some(crate::session::outcome::TurnCompletion {
+                        duration_ms,
+                        run,
+                        stats,
+                        finish_reason,
+                    });
                     self.touch_index();
-                    return self.root_result(crate::session::AgentRunStatus::Completed);
+                    return outcome;
                 }
                 StepOutcome::Paused => {
                     if pause_continuations >= MAX_PAUSE_CONTINUATIONS {
@@ -849,9 +881,7 @@ impl Session {
                         call_ix,
                         group_end,
                         turn_id,
-                        media,
                         config.context_window,
-                        self.trust.admits(&self.agent.cwd),
                         tx,
                         cancel,
                     )
@@ -963,6 +993,7 @@ impl Session {
                             call_id: call.id.clone(),
                             request_id,
                             cwd: self.agent.cwd.clone(),
+                            permissions: self.permissions,
                             tool: call.name.clone(),
                             action: serde_json::from_str(&call.arguments).unwrap_or_else(|_| {
                                 serde_json::Value::String(call.arguments.clone())
@@ -1003,7 +1034,25 @@ impl Session {
                     return engine::StepOutcome::Cancelled;
                             }
                         };
+                    if decision == ApprovalDecision::Abort {
+                        self.settle_cancelled_tool(
+                            CancelledTool {
+                                call,
+                                summary,
+                                item_id: &item_id,
+                                turn_id,
+                                rest: &tool_calls[call_ix + 1..],
+                                rest_item_ids: &item_ids[call_ix + 1..],
+                                card: None,
+                                cards: vec![],
+                            },
+                            tx,
+                        );
+                        self.emit_turn_aborted(tx);
+                        return engine::StepOutcome::Cancelled;
+                    }
                     match decision {
+                        ApprovalDecision::Abort => unreachable!("abort returned above"),
                         ApprovalDecision::Allow
                         | ApprovalDecision::ApprovedForProject
                         | ApprovalDecision::ApprovedForSession => {
@@ -1032,6 +1081,10 @@ impl Session {
                             note = "Plan approved; plan mode is now off. Start executing the plan."
                                 .to_string();
                             is_error = false;
+                        }
+                        ApprovalDecision::DeferToUser => {
+                            note = "Approval review deferred to a user, but no user fallback returned a decision.".to_string();
+                            is_error = true;
                         }
                         ApprovalDecision::Reject => {
                             // kimi Revise: a rejection may carry feedback the
@@ -1662,9 +1715,7 @@ impl Session {
         start: usize,
         end: usize,
         turn_id: &str,
-        media: tool::MediaCapabilities,
         context_window: u64,
-        trusted: bool,
         tx: &async_channel::Sender<Event>,
         cancel: &CancellationToken,
     ) -> bool {
@@ -1704,15 +1755,12 @@ impl Session {
         // grouping (write tools are sync points, executed only after the group
         // drains). MCP tools: the mask already guarantees read-only +
         // approval-free + no deny hit; the task clones Arc<McpManager> and
-        // fetches by name (an McpTool clone is just an Arc clone, cheap),
-        // executed via execute_with_extra
+        // fetches by name through the same gate as the serial path. Each task
+        // owns only its ChangeTracker; all permission and hook state is shared.
         self.plugin_tools.dispatcher().set_event_sender(tx.clone());
-        let cwd = self.agent.cwd.clone();
-        let state = self.state.clone();
-        let mcp = self.mcp.clone();
-        let plugin_tools = self.plugin_tools.clone();
-        let plugin_filter = self.plugin_tool_filter.clone();
-        let sandbox_profile = crate::task::sandbox_profile_for(self.permissions, self.plan_enabled);
+        let gate = self.gate_snapshot();
+        let tools = tool::all();
+        let tools = &tools;
         let mut slots: Vec<Option<ParallelOutput>> = Vec::new();
         slots.resize_with(cards.len(), || None);
         let cancelled = super::batch::run_tool_batch(
@@ -1720,62 +1768,62 @@ impl Session {
             cancel,
             |index| {
                 let call = cards[index].call.clone();
-                let cwd = cwd.clone();
-                let state = state.clone();
-                let mcp = mcp.clone();
-                let plugin_tools = plugin_tools.clone();
-                let plugin_filter = plugin_filter.clone();
+                let item_id = cards[index].item_id.clone();
+                let gate = gate.clone();
                 async move {
-                    let caps = media;
                     let mut tracker = ChangeTracker::default();
-                    let ctx = ToolContext {
-                        cwd: &cwd,
-                        tracker: &mut tracker,
-                        state: &state,
-                        fs_grant: None,
-                        sandbox_override: Default::default(),
-                        sandbox_profile,
-                        additional_permissions: Default::default(),
-                    };
-                    let mut extra: Vec<Box<dyn tool::Tool>> = match &mcp {
-                        Some(mcp) if call.name.starts_with("mcp__") => {
-                            mcp.tool_named(&call.name).into_iter().collect()
-                        }
-                        _ => vec![],
-                    };
-                    extra.extend(plugin_tools.tools_filtered(&plugin_filter));
-                    if call.name == "Skill" {
-                        extra.push(Box::new(tool::SkillTool::new_trusted(
-                            &cwd,
-                            &plugin_tools.registry(),
-                            trusted,
-                        )));
-                    }
-                    if call.name == "SendMessage" {
-                        extra.push(Box::new(tool::SendMessageTool));
-                    }
+                    let tool = tools
+                        .iter()
+                        .find(|tool| tool.name() == call.name)
+                        .map(|tool| tool.as_ref());
                     let tool_started = Instant::now();
-                    let (mut output, is_error, file_change, edit, mut media) =
-                        tool::execute_with_extra(&call, ctx, &extra).await;
+                    let outcome = gate
+                        .exec_tool_gated(&call, tool, &item_id, turn_id, tx, cancel, &mut tracker)
+                        .await;
                     let elapsed_ms = tool_started.elapsed().as_millis() as u64;
-                    debug_assert!(
-                        file_change.is_none() && tracker.take_dirty().is_empty(),
-                        "concurrent read-only segment produces no file changes: {}",
-                        call.name
-                    );
-                    project_tool_media(&call.arguments, &mut output, &mut media, caps);
-                    let images = tool_images_to_chat(&call.arguments, media.images);
-                    let documents = tool_documents_to_chat(media.documents);
-                    ParallelOutput {
-                        output,
-                        is_error,
-                        edit,
-                        images,
+                    let empty = |stopped| ParallelOutput {
+                        output: String::new(),
+                        is_error: true,
+                        edit: None,
+                        images: vec![],
                         image_refs: vec![],
-                        documents,
+                        documents: vec![],
                         document_refs: vec![],
-                        file_change,
+                        file_change: None,
+                        stopped,
                         elapsed_ms,
+                    };
+                    match outcome {
+                        GatedToolOutcome::Executed {
+                            output,
+                            is_error,
+                            edit,
+                            images,
+                            documents,
+                            ..
+                        } => ParallelOutput {
+                            output,
+                            is_error,
+                            edit,
+                            images,
+                            image_refs: vec![],
+                            documents,
+                            document_refs: vec![],
+                            file_change: None,
+                            stopped: false,
+                            elapsed_ms,
+                        },
+                        GatedToolOutcome::Rejected { note } => ParallelOutput {
+                            output: note,
+                            ..empty(false)
+                        },
+                        GatedToolOutcome::Cancelled => {
+                            cancel.cancel();
+                            ParallelOutput {
+                                output: "Stopped".to_string(),
+                                ..empty(true)
+                            }
+                        }
                     }
                 }
             },
@@ -1792,7 +1840,7 @@ impl Session {
                         item_id: cards[index].item_id.clone(),
                         output: out.output.clone(),
                         is_error: out.is_error,
-                        stopped: false,
+                        stopped: out.stopped,
                         edit: out.edit.clone(),
                     },
                     tx,
@@ -1817,11 +1865,13 @@ impl Session {
                         image_refs,
                         document_refs,
                         file_change,
+                        stopped,
                         ..
                     } = out;
                     let mut message =
                         ChatMsg::tool_result_with_images(&card.call.id, output.clone(), images)
                             .with_error(is_error);
+                    message.stopped = stopped;
                     message.documents = documents;
                     self.agent.history.push(message);
                     self.record(&RolloutRecord::ToolCall {
@@ -1831,7 +1881,7 @@ impl Session {
                         arguments: card.call.arguments.clone(),
                         output,
                         is_error,
-                        stopped: false,
+                        stopped,
                         edit,
                         agent_card: None,
                         agent_cards: vec![],
@@ -2062,6 +2112,7 @@ struct ParallelOutput {
     /// Refs persisted before the completion event is emitted
     document_refs: Vec<crate::rollout::DocumentRef>,
     file_change: Option<tool::FileChange>,
+    stopped: bool,
     /// This call's own span (concurrent calls overlap, so the turn sums them
     /// the way the harness sums per-call tool spans rather than using the
     /// segment's wall time)
@@ -2220,14 +2271,11 @@ mod tests {
         let ws = std::env::temp_dir().join(format!("ws-{marker}"));
         let _ = std::fs::remove_dir_all(&ws);
         std::fs::create_dir_all(&ws).unwrap();
-        let outside = std::env::temp_dir()
-            .parent()
-            .unwrap()
-            .join(format!("outside-{marker}"));
+        let outside = std::env::temp_dir().join(format!("outside-{marker}"));
         let _ = std::fs::remove_dir_all(&outside);
         std::fs::create_dir_all(&outside).unwrap();
         let outside_str = outside.display().to_string().replace("\\", "/");
-        let (task_notify, _t) = tokio::sync::mpsc::unbounded_channel();
+        let (task_notify, _t) = async_channel::bounded(1024);
         let state =
             crate::task::SessionToolState::new("mask-out".to_string(), task_notify, vec![], vec![]);
         let tools = tool::all();
@@ -2286,7 +2334,7 @@ mod tests {
                 arguments: "{}".to_string(),
             })
             .collect();
-        let (task_notify, _t_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (task_notify, _t_rx) = async_channel::bounded(1024);
         let state = crate::task::SessionToolState::new(
             "mask-test".to_string(),
             task_notify,
@@ -2512,7 +2560,7 @@ mod tests {
         let store = Arc::new(Mutex::new(
             crate::store::Store::open(&data_dir).expect("store"),
         ));
-        let (task_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let (task_tx, _) = async_channel::bounded(1024);
         let meta = SessionMeta {
             id: "s-plugin".into(),
             title: String::new(),
@@ -2555,9 +2603,7 @@ mod tests {
                     0,
                     1,
                     "turn-plugin",
-                    tool::MediaCapabilities::new(true, true),
                     128_000,
-                    false,
                     &tx,
                     &cancel,
                 )

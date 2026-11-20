@@ -23,7 +23,13 @@ use trust::persist_workspace_trust;
 #[derive(Default)]
 pub(super) struct PendingDeletion {
     executions_idle: bool,
+    tasks_idle: bool,
     turn_finished: bool,
+}
+
+pub(super) enum DeletionProgress {
+    ExecutionsIdle(String),
+    TasksIdle(String),
 }
 
 const SESSION_DELETE_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
@@ -42,22 +48,41 @@ pub(super) struct Manager {
     sessions: HashMap<String, SessionEntry>,
     deleted_sessions: std::collections::HashSet<String>,
     pending_deletions: HashMap<String, PendingDeletion>,
-    deletion_tx: tokio::sync::mpsc::UnboundedSender<String>,
-    deletion_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    deletion_tx: tokio::sync::mpsc::Sender<DeletionProgress>,
+    deletion_rx: tokio::sync::mpsc::Receiver<DeletionProgress>,
     pending_terminal: Vec<(
         String,
         crate::store::BackgroundTask,
         pig_protocol::TaskNotification,
     )>,
+    pending_replays: Vec<String>,
     id_counter: u64,
-    task_notify_tx: tokio::sync::mpsc::UnboundedSender<crate::task::TaskChange>,
+    task_notify_tx: async_channel::Sender<crate::task::TaskChange>,
     /// Plugin turns waited on by `PluginSessionAction::Wait`.
     plugin_waiters: Vec<PluginTurnWaiter>,
     op_rx: async_channel::Receiver<Op>,
-    task_notify_rx: tokio::sync::mpsc::UnboundedReceiver<crate::task::TaskChange>,
+    task_notify_rx: async_channel::Receiver<crate::task::TaskChange>,
 }
 
 pub(super) fn emit(event_tx: &async_channel::Sender<Event>, event: Event) {
+    let event = match event {
+        Event::Error {
+            session_id: Some(session_id),
+            error,
+            fatal,
+        } => Event::Error {
+            error: error.with_context(pig_protocol::CoreErrorContext {
+                agent_id: session_id.clone(),
+                session_id: session_id.clone(),
+                run_id: None,
+                attempt: None,
+                call_id: None,
+            }),
+            session_id: Some(session_id),
+            fatal,
+        },
+        other => other,
+    };
     let _ = event_tx.send_blocking(event);
 }
 
@@ -113,8 +138,8 @@ impl Manager {
             );
         }
         let (task_notify_tx, task_notify_rx) =
-            tokio::sync::mpsc::unbounded_channel::<crate::task::TaskChange>();
-        let (deletion_tx, deletion_rx) = tokio::sync::mpsc::unbounded_channel();
+            async_channel::bounded::<crate::task::TaskChange>(1024);
+        let (deletion_tx, deletion_rx) = tokio::sync::mpsc::channel(256);
         Self {
             config_path,
             sessions_dir,
@@ -132,6 +157,7 @@ impl Manager {
             deletion_tx,
             deletion_rx,
             pending_terminal: Vec::new(),
+            pending_replays: Vec::new(),
             id_counter: 0,
             task_notify_tx,
             plugin_waiters: Vec::new(),
@@ -232,6 +258,24 @@ impl Manager {
                 images,
                 permissions,
                 delivery,
+                None,
+                turns,
+            ),
+            Op::SendExecutionMessage {
+                session_id,
+                message_id,
+                content,
+                permissions,
+                delivery,
+            } => self.send_message(
+                event_tx,
+                session_id,
+                content,
+                Vec::new(),
+                Vec::new(),
+                permissions,
+                delivery,
+                Some(message_id),
                 turns,
             ),
             Op::CancelQueued { session_id, id } => self.cancel_queued(event_tx, session_id, id),
@@ -542,6 +586,18 @@ impl Manager {
                 }
             };
             entry.cancel_promote = false;
+            if let Some(completion) = outcome.completion.clone() {
+                emit(
+                    &event_tx,
+                    Event::TurnComplete {
+                        session_id: session_id.clone(),
+                        duration_ms: completion.duration_ms,
+                        run: completion.run,
+                        stats: completion.stats,
+                        finish_reason: completion.finish_reason,
+                    },
+                );
+            }
             if !drain
                 && !matches!(outcome.status, crate::session::AgentRunStatus::Completed)
                 && queued > 0
@@ -576,6 +632,10 @@ impl Manager {
                 super::persist_pending(&store, &session_id, &entry.pending);
             }
         }
+        let pending_replays = std::mem::take(&mut self.pending_replays);
+        for session_id in pending_replays {
+            self.replay_loaded_session(&event_tx, session_id);
+        }
     }
 }
 
@@ -602,6 +662,35 @@ pub async fn agent_loop(
             .refresh_providers(&config.providers)
             .await;
     }
+    let deletion_requests = manager
+        .store
+        .lock()
+        .expect("store lock")
+        .pending_session_deletions();
+    match deletion_requests {
+        Ok(requests) => {
+            for session_id in requests {
+                manager.deleted_sessions.insert(session_id.clone());
+                manager.pending_deletions.insert(
+                    session_id.clone(),
+                    PendingDeletion {
+                        executions_idle: true,
+                        tasks_idle: true,
+                        turn_finished: true,
+                    },
+                );
+                manager.finish_delete_if_idle(event_tx.clone(), session_id);
+            }
+        }
+        Err(error) => emit(
+            &event_tx,
+            Event::Error {
+                session_id: None,
+                error,
+                fatal: false,
+            },
+        ),
+    }
     let mut turns: FuturesUnordered<TurnFuture> = FuturesUnordered::new();
     loop {
         #[allow(clippy::large_enum_variant)] // one event at a time; a turn owns a full Session
@@ -609,7 +698,7 @@ pub async fn agent_loop(
             Op(Op),
             TaskNotify(crate::task::TaskChange),
             Turn(String, Session, TurnOutcome),
-            DeletionIdle(String),
+            DeletionIdle(DeletionProgress),
             RetryTerminal,
             Tick,
         }
@@ -626,8 +715,11 @@ pub async fn agent_loop(
                     Ok(op) => Incoming::Op(op),
                     Err(_) => break,
                 },
-                Some(change) = task_notify_rx.recv() => Incoming::TaskNotify(change),
-                Some(session_id) = deletion_rx.recv() => Incoming::DeletionIdle(session_id),
+                change = task_notify_rx.recv() => match change {
+                    Ok(change) => Incoming::TaskNotify(change),
+                    Err(_) => break,
+                },
+                Some(progress) = deletion_rx.recv() => Incoming::DeletionIdle(progress),
                 Some((session_id, session, outcome)) = turns.next(), if !turns.is_empty() => {
                     Incoming::Turn(session_id, session, outcome)
                 }
@@ -649,10 +741,21 @@ pub async fn agent_loop(
             Incoming::Turn(session_id, session, outcome) => {
                 manager.turn_finished(event_tx.clone(), session_id, session, outcome, &mut turns)
             }
-            Incoming::DeletionIdle(session_id) => {
-                if let Some(deletion) = manager.pending_deletions.get_mut(&session_id) {
-                    deletion.executions_idle = true;
-                }
+            Incoming::DeletionIdle(progress) => {
+                let session_id = match progress {
+                    DeletionProgress::ExecutionsIdle(session_id) => {
+                        if let Some(deletion) = manager.pending_deletions.get_mut(&session_id) {
+                            deletion.executions_idle = true;
+                        }
+                        session_id
+                    }
+                    DeletionProgress::TasksIdle(session_id) => {
+                        if let Some(deletion) = manager.pending_deletions.get_mut(&session_id) {
+                            deletion.tasks_idle = true;
+                        }
+                        session_id
+                    }
+                };
                 manager.finish_delete_if_idle(event_tx.clone(), session_id);
             }
             Incoming::RetryTerminal => {
@@ -662,7 +765,17 @@ pub async fn agent_loop(
                     manager.start_notification_turn_if_ready(&event_tx, &session_id, &mut turns);
                 }
             }
-            Incoming::Tick => manager.expire_plugin_waiters(&event_tx),
+            Incoming::Tick => {
+                manager.expire_plugin_waiters(&event_tx);
+                let pending = manager
+                    .pending_deletions
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for session_id in pending {
+                    manager.finish_delete_if_idle(event_tx.clone(), session_id);
+                }
+            }
         }
     }
 }

@@ -12,7 +12,7 @@ pub async fn stream_chat(
     config: ResolvedModel,
     messages: Vec<ChatMsg>,
     tools: Vec<serde_json::Value>,
-    tx: tokio::sync::mpsc::UnboundedSender<ProviderEvent>,
+    tx: tokio::sync::mpsc::Sender<ProviderEvent>,
     control: CallControl,
 ) {
     // Empty-completion guard (same anomaly class as ZCode's
@@ -24,7 +24,7 @@ pub async fn stream_chat(
     let mut retried = false;
     let mut tx = tx;
     loop {
-        let (itx, mut irx) = tokio::sync::mpsc::unbounded_channel::<ProviderEvent>();
+        let (itx, mut irx) = tokio::sync::mpsc::channel::<ProviderEvent>(256);
         let saw_content = Arc::new(AtomicBool::new(false));
         let flag = saw_content.clone();
         let forward = tokio::spawn(async move {
@@ -32,7 +32,7 @@ pub async fn stream_chat(
             // Usage is the accounting boundary: hold it until the attempt is
             // known not to be an empty-completion retry, otherwise both the
             // discarded attempt and its replacement are counted.
-            let mut held_usage = Vec::new();
+            let mut held_usage = None;
             while let Some(event) = irx.recv().await {
                 match &event {
                     ProviderEvent::Finished(reason) => {
@@ -40,7 +40,7 @@ pub async fn stream_chat(
                         continue;
                     }
                     ProviderEvent::Usage { .. } => {
-                        held_usage.push(event);
+                        held_usage = Some(event);
                         continue;
                     }
                     _ => {}
@@ -55,7 +55,7 @@ pub async fn stream_chat(
                 if has_content {
                     flag.store(true, Ordering::Relaxed);
                 }
-                if tx.send(event).is_err() {
+                if tx.send(event).await.is_err() {
                     break;
                 }
             }
@@ -107,18 +107,20 @@ pub async fn stream_chat(
                         "provider reported a retryable in-band error, retrying once: {}",
                         core_error_en(&call_error.error)
                     );
-                    let _ = tx.send(ProviderEvent::Retrying(RetryNotice {
-                        attempt: 1,
-                        max_attempts: 1,
-                        delay: Duration::ZERO,
-                        reason: RetryReason::InBand(core_error_en(&call_error.error)),
-                    }));
+                    let _ = tx
+                        .send(ProviderEvent::Retrying(RetryNotice {
+                            attempt: 1,
+                            max_attempts: 1,
+                            delay: Duration::ZERO,
+                            reason: RetryReason::InBand(core_error_en(&call_error.error)),
+                        }))
+                        .await;
                     continue;
                 }
-                for usage in held_usage {
-                    let _ = tx.send(usage);
+                if let Some(usage) = held_usage {
+                    let _ = tx.send(usage).await;
                 }
-                let _ = tx.send(ProviderEvent::Failed(call_error.error));
+                let _ = tx.send(ProviderEvent::Failed(call_error.error)).await;
                 return;
             }
             Ok(()) => {
@@ -132,21 +134,23 @@ pub async fn stream_chat(
                     tracing::warn!(
                         "provider stream completed empty (no text/reasoning/tool calls), retrying once"
                     );
-                    let _ = tx.send(ProviderEvent::Retrying(RetryNotice {
-                        attempt: 1,
-                        max_attempts: 1,
-                        delay: Duration::ZERO,
-                        reason: RetryReason::EmptyCompletion,
-                    }));
+                    let _ = tx
+                        .send(ProviderEvent::Retrying(RetryNotice {
+                            attempt: 1,
+                            max_attempts: 1,
+                            delay: Duration::ZERO,
+                            reason: RetryReason::EmptyCompletion,
+                        }))
+                        .await;
                     continue;
                 }
                 // The final attempt's usage is the only one that counts; the
                 // retried attempt's held usage was dropped with `continue`.
-                for usage in held_usage {
-                    let _ = tx.send(usage);
+                if let Some(usage) = held_usage {
+                    let _ = tx.send(usage).await;
                 }
                 if let Some(reason) = held_finish {
-                    let _ = tx.send(ProviderEvent::Finished(reason));
+                    let _ = tx.send(ProviderEvent::Finished(reason)).await;
                 }
                 return;
             }

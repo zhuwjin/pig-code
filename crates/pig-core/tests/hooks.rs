@@ -597,7 +597,7 @@ credential_dirs = []
             })
             .expect("a HookBlocked error event");
         assert!(
-            matches!(&error, pig_protocol::CoreError::HookBlocked { detail } if detail.contains("not on my watch")),
+            matches!(error.semantic_error(), pig_protocol::CoreError::HookBlocked { detail } if detail.contains("not on my watch")),
             "{error:?}"
         );
         assert!(

@@ -293,7 +293,13 @@ export interface SubagentView {
   running: boolean;
 }
 
-export type ApprovalDecision = "Allow" | "ApprovedForSession" | "approved_for_project" | "Reject";
+export type ApprovalDecision =
+  | "Allow"
+  | "ApprovedForSession"
+  | "approved_for_project"
+  | "Reject"
+  | "DeferToUser"
+  | "Abort";
 
 export interface PendingApproval {
   requestId: string;
@@ -603,6 +609,7 @@ export function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   if (typeof error === "string") return error;
   const value = error as Payload;
+  if (value?.kind === "contextual") return errorMessage(value.error);
   if (value && typeof value.detail === "string") return value.detail;
   try {
     return JSON.stringify(error);

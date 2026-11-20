@@ -51,13 +51,13 @@ impl ToolCallStream {
     /// repeat only what changed), or id+name arrive together (Anthropic
     /// content_block_start, Responses output_item.added). Sends ToolCallStart
     /// once id+name are complete, ToolCallDelta per flushed batch.
-    pub(crate) fn push(
+    pub(crate) async fn push(
         &mut self,
         index: usize,
         id: Option<&str>,
         name: Option<&str>,
         arguments: Option<&str>,
-        tx: &tokio::sync::mpsc::UnboundedSender<ProviderEvent>,
+        tx: &tokio::sync::mpsc::Sender<ProviderEvent>,
     ) {
         self.grow_to(index);
         if self.finalized[index] {
@@ -76,11 +76,13 @@ impl ToolCallStream {
         }
         if !self.started[index] && !call.id.is_empty() && !call.name.is_empty() {
             self.started[index] = true;
-            let _ = tx.send(ProviderEvent::ToolCallStart {
-                index,
-                id: call.id.clone(),
-                name: call.name.clone(),
-            });
+            let _ = tx
+                .send(ProviderEvent::ToolCallStart {
+                    index,
+                    id: call.id.clone(),
+                    name: call.name.clone(),
+                })
+                .await;
         }
         if let Some(fragment) = arguments.filter(|s| !s.is_empty()) {
             // Authoritative accumulation (the final ToolCalls value) plus the
@@ -92,10 +94,12 @@ impl ToolCallStream {
             // The buffer holds no break between pushes (it flushes on every
             // break it brings), so only the new fragment needs scanning
             if has_line_break(fragment) || buffer.len() >= DELTA_FLUSH_CHARS {
-                let _ = tx.send(ProviderEvent::ToolCallDelta {
-                    index,
-                    delta: std::mem::take(buffer),
-                });
+                let _ = tx
+                    .send(ProviderEvent::ToolCallDelta {
+                        index,
+                        delta: std::mem::take(buffer),
+                    })
+                    .await;
             }
         }
     }
@@ -112,11 +116,11 @@ impl ToolCallStream {
     ///
     /// Any later fragment or repeated finalize is ignored, so the durable call
     /// can never change after the done boundary.
-    pub(crate) fn finalize(
+    pub(crate) async fn finalize(
         &mut self,
         index: usize,
         call: ToolCall,
-        tx: &tokio::sync::mpsc::UnboundedSender<ProviderEvent>,
+        tx: &tokio::sync::mpsc::Sender<ProviderEvent>,
     ) -> ToolCall {
         self.grow_to(index);
         if self.finalized[index] {
@@ -140,21 +144,25 @@ impl ToolCallStream {
         }
         if !self.started[index] && !effective.id.is_empty() && !effective.name.is_empty() {
             self.started[index] = true;
-            let _ = tx.send(ProviderEvent::ToolCallStart {
-                index,
-                id: effective.id.clone(),
-                name: effective.name.clone(),
-            });
+            let _ = tx
+                .send(ProviderEvent::ToolCallStart {
+                    index,
+                    id: effective.id.clone(),
+                    name: effective.name.clone(),
+                })
+                .await;
         }
 
         // The unflushed tail is part of the stream the UI is already showing.
         // Send it before the authoritative value so no live content is lost.
         let pending = std::mem::take(&mut self.buffers[index]);
         if self.started[index] && !pending.is_empty() {
-            let _ = tx.send(ProviderEvent::ToolCallDelta {
-                index,
-                delta: pending,
-            });
+            let _ = tx
+                .send(ProviderEvent::ToolCallDelta {
+                    index,
+                    delta: pending,
+                })
+                .await;
         }
 
         if effective.arguments.trim().is_empty() {
@@ -166,10 +174,12 @@ impl ToolCallStream {
             // replaying the whole value would duplicate the live content.
             let suffix = &effective.arguments[streamed.len()..];
             if self.started[index] && !suffix.is_empty() {
-                let _ = tx.send(ProviderEvent::ToolCallDelta {
-                    index,
-                    delta: suffix.to_string(),
-                });
+                let _ = tx
+                    .send(ProviderEvent::ToolCallDelta {
+                        index,
+                        delta: suffix.to_string(),
+                    })
+                    .await;
             }
         }
         // If the authoritative value does not extend the streamed prefix it
@@ -183,17 +193,19 @@ impl ToolCallStream {
 
     /// Flush the remaining unbreak batches as final deltas (the tail of the
     /// last argument line). Finalized calls never emit again.
-    pub(crate) fn flush(&mut self, tx: &tokio::sync::mpsc::UnboundedSender<ProviderEvent>) {
+    pub(crate) async fn flush(&mut self, tx: &tokio::sync::mpsc::Sender<ProviderEvent>) {
         for index in 0..self.buffers.len() {
             if self.finalized[index] {
                 self.buffers[index].clear();
                 continue;
             }
             if self.started[index] && !self.buffers[index].is_empty() {
-                let _ = tx.send(ProviderEvent::ToolCallDelta {
-                    index,
-                    delta: std::mem::take(&mut self.buffers[index]),
-                });
+                let _ = tx
+                    .send(ProviderEvent::ToolCallDelta {
+                        index,
+                        delta: std::mem::take(&mut self.buffers[index]),
+                    })
+                    .await;
             }
         }
     }
@@ -204,14 +216,14 @@ impl ToolCallStream {
 
     /// Stream end: flush the tail, then the durable boundary (filter indexed
     /// placeholders, ToolCalls, Finished) from chat.rs
-    pub(crate) fn finish(
+    pub(crate) async fn finish(
         &mut self,
-        tx: &tokio::sync::mpsc::UnboundedSender<ProviderEvent>,
+        tx: &tokio::sync::mpsc::Sender<ProviderEvent>,
         reason: pig_protocol::FinishReason,
     ) {
-        self.flush(tx);
+        self.flush(tx).await;
         let calls = std::mem::take(&mut self.calls);
-        crate::chat::finish(tx, calls.clone(), reason);
+        crate::chat::finish(tx, calls.clone(), reason).await;
         self.calls = calls;
     }
 }
@@ -230,7 +242,23 @@ fn has_line_break(fragment: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn collect(rx: &mut tokio::sync::mpsc::UnboundedReceiver<ProviderEvent>) -> Vec<ProviderEvent> {
+    macro_rules! push {
+        ($stream:expr, $($args:tt)*) => {
+            ($stream).push($($args)*).await
+        };
+    }
+    macro_rules! finalize {
+        ($stream:expr, $($args:tt)*) => {
+            ($stream).finalize($($args)*).await
+        };
+    }
+    macro_rules! finish {
+        ($stream:expr, $tx:expr, $reason:expr) => {
+            ($stream).finish($tx, $reason).await
+        };
+    }
+
+    fn collect(rx: &mut tokio::sync::mpsc::Receiver<ProviderEvent>) -> Vec<ProviderEvent> {
         let mut out = Vec::new();
         while let Ok(event) = rx.try_recv() {
             out.push(event);
@@ -246,19 +274,26 @@ mod tests {
     /// line break (break-free fragments merge into the next break-bearing
     /// batch); finish flushes the tail and emits ToolCalls + Finished with the
     /// fully accumulated arguments
-    #[test]
-    fn batches_on_line_break_and_flushes_tail() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    #[tokio::test]
+    async fn batches_on_line_break_and_flushes_tail() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(256);
         let mut stream = ToolCallStream::new();
         // First Chat-style chunk: id+name, no arguments yet
-        stream.push(0, Some("call_1"), Some("Write"), None, &tx);
+        push!(&mut stream, 0, Some("call_1"), Some("Write"), None, &tx);
         // Fragments of {"path":"a.txt","content":"l1\nl2"} serialized compact:
         // the first carries no break, so it merges into the second (which
         // ends with the escaped \n) as one flushed batch
-        stream.push(0, None, None, Some(r#"{"path":"a.txt","content":"l1"#), &tx);
-        stream.push(0, None, None, Some(r#"\nl2"#), &tx);
+        push!(
+            &mut stream,
+            0,
+            None,
+            None,
+            Some(r#"{"path":"a.txt","content":"l1"#),
+            &tx
+        );
+        push!(&mut stream, 0, None, None, Some(r#"\nl2"#), &tx);
         // Tail without a break stays buffered
-        stream.push(0, None, None, Some(r#""}"#), &tx);
+        push!(&mut stream, 0, None, None, Some(r#""}"#), &tx);
         let events = collect(&mut rx);
         assert_eq!(events.len(), 2);
         assert!(matches!(
@@ -269,7 +304,7 @@ mod tests {
             &events[1],
             ProviderEvent::ToolCallDelta { index: 0, .. }
         ));
-        stream.finish(&tx, pig_protocol::FinishReason::Stop);
+        finish!(&mut stream, &tx, pig_protocol::FinishReason::Stop);
         let events = collect(&mut rx);
         match &events[..] {
             [
@@ -287,13 +322,13 @@ mod tests {
 
     /// A break-free fragment at or past 4KB flushes without waiting for a
     /// newline (long single-line arguments)
-    #[test]
-    fn size_fallback_flushes_long_single_line() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    #[tokio::test]
+    async fn size_fallback_flushes_long_single_line() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(256);
         let mut stream = ToolCallStream::new();
-        stream.push(0, Some("c"), Some("ExecCommand"), None, &tx);
+        push!(&mut stream, 0, Some("c"), Some("ExecCommand"), None, &tx);
         let long = "x".repeat(DELTA_FLUSH_CHARS);
-        stream.push(0, None, None, Some(&long), &tx);
+        push!(&mut stream, 0, None, None, Some(&long), &tx);
         let events = collect(&mut rx);
         assert!(matches!(
             &events[..],
@@ -303,15 +338,22 @@ mod tests {
 
     /// A nameless call never starts (no live events) and finish filters it
     /// out of the authoritative list
-    #[test]
-    fn nameless_never_starts_and_finish_filters() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    #[tokio::test]
+    async fn nameless_never_starts_and_finish_filters() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(256);
         let mut stream = ToolCallStream::new();
-        stream.push(0, Some("call_ok"), Some("Read"), Some("{}"), &tx);
+        push!(
+            &mut stream,
+            0,
+            Some("call_ok"),
+            Some("Read"),
+            Some("{}"),
+            &tx
+        );
         // Broken model output: a second call with an id but no name
-        stream.push(1, Some("call_bad"), None, Some("{}"), &tx);
+        push!(&mut stream, 1, Some("call_bad"), None, Some("{}"), &tx);
         assert_eq!(started(&stream), vec![true, false]);
-        stream.finish(&tx, pig_protocol::FinishReason::Stop);
+        finish!(&mut stream, &tx, pig_protocol::FinishReason::Stop);
         let events = collect(&mut rx);
         match &events[..] {
             [
@@ -340,13 +382,14 @@ mod tests {
 
     /// A Start still fires when added was skipped; the streamed prefix is
     /// flushed before the authoritative call replaces it.
-    #[test]
-    fn finalize_starts_and_flushes_when_added_was_skipped() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    #[tokio::test]
+    async fn finalize_starts_and_flushes_when_added_was_skipped() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(256);
         let mut stream = ToolCallStream::new();
-        stream.push(0, None, None, Some(r#"{"path":"partial"#), &tx);
+        push!(&mut stream, 0, None, None, Some(r#"{"path":"partial"#), &tx);
         assert!(collect(&mut rx).is_empty());
-        let call = stream.finalize(
+        let call = finalize!(
+            &mut stream,
             0,
             ToolCall {
                 id: "call_r".into(),
@@ -370,20 +413,29 @@ mod tests {
 
     /// The done item may repeat exactly what was streamed. The unflushed tail
     /// must be emitted (it was never sent), and no byte is repeated.
-    #[test]
-    fn authoritative_done_reconciles_the_buffered_tail_exactly_once() {
+    #[tokio::test]
+    async fn authoritative_done_reconciles_the_buffered_tail_exactly_once() {
         let full = r#"{"content":"line\n","path":"a.txt"}"#;
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(256);
         let mut stream = ToolCallStream::new();
-        stream.push(
+        push!(
+            &mut stream,
             0,
             Some("call_1"),
             Some("Write"),
             Some(r#"{"content":"line\n"#),
             &tx,
         );
-        stream.push(0, None, None, Some(r#"","path":"a.txt"}"#), &tx);
-        let call = stream.finalize(
+        push!(
+            &mut stream,
+            0,
+            None,
+            None,
+            Some(r#"","path":"a.txt"}"#),
+            &tx
+        );
+        let call = finalize!(
+            &mut stream,
             0,
             ToolCall {
                 id: "call_1".into(),
@@ -393,7 +445,7 @@ mod tests {
             &tx,
         );
         assert_eq!(call.arguments, full);
-        stream.finish(&tx, pig_protocol::FinishReason::ToolCalls);
+        finish!(&mut stream, &tx, pig_protocol::FinishReason::ToolCalls);
         let events = collect(&mut rx);
         assert_eq!(
             delta_text(&events),
@@ -411,12 +463,20 @@ mod tests {
     /// Done-before-flush: a break-free streamed tail is buffered, then the done
     /// item supplies a value that extends it. The tail and the missing suffix
     /// are emitted once each.
-    #[test]
-    fn authoritative_done_extends_streamed_prefix_with_the_missing_suffix() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    #[tokio::test]
+    async fn authoritative_done_extends_streamed_prefix_with_the_missing_suffix() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(256);
         let mut stream = ToolCallStream::new();
-        stream.push(0, Some("call_1"), Some("Read"), Some(r#"{"path":"a"#), &tx);
-        let call = stream.finalize(
+        push!(
+            &mut stream,
+            0,
+            Some("call_1"),
+            Some("Read"),
+            Some(r#"{"path":"a"#),
+            &tx
+        );
+        let call = finalize!(
+            &mut stream,
             0,
             ToolCall {
                 id: "call_1".into(),
@@ -426,7 +486,7 @@ mod tests {
             &tx,
         );
         assert_eq!(call.arguments, r#"{"path":"a.txt"}"#);
-        stream.finish(&tx, pig_protocol::FinishReason::ToolCalls);
+        finish!(&mut stream, &tx, pig_protocol::FinishReason::ToolCalls);
         let events = collect(&mut rx);
         assert_eq!(
             delta_text(&events),
@@ -449,13 +509,21 @@ mod tests {
 
     /// Flush-before-done: an already-flushed fragment must not be emitted a
     /// second time at finalization.
-    #[test]
-    fn authoritative_done_after_a_flush_adds_nothing() {
+    #[tokio::test]
+    async fn authoritative_done_after_a_flush_adds_nothing() {
         let full = r#"{"content":"line\n","path":"a.txt"}"#;
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(256);
         let mut stream = ToolCallStream::new();
-        stream.push(0, Some("call_1"), Some("Write"), Some(full), &tx);
-        let call = stream.finalize(
+        push!(
+            &mut stream,
+            0,
+            Some("call_1"),
+            Some("Write"),
+            Some(full),
+            &tx
+        );
+        let call = finalize!(
+            &mut stream,
             0,
             ToolCall {
                 id: "call_1".into(),
@@ -465,7 +533,7 @@ mod tests {
             &tx,
         );
         assert_eq!(call.arguments, full);
-        stream.finish(&tx, pig_protocol::FinishReason::ToolCalls);
+        finish!(&mut stream, &tx, pig_protocol::FinishReason::ToolCalls);
         let events = collect(&mut rx);
         assert_eq!(delta_text(&events), full);
         assert_eq!(
@@ -491,18 +559,20 @@ mod tests {
     /// A done item with empty arguments must not erase streamed input: the
     /// effective call (and therefore the durable replay) keeps the accumulated
     /// arguments, and the pending tail is still a valid live delta.
-    #[test]
-    fn empty_authoritative_done_arguments_keep_streamed_input() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    #[tokio::test]
+    async fn empty_authoritative_done_arguments_keep_streamed_input() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(256);
         let mut stream = ToolCallStream::new();
-        stream.push(
+        push!(
+            &mut stream,
             0,
             Some("call_1"),
             Some("Read"),
             Some(r#"{"path":"a"}"#),
             &tx,
         );
-        let call = stream.finalize(
+        let call = finalize!(
+            &mut stream,
             0,
             ToolCall {
                 id: "call_1".into(),
@@ -513,7 +583,7 @@ mod tests {
         );
         assert_eq!(call.arguments, r#"{"path":"a"}"#);
         assert_eq!(stream.calls()[0].arguments, r#"{"path":"a"}"#);
-        stream.finish(&tx, pig_protocol::FinishReason::ToolCalls);
+        finish!(&mut stream, &tx, pig_protocol::FinishReason::ToolCalls);
         let events = collect(&mut rx);
         assert_eq!(delta_text(&events), r#"{"path":"a"}"#);
         assert!(
@@ -527,12 +597,20 @@ mod tests {
     /// A non-prefix authoritative value replaces execution/replay, but every
     /// streamed fragment is still delivered live. Late fragments and repeated
     /// finalizes cannot mutate the closed call.
-    #[test]
-    fn non_prefix_done_and_late_fragments_never_mutate_the_closed_call() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    #[tokio::test]
+    async fn non_prefix_done_and_late_fragments_never_mutate_the_closed_call() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(256);
         let mut stream = ToolCallStream::new();
-        stream.push(0, Some("call_1"), Some("Read"), Some(r#"{"old":"#), &tx);
-        let call = stream.finalize(
+        push!(
+            &mut stream,
+            0,
+            Some("call_1"),
+            Some("Read"),
+            Some(r#"{"old":"#),
+            &tx
+        );
+        let call = finalize!(
+            &mut stream,
             0,
             ToolCall {
                 id: "call_1".into(),
@@ -544,8 +622,16 @@ mod tests {
         assert_eq!(call.arguments, r#"{"new":true}"#);
         let after_finalize = collect(&mut rx);
 
-        stream.push(0, Some("late"), Some("Wrong"), Some("LEAKED"), &tx);
-        let repeated = stream.finalize(
+        push!(
+            &mut stream,
+            0,
+            Some("late"),
+            Some("Wrong"),
+            Some("LEAKED"),
+            &tx
+        );
+        let repeated = finalize!(
+            &mut stream,
             0,
             ToolCall {
                 id: "call_2".into(),
@@ -561,7 +647,7 @@ mod tests {
         assert_eq!(stream.calls()[0].arguments, r#"{"new":true}"#);
         assert_eq!(stream.calls()[0].id, "call_1");
         assert_eq!(stream.calls()[0].name, "Read");
-        stream.finish(&tx, pig_protocol::FinishReason::ToolCalls);
+        finish!(&mut stream, &tx, pig_protocol::FinishReason::ToolCalls);
         let events = collect(&mut rx);
         assert!(
             events
@@ -573,14 +659,14 @@ mod tests {
 
     /// The Anthropic sparse-index shape: a non-tool block leaves a nameless
     /// default that never starts and is filtered at finish
-    #[test]
-    fn sparse_block_indices_keep_mapping() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    #[tokio::test]
+    async fn sparse_block_indices_keep_mapping() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(256);
         let mut stream = ToolCallStream::new();
         // Text block at index 0 is never pushed; tool_use starts at index 1
-        stream.push(1, Some("toolu_1"), Some("Read"), None, &tx);
-        stream.push(1, None, None, Some("{}"), &tx);
-        stream.finish(&tx, pig_protocol::FinishReason::Stop);
+        push!(&mut stream, 1, Some("toolu_1"), Some("Read"), None, &tx);
+        push!(&mut stream, 1, None, None, Some("{}"), &tx);
+        finish!(&mut stream, &tx, pig_protocol::FinishReason::Stop);
         let events = collect(&mut rx);
         match &events[..] {
             [

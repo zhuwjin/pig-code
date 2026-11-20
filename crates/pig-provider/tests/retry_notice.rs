@@ -35,7 +35,7 @@ fn mock_model(port: u16) -> ResolvedModel {
 async fn retry_notice_emitted_and_retry_now_skips_wait() {
     let port = pig_provider::mock::start_mock_server();
     let control = CallControl::new(CancellationToken::new());
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(256);
     let task = tokio::spawn(stream_chat(
         mock_model(port),
         vec![ChatMsg::user("FAIL_ONCE_500 read the mock file".into())],

@@ -247,11 +247,6 @@ impl Session {
         };
         let mut prep = prep;
         prep.policy.output_schema = output_schema;
-        let activation = if resume.is_empty() {
-            crate::agent::AgentExecutionActivation::Start
-        } else {
-            crate::agent::AgentExecutionActivation::Resume
-        };
         // ---- background: register a task first (its id is the child's
         // progress/ownership prefix), then spawn the detached child ----
         if background {
@@ -284,7 +279,7 @@ impl Session {
             let running_note = format!(
                 "agent_id: {agent_id}\ntask_id: {task_id}\nstatus: running\nThe subagent is running in the background; its terminal notification is delivered automatically.\nUse TaskWait to wait, TaskOutput for progress, TaskStop to stop it, and Agent(resume=\"{agent_id}\", prompt=\"...\") to resume it.{queue_hint}"
             );
-            spawn_detached_child(child, task_id, bg_cancel, tx.clone(), None, activation);
+            spawn_detached_child(child, task_id, bg_cancel, tx.clone(), None);
             return SubagentOutcome::Finished {
                 note: running_note,
                 is_error: false,
@@ -337,13 +332,9 @@ impl Session {
             Some(task_id),
         );
         let run_cancel = child_cancel.clone();
-        let scheduler = child.state.scheduler.clone();
         let backends = child.state.backends.clone();
-        let child_task =
-            crate::agent::execute_local(backends, child, tx.clone(), run_cancel, activation);
-        let managed = life
-            .drive(&child_cancel, scheduler.acquire(&child_cancel), child_task)
-            .await;
+        let managed =
+            crate::agent::execute_local(backends, child, tx.clone(), run_cancel, life).await;
         let result = managed.result;
         if result.is_cancelled() {
             return SubagentOutcome::Cancelled {

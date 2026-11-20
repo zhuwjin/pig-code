@@ -46,6 +46,10 @@ libc = "0.2"
 windows = { version = "0.57", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_System_JobObjects",
+    "Win32_Security",
+    "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Registry",
     "Win32_Graphics_Gdi",
     "Win32_Foundation",
@@ -65,7 +69,8 @@ windows = { version = "0.57", features = [
 # (`mxc_common` models, the `process_container_common` runner and the generated
 # PSEC specification) live behind `#[doc(hidden)]` re-exports there, which is
 # what upstream's own Codex sandbox consumes as well.
-mxc-sdk = "1.0"
+# Exact version: NSH's generated build graph does not reuse the workspace lockfile.
+mxc-sdk = "=1.0.1"
 # Builds the minimal PSEC specification the availability probe creates.
 flatbuffers = "25"
 # MXC's ETW dependency: 1.2.4 imports OneCore_apiset, which the GNU Windows
@@ -99,6 +104,10 @@ name = "approval_modes"
 path = "tests/approval_modes.rs"
 
 [[test]]
+name = "architecture"
+path = "tests/architecture.rs"
+
+[[test]]
 name = "bash"
 path = "tests/bash.rs"
 
@@ -109,6 +118,10 @@ path = "tests/config.rs"
 [[test]]
 name = "context_overflow"
 path = "tests/context_overflow/main.rs"
+
+[[test]]
+name = "credentials"
+path = "tests/credentials.rs"
 
 [[test]]
 name = "fs_access"

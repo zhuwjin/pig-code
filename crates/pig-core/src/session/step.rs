@@ -86,7 +86,7 @@ impl Session {
         tx: &async_channel::Sender<Event>,
         cancel: &CancellationToken,
     ) -> (
-        tokio::sync::mpsc::UnboundedReceiver<ProviderEvent>,
+        tokio::sync::mpsc::Receiver<ProviderEvent>,
         tokio::task::JoinHandle<()>,
     ) {
         if self.is_subagent() {
@@ -108,7 +108,7 @@ impl Session {
         if pig_provider::prompt_cache_key_supported(&request_config.base_url) {
             request_config.prompt_cache_key = Some(self.root_prompt_cache_key());
         }
-        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(256);
         let task = tokio::spawn(pig_provider::stream_chat(
             request_config,
             self.agent.history.clone(),
@@ -274,9 +274,8 @@ impl Session {
             &mut io_record,
             &io_input_full,
             crate::model_io::MAX_SESSION_BYTES,
-            io_full_retention,
         ) {
-            tracing::warn!("Failed to write model io trace (ignored): {e}");
+            tracing::warn!("Failed to write model io trace: {e}");
         }
         self.io_last_input = io_input_full;
 
@@ -411,6 +410,17 @@ impl Session {
             ts_ms: 0,
             reasoning_ms: None,
         });
+        if let Some(error) = self.durable_history_failure() {
+            self.emit(
+                |session_id| Event::Error {
+                    session_id: Some(session_id),
+                    error,
+                    fatal: true,
+                },
+                tx,
+            );
+            return CommitAction::Terminal(engine::StepOutcome::Failed);
+        }
         if !text.is_empty() {
             self.emit(
                 |session_id| Event::TextDone {

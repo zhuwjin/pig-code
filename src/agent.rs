@@ -439,10 +439,22 @@ default_reasoning_level = "low"
             }
             let mut ui_batch = Vec::with_capacity(batch.len());
             for envelope in &batch {
-                let projected = projection.project(envelope);
-                ui_batch.extend(projected.events);
-                if projected.pass {
-                    ui_batch.push(envelope.event.clone());
+                if let Err(error) = synchronize_projection(
+                    &mut projection,
+                    &events,
+                    envelope,
+                    &mut ui_batch,
+                    |session_id| {
+                        let Some(session_id) = session_id else {
+                            return Err(
+                                "global projection resync requires a journal snapshot".into()
+                            );
+                        };
+                        this.with(|agent| agent.send_op(Op::OpenSession { session_id }))
+                    },
+                ) {
+                    report_projection_error(&listener, error);
+                    return;
                 }
             }
             if !ui_batch.is_empty() {
@@ -494,15 +506,139 @@ impl Agent {
     }
 }
 
+fn synchronize_projection(
+    projection: &mut crate::conversation_projection::ProjectionRegistry,
+    journal: &pig_core::EventJournal,
+    envelope: &pig_protocol::EventEnvelope,
+    output: &mut Vec<Event>,
+    request_replay: impl FnOnce(Option<String>) -> Result<(), String>,
+) -> Result<(), String> {
+    let Some(resync) = append_projected(projection, envelope, output) else {
+        return Ok(());
+    };
+    match journal.replay_or_snapshot(&envelope.epoch, resync.cursor) {
+        Ok(missed) => {
+            for missed in &missed {
+                if append_projected(projection, missed, output).is_some() {
+                    return Err("journal replay did not restore projection order".into());
+                }
+            }
+            Ok(())
+        }
+        Err(snapshot) => {
+            projection.reset_with_snapshot(&snapshot)?;
+            let session_id = resync.session_id.ok_or_else(|| {
+                "global projection resync requires a journal snapshot".to_string()
+            })?;
+            request_replay(Some(session_id))
+        }
+    }
+}
+
+fn append_projected(
+    projection: &mut crate::conversation_projection::ProjectionRegistry,
+    envelope: &pig_protocol::EventEnvelope,
+    output: &mut Vec<Event>,
+) -> Option<crate::conversation_projection::ProjectionResync> {
+    let projected = projection.project(envelope);
+    output.extend(projected.events);
+    if projected.pass {
+        output.push(envelope.event.clone());
+    }
+    projected.resync
+}
+
+fn report_projection_error(listener: &Callback<String>, detail: String) {
+    listener.post(serde_json::json!([{ "BridgeError": { "detail": detail } }]).to_string());
+}
+
 fn encode_batch(batch: &[Event]) -> String {
     serde_json::to_string(batch).unwrap_or_else(|error| {
         serde_json::json!([{ "BridgeError": { "detail": error.to_string() } }]).to_string()
     })
 }
 
+impl Drop for Agent {
+    fn drop(&mut self) {
+        let Some(directory) = self._selftest_dir.take() else {
+            return;
+        };
+        let handle = self.handle.clone();
+        std::thread::spawn(move || {
+            if let Err(error) = handle.close_blocking() {
+                tracing::warn!(%error, "selftest runtime cleanup failed");
+            }
+            drop(directory);
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::conversation_projection::ProjectionRegistry;
+
+    async fn session_journal_fixture(
+        name: &str,
+    ) -> (pig_core::AgentHandle, std::path::PathBuf, String) {
+        let root = std::env::temp_dir().join(format!(
+            "pig-agent-journal-{name}-{}-{}",
+            std::process::id(),
+            pig_core::model_io::now_ms()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("journal fixture directory");
+        let config = root.join("config.toml");
+        std::fs::write(&config, "").expect("empty test config");
+        let agent =
+            pig_core::spawn_agent_with_data_dir(Some(config), root.clone(), root.join("data"));
+        agent
+            .ops
+            .send(Op::NewSession {
+                cwd: root.clone(),
+                provider_id: None,
+                model_id: None,
+                reasoning_level: None,
+                permissions: None,
+                plan_enabled: None,
+            })
+            .await
+            .expect("create journal fixture session");
+        let session_id = loop {
+            let event =
+                tokio::time::timeout(std::time::Duration::from_secs(5), agent.journal.recv())
+                    .await
+                    .expect("session configuration timeout")
+                    .expect("journal event");
+            if let Event::SessionConfigured { session_id, .. } = event.event {
+                break session_id;
+            }
+        };
+        (agent, root, session_id)
+    }
+
+    #[test]
+    fn selftest_cleanup_closes_the_runtime_before_removing_its_directory() {
+        for _ in 0..16 {
+            let agent = Agent::new(None, Some(true));
+            let root = agent
+                ._selftest_dir
+                .as_ref()
+                .expect("selftest directory")
+                .0
+                .clone();
+            drop(agent);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while root.exists() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "selftest cleanup did not finish: {}",
+                    root.display()
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
 
     #[test]
     fn event_batches_keep_the_protocol_order() {
@@ -564,5 +700,104 @@ mod tests {
                 if config.theme.as_deref() == Some("ocean")
                     && config.theme_mode.as_deref() == Some("dark")
         ));
+    }
+
+    #[tokio::test]
+    async fn journal_gap_replays_missing_events_through_the_production_projection_path() {
+        let (agent, root, session_id) = session_journal_fixture("gap").await;
+        let journal = agent.journal.clone();
+        agent
+            .ops
+            .send(Op::ListAgents {
+                session_id: session_id.clone(),
+            })
+            .await
+            .expect("settle the journal fixture");
+        loop {
+            let event = journal.recv().await.expect("journal barrier");
+            if matches!(event.event, Event::AgentCatalogChanged { .. }) {
+                break;
+            }
+        }
+        while journal.try_recv().is_ok() {}
+        let mut registry = ProjectionRegistry::new();
+        let mut projected = Vec::new();
+        let mut observed = Vec::new();
+        for index in 0..3 {
+            agent
+                .ops
+                .send(Op::ListAgents {
+                    session_id: session_id.clone(),
+                })
+                .await
+                .expect("publish catalog");
+            let event = journal.recv().await.expect("journal event");
+            observed.push(event.sequence);
+            if index == 1 {
+                continue;
+            }
+            synchronize_projection(&mut registry, &journal, &event, &mut projected, |_| {
+                panic!("retained events must not require a producer snapshot")
+            })
+            .expect("project retained event");
+        }
+        assert_eq!(observed[1], observed[0] + 1);
+        assert_eq!(observed[2], observed[1] + 1);
+        assert_eq!(registry.cursor(), observed[2]);
+        assert!(!projected.is_empty());
+        agent.close().await.expect("close journal fixture");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn expired_journal_cursor_requests_a_producer_replay_after_snapshot_reset() {
+        let (agent, root, session_id) = session_journal_fixture("expired").await;
+        let journal = agent.journal.clone();
+        while journal.try_recv().is_ok() {}
+        let raw_events = agent.events.clone();
+        let raw_drain = tokio::spawn(async move { while raw_events.recv().await.is_ok() {} });
+        let draining_journal = journal.clone();
+        let drain = tokio::spawn(async move {
+            let mut latest = None;
+            for _ in 0..1_100 {
+                latest = Some(draining_journal.recv().await.expect("journal event"));
+            }
+            latest
+        });
+        for _ in 0..1_100 {
+            agent
+                .ops
+                .send(Op::ListAgents {
+                    session_id: session_id.clone(),
+                })
+                .await
+                .expect("publish catalog");
+        }
+        let latest = tokio::time::timeout(std::time::Duration::from_secs(30), drain)
+            .await
+            .expect("bounded queues must be drained while publishing")
+            .expect("journal drain task");
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let requested = requests.clone();
+        let mut output = Vec::new();
+        synchronize_projection(
+            &mut ProjectionRegistry::new(),
+            &journal,
+            &latest.expect("latest event"),
+            &mut output,
+            |session_id| {
+                requested.lock().expect("requests").push(session_id);
+                Ok(())
+            },
+        )
+        .expect("snapshot resync");
+        assert_eq!(
+            requests.lock().expect("requests").as_slice(),
+            [Some(session_id)]
+        );
+        assert!(output.is_empty());
+        agent.close().await.expect("close journal fixture");
+        raw_drain.await.expect("raw event drain");
+        let _ = std::fs::remove_dir_all(root);
     }
 }

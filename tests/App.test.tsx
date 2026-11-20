@@ -237,7 +237,7 @@ test("runs a real shell in the terminal panel", async () => {
   const lines = Array.from({ length: 24 }, (_, index) => `echo LINE_${index + 1}`).join("; ");
   await app.type("id:terminal-output", lines);
   await app.keyboard.press("enter");
-  await app.waitFor("text:/LINE_24/");
+  await app.waitFor("text:/^LINE_24$/");
   await app.scroll("id:terminal-output", -240);
   await app.type("id:terminal-output", "echo PIG_AFTER_SCROLL");
   await app.keyboard.press("enter");

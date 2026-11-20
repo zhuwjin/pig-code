@@ -1,7 +1,7 @@
 use super::*;
 
 use super::entry::{SessionEntry, model_label, resolve_entry};
-use super::queue::{queue_snapshot, steer_snapshot, stop_session_tasks};
+use super::queue::{queue_snapshot, steer_snapshot, stop_session_tasks_until_idle};
 use super::runtime::layered_runtime;
 
 use crate::session::{estimate, meta_to_selection, restore_pending, restored_queue_seq};
@@ -208,11 +208,58 @@ impl Manager {
             ),
         }
     }
+    pub(super) fn replay_loaded_session(
+        &mut self,
+        event_tx: &async_channel::Sender<Event>,
+        session_id: String,
+    ) {
+        self.pending_replays.retain(|id| id != &session_id);
+        if self.deleted_sessions.contains(&session_id) {
+            return;
+        }
+        let Some(entry) = self.sessions.get_mut(&session_id) else {
+            return;
+        };
+        let Some(session) = entry.session.as_mut() else {
+            if !self.pending_replays.contains(&session_id) {
+                self.pending_replays.push(session_id);
+            }
+            return;
+        };
+        let path = self.sessions_dir.join(format!("{session_id}.jsonl"));
+        match crate::rollout::Rollout::load(&path) {
+            Ok(records) => session.replay(&records, event_tx),
+            Err(error) => {
+                emit(
+                    event_tx,
+                    Event::Error {
+                        session_id: Some(session_id),
+                        error,
+                        fatal: false,
+                    },
+                );
+                return;
+            }
+        }
+        emit(event_tx, Event::SessionReplayComplete { session_id });
+    }
+
     pub(super) fn open_session(
         &mut self,
         event_tx: async_channel::Sender<Event>,
         session_id: String,
     ) {
+        if self.deleted_sessions.contains(&session_id) {
+            emit(
+                &event_tx,
+                Event::Error {
+                    session_id: Some(session_id),
+                    error: CoreError::SessionNotFoundOpen,
+                    fatal: false,
+                },
+            );
+            return;
+        }
         self.retry_terminal_notifications(&event_tx);
         let config_path = self.config_path.clone();
         let sessions_dir = self.sessions_dir.clone();
@@ -316,6 +363,7 @@ impl Manager {
                     }
                 }
             }
+            self.replay_loaded_session(&event_tx, session_id);
             return;
         }
         let resume_cwd = store
@@ -561,6 +609,12 @@ impl Manager {
                         },
                     );
                 }
+                emit(
+                    &event_tx,
+                    Event::SessionReplayComplete {
+                        session_id: session_id.clone(),
+                    },
+                );
             }
             Err(error) => emit(
                 &event_tx,
@@ -673,33 +727,60 @@ impl Manager {
         event_tx: async_channel::Sender<Event>,
         session_id: String,
     ) {
+        if let Err(error) = self
+            .store
+            .lock()
+            .expect("store lock")
+            .request_session_deletion(&session_id)
+        {
+            emit(
+                &event_tx,
+                Event::Error {
+                    session_id: Some(session_id),
+                    error,
+                    fatal: false,
+                },
+            );
+            return;
+        }
         let pending = self.pending.clone();
         let pending_questions = self.pending_questions.clone();
         let turn_in_flight = self
             .sessions
             .get(&session_id)
             .is_some_and(|entry| entry.session.is_none());
-        let registry = self.sessions.remove(&session_id).map(|entry| {
-            stop_session_tasks(&entry);
+        let removed = self.sessions.remove(&session_id).map(|entry| {
             if let Some(cancel) = &entry.cancel {
                 cancel.cancel();
             }
-            entry.state.agents.clone()
+            entry
         });
         super::reject_session_approvals(&pending, &session_id);
         super::drop_session_questions(&pending_questions, &session_id);
         self.deleted_sessions.insert(session_id.clone());
+        self.pending_replays.retain(|id| id != &session_id);
         let pending_already = self.pending_deletions.contains_key(&session_id);
         self.pending_deletions
             .entry(session_id.clone())
             .or_insert(super::PendingDeletion {
                 executions_idle: false,
+                tasks_idle: removed.is_none(),
                 turn_finished: !turn_in_flight,
             });
-        if let Some(registry) = registry {
+        if let Some(entry) = removed {
+            let registry = entry.state.agents.clone();
             let deletion_tx = self.deletion_tx.clone();
             let deletion_events = event_tx.clone();
             let id = session_id.clone();
+            let task_tx = deletion_tx.clone();
+            let task_events = deletion_events.clone();
+            let task_id = id.clone();
+            tokio::spawn(async move {
+                stop_session_tasks_until_idle(entry, task_events).await;
+                let _ = task_tx
+                    .send(super::DeletionProgress::TasksIdle(task_id))
+                    .await;
+            });
             tokio::spawn(async move {
                 if tokio::time::timeout(super::SESSION_DELETE_GRACE, registry.wait_for_idle())
                     .await
@@ -717,7 +798,9 @@ impl Manager {
                     );
                 }
                 registry.wait_for_idle().await;
-                let _ = deletion_tx.send(id);
+                let _ = deletion_tx
+                    .send(super::DeletionProgress::ExecutionsIdle(id))
+                    .await;
             });
         } else if !pending_already
             && let Some(deletion) = self.pending_deletions.get_mut(&session_id)
@@ -735,24 +818,10 @@ impl Manager {
         let ready = self
             .pending_deletions
             .get(&session_id)
-            .is_some_and(|deletion| deletion.executions_idle && deletion.turn_finished);
+            .is_some_and(|deletion| {
+                deletion.executions_idle && deletion.tasks_idle && deletion.turn_finished
+            });
         if !ready {
-            return;
-        }
-        let store_result = self
-            .store
-            .lock()
-            .expect("store lock")
-            .delete_session_checked(&session_id);
-        if let Err(error) = store_result {
-            emit(
-                &event_tx,
-                Event::Error {
-                    session_id: Some(session_id),
-                    error,
-                    fatal: false,
-                },
-            );
             return;
         }
         if let Err(detail) = delete_session_artifacts(&self.sessions_dir, &session_id, true) {
@@ -761,6 +830,22 @@ impl Manager {
                 Event::Error {
                     session_id: Some(session_id),
                     error: CoreError::TaskStore { detail },
+                    fatal: false,
+                },
+            );
+            return;
+        }
+        if let Err(error) = self
+            .store
+            .lock()
+            .expect("store lock")
+            .delete_session_checked(&session_id)
+        {
+            emit(
+                &event_tx,
+                Event::Error {
+                    session_id: Some(session_id),
+                    error,
                     fatal: false,
                 },
             );

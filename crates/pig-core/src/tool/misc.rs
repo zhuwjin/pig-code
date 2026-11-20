@@ -374,17 +374,18 @@ impl Tool for TaskWait {
             .clamp(1, 300_000);
             let deadline =
                 tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+            let wait_owner = ctx
+                .state
+                .owner_agent_id
+                .clone()
+                .unwrap_or_else(|| ctx.state.session_id.clone());
             let mut wait_interest =
-                ctx.state.owner_agent_id.as_deref().map(|owner| {
-                    crate::task::TaskWaitInterest::register(ctx.state, owner, &task_ids)
-                });
+                crate::task::TaskWaitInterest::register(ctx.state, &wait_owner, &task_ids);
             let mut revision = ctx.state.tasks.subscribe();
             loop {
                 let batch = task_wait_batch(ctx.state, &task_ids)?;
                 if !batch.notifications.is_empty() {
-                    if let Some(interest) = wait_interest.as_mut() {
-                        interest.delivered(&batch.notifications);
-                    }
+                    wait_interest.delivered(&batch.notifications);
                     let mut output =
                         crate::task::notification::render_notification_batch(&batch.notifications);
                     if ctx.state.owner_agent_id.is_none()
@@ -472,7 +473,8 @@ impl Tool for TaskStop {
                 &ctx.state.task_notify,
                 &ctx.state.session_id,
                 Some(&ctx.state.agents),
-            )?;
+            )
+            .await?;
             Ok(ToolEffect::plain(result))
         })
     }
@@ -1539,7 +1541,7 @@ mod task_wait_tests {
         let effect = waiting.await.expect("join");
         assert!(effect.output.contains("task:test:b1:completed"));
         assert!(
-            crate::task::task_wait_delivered(&state, "a1", &task_id),
+            crate::task::task_wait_pending(&state, "a1", &task_id),
             "a successful child wait suppresses the duplicate steer"
         );
         let _ = std::fs::remove_dir_all(root);
@@ -1612,9 +1614,42 @@ mod task_wait_tests {
             .expect("timeout");
         assert!(effect.output.contains("Wait timed out"));
         assert!(
-            !crate::task::task_wait_delivered(&state, "a1", &task_id),
+            !crate::task::task_wait_pending(&state, "a1", &task_id),
             "a timed-out wait must leave the steer path open"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn dropping_wait_requeues_terminal_notification() {
+        let (mut state, _store, root) = fixture("wait-drop-requeue");
+        let (notify, changes) = async_channel::bounded(1024);
+        state.task_notify = notify;
+        let task_id = register(&state, true);
+        {
+            let mut tasks = state.tasks.lock().expect("tasks");
+            let task = tasks
+                .iter_mut()
+                .find(|task| task.id == task_id)
+                .expect("task");
+            task.status = pig_protocol::TaskStatus::Completed;
+            task.ended_at = Some(task.started_at + 1);
+        }
+        while changes.try_recv().is_ok() {}
+        let wait = crate::task::TaskWaitInterest::register(
+            &state,
+            "a1",
+            &std::collections::HashSet::from([task_id.clone()]),
+        );
+        drop(wait);
+        match changes
+            .recv()
+            .await
+            .expect("terminal notification requeued")
+        {
+            crate::task::TaskChange::Terminal { task, .. } => assert_eq!(task.summary.id, task_id),
+            other => panic!("unexpected task change: {other:?}"),
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1642,8 +1677,8 @@ mod task_wait_tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn queued_stop_cancels_and_produces_killed() {
+    #[tokio::test]
+    async fn queued_stop_cancels_and_produces_killed() {
         let (state, _store, root) = fixture("stop");
         let task_id = register(&state, true);
         let cancel = state.tasks.lock().expect("tasks")[0]
@@ -1656,6 +1691,7 @@ mod task_wait_tests {
             &state.task_notify,
             &state.session_id,
         )
+        .await
         .expect("stop queued");
         assert!(cancel.is_cancelled());
         assert_eq!(

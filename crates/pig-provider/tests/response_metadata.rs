@@ -51,7 +51,7 @@ async fn stream_response_ids_cover_all_formats() {
         (ApiFormat::OpenAiResponses, "resp-mock"),
     ] {
         let port = pig_provider::mock::start_mock_server();
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(256);
         let task = tokio::spawn(stream_chat(
             mock_model(port, format),
             vec![ChatMsg::user("hello".to_string())],
@@ -129,7 +129,7 @@ async fn sidecar_http_error_keeps_transport_ids() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn openai_usage_only_chunk_after_finish_is_not_lost() {
     let port = pig_provider::mock::start_mock_server();
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(256);
     let task = tokio::spawn(stream_chat(
         mock_model(port, ApiFormat::OpenAiChat),
         vec![ChatMsg::user(

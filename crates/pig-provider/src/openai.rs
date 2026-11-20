@@ -209,7 +209,7 @@ pub(crate) async fn stream_openai(
     config: &ResolvedModel,
     messages: Vec<ChatMsg>,
     tools: Vec<serde_json::Value>,
-    tx: &tokio::sync::mpsc::UnboundedSender<ProviderEvent>,
+    tx: &tokio::sync::mpsc::Sender<ProviderEvent>,
     control: &CallControl,
 ) -> Result<(), CallError> {
     let client = http_client();
@@ -247,7 +247,9 @@ pub(crate) async fn stream_openai(
     };
 
     let mut response_metadata = crate::ProviderResponseMetadata::from_response(&response);
-    let _ = tx.send(ProviderEvent::ResponseMetadata(response_metadata.clone()));
+    let _ = tx
+        .send(ProviderEvent::ResponseMetadata(response_metadata.clone()))
+        .await;
     let status = response.status();
     let idle = control.idle_timeout();
     if !status.is_success() {
@@ -309,7 +311,7 @@ pub(crate) async fn stream_openai(
                     api.finish("cancelled", &[]);
                     return Ok(());
                 }
-                return finish_openai_stream(tool_stream, finish_reason, &mut api, tx);
+                return finish_openai_stream(tool_stream, finish_reason, &mut api, tx).await;
             }
             let value = match serde_json::from_str::<serde_json::Value>(data) {
                 Ok(value) => value,
@@ -339,7 +341,9 @@ pub(crate) async fn stream_openai(
                 && let Some(id) = chunk.id.filter(|id| !id.is_empty())
             {
                 response_metadata.response_id = Some(id);
-                let _ = tx.send(ProviderEvent::ResponseMetadata(response_metadata.clone()));
+                let _ = tx
+                    .send(ProviderEvent::ResponseMetadata(response_metadata.clone()))
+                    .await;
             }
             if let Some(usage) = chunk.usage.and_then(|usage| {
                 normalize_usage(
@@ -365,14 +369,16 @@ pub(crate) async fn stream_openai(
                     usage.total,
                     usage.reasoning_output,
                 );
-                let _ = tx.send(ProviderEvent::Usage {
-                    input: usage.input,
-                    cache_read: usage.cache_read,
-                    output: usage.output,
-                    used: usage.used,
-                    total: usage.total,
-                    reasoning_output: usage.reasoning_output,
-                });
+                let _ = tx
+                    .send(ProviderEvent::Usage {
+                        input: usage.input,
+                        cache_read: usage.cache_read,
+                        output: usage.output,
+                        used: usage.used,
+                        total: usage.total,
+                        reasoning_output: usage.reasoning_output,
+                    })
+                    .await;
             }
             let Some(choice) = chunk.choices.and_then(|mut choices| {
                 if choices.is_empty() {
@@ -390,7 +396,7 @@ pub(crate) async fn stream_openai(
                     && !reasoning.is_empty()
                 {
                     api.reasoning(&reasoning);
-                    let _ = tx.send(ProviderEvent::Reasoning(reasoning));
+                    let _ = tx.send(ProviderEvent::Reasoning(reasoning)).await;
                 }
                 // delta.content leniency (SDK openai-compatible): a plain string
                 // OR a parts array (z.ai/GLM-style streams carry nested thinking
@@ -400,11 +406,11 @@ pub(crate) async fn stream_openai(
                         match piece {
                             DeltaPiece::Text(text) if !text.is_empty() => {
                                 api.text(&text);
-                                let _ = tx.send(ProviderEvent::Text(text));
+                                let _ = tx.send(ProviderEvent::Text(text)).await;
                             }
                             DeltaPiece::Reasoning(reasoning) if !reasoning.is_empty() => {
                                 api.reasoning(&reasoning);
-                                let _ = tx.send(ProviderEvent::Reasoning(reasoning));
+                                let _ = tx.send(ProviderEvent::Reasoning(reasoning)).await;
                             }
                             _ => {}
                         }
@@ -412,13 +418,15 @@ pub(crate) async fn stream_openai(
                 }
                 if let Some(chunks) = delta.tool_calls {
                     for part in chunks {
-                        tool_stream.push(
-                            part.index,
-                            part.id.as_deref(),
-                            part.function.as_ref().and_then(|f| f.name.as_deref()),
-                            part.function.as_ref().and_then(|f| f.arguments.as_deref()),
-                            tx,
-                        );
+                        tool_stream
+                            .push(
+                                part.index,
+                                part.id.as_deref(),
+                                part.function.as_ref().and_then(|f| f.name.as_deref()),
+                                part.function.as_ref().and_then(|f| f.arguments.as_deref()),
+                                tx,
+                            )
+                            .await;
                     }
                 }
             }
@@ -446,21 +454,21 @@ pub(crate) async fn stream_openai(
         api.finish("cancelled", &[]);
         return Ok(());
     }
-    finish_openai_stream(tool_stream, finish_reason, &mut api, tx)
+    finish_openai_stream(tool_stream, finish_reason, &mut api, tx).await
 }
 
-fn finish_openai_stream(
+async fn finish_openai_stream(
     tool_stream: crate::chat_tool_stream::ChatToolStream,
     finish_reason: Option<pig_protocol::FinishReason>,
     api: &mut crate::api_log::ApiCall,
-    tx: &tokio::sync::mpsc::UnboundedSender<ProviderEvent>,
+    tx: &tokio::sync::mpsc::Sender<ProviderEvent>,
 ) -> Result<(), CallError> {
     let Some(reason) = finish_reason else {
         let detail = "Chat Completions stream ended without a finish reason".to_string();
         api.fail(&detail);
         return Err(CoreError::Internal { detail }.into());
     };
-    let calls = match tool_stream.finish(tx) {
+    let calls = match tool_stream.finish(tx).await {
         Ok(calls) => calls,
         Err(error) => {
             api.fail(&crate::core_error_en(&error));
@@ -468,7 +476,7 @@ fn finish_openai_stream(
         }
     };
     api.finish(reason.as_str(), &calls);
-    crate::chat::finish(tx, calls, reason);
+    crate::chat::finish(tx, calls, reason).await;
     Ok(())
 }
 

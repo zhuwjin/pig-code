@@ -159,71 +159,50 @@ impl Session {
 
 impl Session {
     pub(crate) fn restore_agent_catalog(&mut self) {
-        let sessions_dir = self.data_dir.join("sessions");
-        let agents_dir = crate::agent::agents_dir(&sessions_dir, &self.agent.id);
-        let Ok(entries) = std::fs::read_dir(agents_dir) else {
+        let Some(snapshot) = self.state.agents.runtime_snapshot() else {
             return;
         };
-        let mut recovered = Vec::new();
-        for entry in entries.filter_map(Result::ok) {
-            let path = entry.path();
-            if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
-                continue;
-            }
-            if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
-                continue;
-            }
-            let Some(agent_id) = path
-                .file_stem()
-                .and_then(|value| value.to_str())
-                .map(str::to_string)
-            else {
-                continue;
-            };
-            if crate::agent::validate_agent_id(&agent_id).is_err() {
-                continue;
-            }
-            let (meta, _) = match crate::agent::read_agent(&path) {
-                Ok(context) => context,
-                Err(error) => {
-                    tracing::warn!(%agent_id, "cannot recover child catalog entry: {error}");
-                    continue;
-                }
-            };
-            if meta.parent_session_id == self.agent.id {
-                recovered.push((path, agent_id, meta));
-            }
-        }
-        recovered.sort_by(|(_, left_id, left), (_, right_id, right)| {
-            (left.delegation_depth, left_id).cmp(&(right.delegation_depth, right_id))
+        let agents = snapshot
+            .agents
+            .into_iter()
+            .map(|agent| (agent.agent_id.clone(), agent))
+            .collect::<std::collections::HashMap<_, _>>();
+        let existing = self
+            .state
+            .tasks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .filter_map(|task| task.run.as_ref().map(|run| run.run_id.clone()))
+            .collect::<std::collections::HashSet<_>>();
+        let mut recovered = snapshot
+            .runs
+            .into_iter()
+            .filter(|run| run.agent_id != self.agent.id && !existing.contains(&run.run_id))
+            .filter_map(|run| {
+                let agent = agents.get(&run.agent_id)?.clone();
+                Some((agent, run))
+            })
+            .collect::<Vec<_>>();
+        recovered.sort_by(|(left_agent, left_run), (right_agent, right_run)| {
+            (
+                left_agent.depth,
+                &left_agent.agent_id,
+                left_run.started_at_ms,
+                &left_run.run_id,
+            )
+                .cmp(&(
+                    right_agent.depth,
+                    &right_agent.agent_id,
+                    right_run.started_at_ms,
+                    &right_run.run_id,
+                ))
         });
-        for (path, agent_id, meta) in recovered {
-            if self
-                .state
-                .tasks
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .iter()
-                .any(|task| task.agent_id.as_deref() == Some(agent_id.as_str()))
-            {
+        for (agent, run) in recovered {
+            let Some(path) = agent.conversation_path.clone() else {
+                tracing::warn!(agent_id = %agent.agent_id, run_id = %run.run_id, "runtime agent has no conversation artifact");
                 continue;
-            }
-            if let Err(error) = self.state.agents.recover_lost_child(
-                crate::agent::runtime::RuntimeAgent {
-                    session_id: self.agent.id.clone(),
-                    agent_id: agent_id.clone(),
-                    parent_agent_id: Some(meta.parent_agent_id.clone()),
-                    depth: meta.delegation_depth,
-                    profile: meta.profile.clone(),
-                    conversation_path: Some(path.clone()),
-                    created_at_ms: meta.created_at.saturating_mul(1_000),
-                    closed_at_ms: None,
-                },
-                meta.run_id.clone(),
-            ) {
-                tracing::warn!(%agent_id, %error, "cannot recover child runtime entry");
-                continue;
-            }
+            };
             let task_id = format!(
                 "b{}",
                 self.state
@@ -231,40 +210,51 @@ impl Session {
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                     + 1
             );
-            let result_path = path.with_file_name(format!("{agent_id}.result.md"));
-            self.state.agents.restore(crate::agent::AgentNode::restored(
-                agent_id.clone(),
-                Some(meta.parent_agent_id.clone()),
-                meta.delegation_depth,
-                crate::agent::AgentLifecycle::Lost,
-                Some(crate::agent::AgentRunState::new(
-                    meta.run_id.clone(),
-                    pig_protocol::AgentRunStatus::Lost,
-                    Some(meta.parent_agent_id.clone()),
-                    meta.delegation_depth,
-                )),
-            ));
+            let result_path = path.with_file_name(format!("{}.result.md", agent.agent_id));
+            let status = match run.status {
+                crate::agent::runtime::RuntimeRunStatus::Completed => {
+                    pig_protocol::TaskStatus::Completed
+                }
+                crate::agent::runtime::RuntimeRunStatus::Cancelled => {
+                    pig_protocol::TaskStatus::Killed
+                }
+                crate::agent::runtime::RuntimeRunStatus::Failed => pig_protocol::TaskStatus::Failed,
+                crate::agent::runtime::RuntimeRunStatus::Queued
+                | crate::agent::runtime::RuntimeRunStatus::Running
+                | crate::agent::runtime::RuntimeRunStatus::Stopping
+                | crate::agent::runtime::RuntimeRunStatus::Lost => pig_protocol::TaskStatus::Lost,
+            };
+            let mut task = crate::task::TaskEntry::recovered_agent(
+                task_id.clone(),
+                format!("Subagent {}", agent.profile),
+                crate::task::AgentRunMetadata {
+                    agent_id: agent.agent_id.clone(),
+                    run_id: run.run_id.clone(),
+                    parent_agent_id: agent.parent_agent_id.clone(),
+                    delegation_depth: agent.depth,
+                    profile: agent.profile.clone(),
+                    usage: run.usage,
+                },
+                path,
+                result_path.is_file().then_some(result_path),
+                String::new(),
+                agent.created_at_ms / 1_000,
+            );
+            task.status = status;
+            task.turns = Some(run.turns.min(u32::MAX as usize) as u32);
+            if status != pig_protocol::TaskStatus::Lost {
+                task.reason = run.stop_reason.clone();
+                task.ended_at = run.ended_at_ms.map(|value| value / 1_000);
+            }
             self.state
                 .tasks
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push(crate::task::TaskEntry::recovered_agent(
-                    task_id.clone(),
-                    format!("Subagent {}: {}", meta.profile, meta.description),
-                    crate::task::AgentRunMetadata {
-                        agent_id: agent_id.clone(),
-                        run_id: meta.run_id.clone(),
-                        parent_agent_id: Some(meta.parent_agent_id.clone()),
-                        delegation_depth: meta.delegation_depth,
-                        profile: meta.profile,
-                        usage: (0, 0, 0),
-                    },
-                    path,
-                    result_path.is_file().then_some(result_path),
-                    meta.model,
-                    meta.created_at,
-                ));
-            self.state.notify_terminal(&task_id);
+                .expect("task registry lock")
+                .push(task);
+            self.state.notify_task(&task_id);
+            if status == pig_protocol::TaskStatus::Lost {
+                self.state.notify_terminal(&task_id);
+            }
         }
     }
 }

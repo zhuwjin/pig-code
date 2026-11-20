@@ -61,6 +61,7 @@ export type MessageProps = UiContext & {
   onImage: (source: string, label: string) => void;
   flat?: boolean;
   activityPreview?: boolean;
+  activityListRef?: (list: ListRef) => void;
 };
 
 function UserRow(props: MessageProps & { item: Accessor<UserItem> }) {
@@ -567,6 +568,7 @@ function ActivityRow(props: MessageProps & { row: Accessor<Extract<ConversationR
       bounces={false}
     >
       <List
+        ref={props.activityListRef}
         viewport="parent"
         class="w-full"
         contentClass="gap-2"
@@ -785,7 +787,7 @@ function TailRows(props: UiContext & { navEligible: boolean }) {
   );
 }
 
-export function MessageList(props: UiContext & { items: ChatItem[]; navFoot?: number; onScroll?: (event: ScrollEvent) => void; onLatestVisibleChange?: (visible: boolean) => void }) {
+export function MessageList(props: UiContext & { items: ChatItem[]; navFoot?: number; onScroll?: (event: ScrollEvent) => void; onLatestVisibleChange?: (visible: boolean) => void; activityListRef?: (list: ListRef) => void }) {
   const rows = computed(
     () => flattenConversationRows(
       props.items,
@@ -935,10 +937,13 @@ export function MessageList(props: UiContext & { items: ChatItem[]; navFoot?: nu
           lastContentHeight = event.contentSize.height;
           lastViewportHeight = event.size.height;
           distanceFromEnd = event.contentSize.height - event.offset.y - event.size.height;
-          setLatestVisible(distanceFromEnd > FOLLOW_THRESHOLD);
         }}
+        viewabilityConfig={{ itemVisibleThreshold: 1 }}
         onViewableItemsChange={({ viewableItems }) => {
           visibleRowIndices = viewableItems.filter((item) => item.isViewable).map((item) => item.index);
+          const last = rows().length - 1;
+          const latestVisible = last >= 0 && viewableItems.some((item) => item.index === last && item.isViewable);
+          setLatestVisible(last >= 0 && !latestVisible);
           updateActiveTurn();
         }}
       >

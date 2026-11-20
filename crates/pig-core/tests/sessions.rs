@@ -1,6 +1,6 @@
 use crate::common;
 
-use common::{new_session, recv_until, setup};
+use common::{new_session, recv_until, setup, setup_with_log};
 use pig_protocol::{CoreError, Event, ExecMode, Op};
 use pig_provider::mock;
 use std::time::Duration;
@@ -44,10 +44,10 @@ fn write_agent_context(path: &std::path::Path, meta_id: &str, text: &str) {
 
 fn subagent_read_error(event: &Event) -> Option<&str> {
     match event {
-        Event::Error {
-            error: CoreError::SubagentRead { detail },
-            ..
-        } => Some(detail),
+        Event::Error { error, .. } => match error.semantic_error() {
+            CoreError::SubagentRead { detail } => Some(detail.as_str()),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -1566,7 +1566,70 @@ async fn load_subagent_rejects_paths_and_containment_escapes() {
         .join(format!("{session_id}.agents"));
     write_agent_context(&agents.join("a1-1.jsonl"), "a1-1", "contained context");
 
-    agent.shutdown();
+    agent.close().await.expect("close before recovery fixture");
+    let store = std::sync::Arc::new(std::sync::Mutex::new(
+        pig_core::store::Store::open(&data_dir).expect("recovery store"),
+    ));
+    let runtime =
+        pig_core::agent::runtime::AgentRuntime::spawn_root(session_id.clone(), store.clone())
+            .expect("recovery runtime");
+    runtime
+        .register_agent_blocking(pig_core::agent::runtime::RuntimeAgent {
+            session_id: session_id.clone(),
+            agent_id: "a1-1".into(),
+            parent_agent_id: Some(session_id.clone()),
+            depth: 1,
+            profile: "explore".into(),
+            conversation_path: Some(agents.join("a1-1.jsonl")),
+            created_at_ms: 1,
+            closed_at_ms: None,
+        })
+        .expect("register orphan control fact");
+    let (completed, completed_attempt) = runtime
+        .start_run_blocking(pig_core::agent::runtime::StartRun {
+            run_id: Some("run-a1-1-completed".into()),
+            agent_id: "a1-1".into(),
+            backend_id: "local".into(),
+            required_capabilities: Default::default(),
+            initiator: pig_core::agent::runtime::AgentInitiator::System,
+            idempotency_key: Some("run-a1-1-completed".into()),
+            causation_id: None,
+            correlation_id: Some(session_id.clone()),
+            queued: false,
+            watchdog: Default::default(),
+        })
+        .expect("start completed history run");
+    runtime
+        .settle_current_run_blocking(
+            completed.run_id.clone(),
+            pig_core::agent::runtime::RuntimeRunStatus::Completed,
+            None,
+            (2, 3, 4),
+        )
+        .expect("settle history run");
+    runtime
+        .release_execution_blocking(
+            completed.run_id,
+            completed_attempt.attempt,
+            completed_attempt.backend_epoch,
+        )
+        .expect("release history execution");
+    runtime
+        .start_run_blocking(pig_core::agent::runtime::StartRun {
+            run_id: Some("run-a1-1-orphan".into()),
+            agent_id: "a1-1".into(),
+            backend_id: "local".into(),
+            required_capabilities: Default::default(),
+            initiator: pig_core::agent::runtime::AgentInitiator::System,
+            idempotency_key: Some("run-a1-1-orphan".into()),
+            causation_id: None,
+            correlation_id: Some(session_id.clone()),
+            queued: true,
+            watchdog: Default::default(),
+        })
+        .expect("start orphan run");
+    runtime.shutdown().await.expect("close recovery runtime");
+    drop(store);
     let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd, data_dir.clone());
     let events = agent.events.clone();
     agent
@@ -1595,11 +1658,25 @@ async fn load_subagent_rejects_paths_and_containment_escapes() {
     };
     let recovered = entries
         .iter()
-        .find(|agent| agent.agent_id == "a1-1")
+        .find(|agent| {
+            agent.agent_id == "a1-1" && agent.run_id.as_deref() == Some("run-a1-1-orphan")
+        })
         .expect("orphan child recovered into the catalog");
     assert_eq!(recovered.status, Some(pig_protocol::AgentRunStatus::Lost));
     assert_eq!(recovered.parent_id, Some(session_id.clone()));
     assert!(recovered.record_path.is_some());
+    let completed = entries
+        .iter()
+        .find(|agent| {
+            agent.agent_id == "a1-1" && agent.run_id.as_deref() == Some("run-a1-1-completed")
+        })
+        .expect("completed history run recovered");
+    assert_eq!(
+        completed.status,
+        Some(pig_protocol::AgentRunStatus::Completed)
+    );
+    assert_eq!(completed.parent_id, Some(session_id.clone()));
+    assert_eq!(completed.usage, (2, 3, 4));
 
     // The valid generated id still serves the right-side history.
     agent
@@ -1948,4 +2025,511 @@ async fn started_tool_without_result_recovers_as_model_visible_unknown() {
         .expect("table query");
     assert_eq!(table_count, 0);
     agent.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_handle_close_waits_for_runtime_and_is_idempotent() {
+    let (config_path, cwd, data_dir) = setup("agent-handle-close");
+    let agent =
+        pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir.clone());
+    let _session_id = new_session(&agent, cwd).await;
+    tokio::try_join!(agent.close(), agent.close()).expect("concurrent close");
+    agent.close().await.expect("repeated close");
+    assert!(agent.ops.send(Op::Shutdown).await.is_err());
+    agent.shutdown();
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reopening_a_loaded_session_replays_its_real_history_before_completion() {
+    let (config_path, cwd, data_dir) = setup("loaded-session-replay");
+    let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir);
+    let session_id = new_session(&agent, cwd).await;
+    agent
+        .ops
+        .send(Op::SendMessage {
+            session_id: session_id.clone(),
+            content: "say something".into(),
+            files: vec![],
+            images: vec![],
+            permissions: ExecMode::Auto.permissions(),
+            delivery: pig_protocol::MessageDelivery::Queue,
+        })
+        .await
+        .expect("send initial message");
+    recv_until(&agent.events, Duration::from_secs(20), |event| {
+        matches!(event, Event::TurnComplete { .. })
+    })
+    .await;
+
+    agent
+        .ops
+        .send(Op::OpenSession {
+            session_id: session_id.clone(),
+        })
+        .await
+        .expect("reopen loaded session");
+    let replay = recv_until(&agent.events, Duration::from_secs(10), |event| {
+        matches!(event, Event::SessionReplayComplete { .. })
+    })
+    .await;
+    assert_eq!(
+        replay
+            .iter()
+            .filter(|event| matches!(event, Event::SessionReplayComplete { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        replay
+            .iter()
+            .filter(
+                |event| matches!(event, Event::UserMessage { text, .. } if text == "say something")
+            )
+            .count(),
+        1
+    );
+    assert!(replay.iter().any(|event| matches!(
+        event,
+        Event::TextDone { full_text, .. } if full_text.contains(mock::MOCK_REPLY_MARKER)
+    )));
+    agent.close().await.expect("close agent");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replay_of_a_busy_session_waits_for_the_turn_to_settle() {
+    let (config_path, cwd, data_dir) = setup("busy-session-replay");
+    let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir);
+    let session_id = new_session(&agent, cwd).await;
+    agent
+        .ops
+        .send(Op::SendMessage {
+            session_id: session_id.clone(),
+            content: mock::SCENARIO_SLOW_TRIGGER.into(),
+            files: vec![],
+            images: vec![],
+            permissions: ExecMode::Auto.permissions(),
+            delivery: pig_protocol::MessageDelivery::Queue,
+        })
+        .await
+        .expect("start slow turn");
+    recv_until(&agent.events, Duration::from_secs(10), |event| {
+        matches!(event, Event::ToolCallBegin { .. })
+    })
+    .await;
+    agent
+        .ops
+        .send(Op::OpenSession {
+            session_id: session_id.clone(),
+        })
+        .await
+        .expect("request replay during a running turn");
+    agent
+        .ops
+        .send(Op::GetConfig)
+        .await
+        .expect("sync operations");
+    let before_stop = recv_until(&agent.events, Duration::from_secs(5), |event| {
+        matches!(event, Event::ConfigSnapshot { .. })
+    })
+    .await;
+    assert!(
+        !before_stop
+            .iter()
+            .any(|event| matches!(event, Event::SessionReplayComplete { .. }))
+    );
+    agent
+        .ops
+        .send(Op::Interrupt {
+            session_id: session_id.clone(),
+        })
+        .await
+        .expect("finish running turn");
+    let replay = recv_until(&agent.events, Duration::from_secs(15), |event| {
+        matches!(event, Event::SessionReplayComplete { .. })
+    })
+    .await;
+    assert!(
+        replay
+            .iter()
+            .any(|event| matches!(event, Event::TurnAborted { .. }))
+    );
+    assert!(replay.iter().any(|event| matches!(
+        event,
+        Event::UserMessage { text, .. } if text == mock::SCENARIO_SLOW_TRIGGER
+    )));
+    agent.close().await.expect("close agent");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pending_deletion_survives_restart_and_retries_failed_artifacts() {
+    let (config_path, cwd, data_dir) = setup("pending-deletion-restart");
+    let agent = pig_core::spawn_agent_with_data_dir(
+        Some(config_path.clone()),
+        cwd.clone(),
+        data_dir.clone(),
+    );
+    let session_id = new_session(&agent, cwd.clone()).await;
+    agent.close().await.expect("close original agent");
+    let database = rusqlite::Connection::open(data_dir.join("store.sqlite")).expect("open store");
+    database
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS session_deletions (
+                session_id TEXT PRIMARY KEY,
+                requested_at_ms INTEGER NOT NULL
+            );",
+        )
+        .expect("deletion schema fixture");
+    database
+        .execute(
+            "INSERT INTO session_deletions (session_id, requested_at_ms) VALUES (?1, 1)",
+            rusqlite::params![session_id],
+        )
+        .expect("persist deletion request");
+    drop(database);
+    let media = pig_utils::paths::media_dir(&data_dir.join("sessions"), &session_id);
+    std::fs::write(&media, "block directory cleanup").expect("inject artifact failure");
+
+    let recovered = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd, data_dir.clone());
+    recv_until(&recovered.events, Duration::from_secs(10), |event| {
+        matches!(
+            event,
+            Event::Error { error, .. }
+                if matches!(error.semantic_error(), CoreError::TaskStore { detail } if detail.contains("Failed to remove"))
+        )
+    })
+    .await;
+    let store = rusqlite::Connection::open(data_dir.join("store.sqlite")).expect("inspect store");
+    assert!(
+        store
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?1)",
+                rusqlite::params![session_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .expect("session remains after cleanup failure")
+    );
+    assert!(
+        store
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM session_deletions WHERE session_id = ?1)",
+                rusqlite::params![session_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .expect("deletion marker remains")
+    );
+    drop(store);
+    std::fs::remove_file(&media).expect("remove artifact failure");
+    let sessions = recv_until(&recovered.events, Duration::from_secs(10), |event| {
+        matches!(event, Event::SessionList { .. })
+    })
+    .await;
+    let Some(Event::SessionList { sessions: listed }) = sessions.last() else {
+        panic!("expected final session list");
+    };
+    assert!(listed.iter().all(|session| session.id != session_id));
+    assert!(
+        !data_dir
+            .join("sessions")
+            .join(format!("{session_id}.jsonl"))
+            .exists()
+    );
+    let store = rusqlite::Connection::open(data_dir.join("store.sqlite")).expect("final store");
+    assert!(
+        !store
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM session_deletions WHERE session_id = ?1)",
+                rusqlite::params![session_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .expect("deletion marker cleared")
+    );
+    recovered.close().await.expect("close recovered agent");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pending_deletion_retries_a_failed_store_commit() {
+    let (config_path, cwd, data_dir) = setup("pending-deletion-store-failure");
+    let agent = pig_core::spawn_agent_with_data_dir(
+        Some(config_path.clone()),
+        cwd.clone(),
+        data_dir.clone(),
+    );
+    let session_id = new_session(&agent, cwd.clone()).await;
+    agent.close().await.expect("close original agent");
+    let store = pig_core::store::Store::open(&data_dir).expect("open store");
+    store
+        .request_session_deletion(&session_id)
+        .expect("request deletion");
+    drop(store);
+    let faults = rusqlite::Connection::open(data_dir.join("store.sqlite")).expect("fault store");
+    faults
+        .execute_batch(
+            "CREATE TRIGGER fail_session_delete
+             BEFORE DELETE ON sessions
+             BEGIN SELECT RAISE(FAIL, 'injected session commit failure'); END;",
+        )
+        .expect("inject final commit failure");
+
+    let recovered = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd, data_dir.clone());
+    recv_until(&recovered.events, Duration::from_secs(10), |event| {
+        matches!(
+            event,
+            Event::Error { error, .. }
+                if matches!(error.semantic_error(), CoreError::TaskStore { detail } if detail.contains("injected session commit failure"))
+        )
+    })
+    .await;
+    assert!(
+        faults
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?1)",
+                rusqlite::params![session_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .expect("session survives rolled-back deletion")
+    );
+    assert!(
+        faults
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM session_deletions WHERE session_id = ?1)",
+                rusqlite::params![session_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .expect("deletion marker survives rollback")
+    );
+    faults
+        .execute("DROP TRIGGER fail_session_delete", [])
+        .expect("remove commit failure");
+    let events = recv_until(&recovered.events, Duration::from_secs(10), |event| {
+        matches!(event, Event::SessionList { .. })
+    })
+    .await;
+    let Some(Event::SessionList { sessions }) = events.last() else {
+        panic!("expected committed session list");
+    };
+    assert!(sessions.iter().all(|session| session.id != session_id));
+    assert!(
+        !faults
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM session_deletions WHERE session_id = ?1)",
+                rusqlite::params![session_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .expect("marker cleared")
+    );
+    recovered.close().await.expect("close recovered agent");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deletion_request_failure_does_not_stop_a_live_session() {
+    let (config_path, cwd, data_dir) = setup("deletion-request-failure");
+    let agent =
+        pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir.clone());
+    let session_id = new_session(&agent, cwd).await;
+    agent
+        .ops
+        .send(Op::SendMessage {
+            session_id: session_id.clone(),
+            content: mock::SCENARIO_SLOW_TRIGGER.into(),
+            files: vec![],
+            images: vec![],
+            permissions: ExecMode::Auto.permissions(),
+            delivery: pig_protocol::MessageDelivery::Queue,
+        })
+        .await
+        .expect("start live turn");
+    recv_until(&agent.events, Duration::from_secs(10), |event| {
+        matches!(event, Event::ToolCallBegin { .. })
+    })
+    .await;
+    let faults = rusqlite::Connection::open(data_dir.join("store.sqlite")).expect("fault store");
+    faults
+        .execute_batch(
+            "CREATE TRIGGER fail_deletion_request
+             BEFORE INSERT ON session_deletions
+             BEGIN SELECT RAISE(FAIL, 'injected deletion request failure'); END;",
+        )
+        .expect("inject deletion request failure");
+    agent
+        .ops
+        .send(Op::DeleteSession {
+            session_id: session_id.clone(),
+        })
+        .await
+        .expect("request deletion");
+    let events = recv_until(&agent.events, Duration::from_secs(10), |event| {
+        matches!(
+            event,
+            Event::Error { error, .. }
+                if matches!(error.semantic_error(), CoreError::TaskStore { detail } if detail.contains("injected deletion request failure"))
+        )
+    })
+    .await;
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::TurnAborted { .. }))
+    );
+    faults
+        .execute("DROP TRIGGER fail_deletion_request", [])
+        .expect("remove request failure");
+    agent
+        .ops
+        .send(Op::DeleteSession {
+            session_id: session_id.clone(),
+        })
+        .await
+        .expect("retry deletion");
+    recv_until(&agent.events, Duration::from_secs(15), |event| {
+        matches!(
+            event,
+            Event::SessionList { sessions }
+                if sessions.iter().all(|session| session.id != session_id)
+        )
+    })
+    .await;
+    agent.close().await.expect("close deleted agent");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unknown_write_outcome_is_visible_without_replaying_the_side_effect() {
+    let (config_path, cwd, data_dir, requests) = setup_with_log("unknown-write-outcome");
+    let agent = pig_core::spawn_agent_with_data_dir(
+        Some(config_path.clone()),
+        cwd.clone(),
+        data_dir.clone(),
+    );
+    let session_id = new_session(&agent, cwd.clone()).await;
+    agent.close().await.expect("close before crash fixture");
+
+    let rollout_path = data_dir
+        .join("sessions")
+        .join(format!("{session_id}.jsonl"));
+    let call = pig_provider::ToolCall {
+        id: "call-unknown-write".into(),
+        name: "Write".into(),
+        arguments: serde_json::json!({
+            "path": "side-effect.txt",
+            "content": "externally completed write"
+        })
+        .to_string(),
+    };
+    let records = [
+        pig_core::rollout::RolloutRecord::Assistant {
+            text: String::new(),
+            reasoning: None,
+            replay: None,
+            tool_calls: vec![call.to_wire()],
+            tool_execution_ids: vec!["run-unknown-write".into()],
+            ts_ms: 0,
+            reasoning_ms: None,
+        },
+        pig_core::rollout::RolloutRecord::ToolExecutionStart {
+            execution_id: "run-unknown-write".into(),
+            call_id: call.id,
+            call_index: 0,
+            tool: call.name,
+            started_at_ms: 1,
+        },
+    ];
+    let mut raw = std::fs::read_to_string(&rollout_path).expect("existing rollout");
+    for record in records {
+        raw.push_str(&serde_json::to_string(&record).expect("serialize interrupted write"));
+        raw.push('\n');
+    }
+    std::fs::write(&rollout_path, raw).expect("append interrupted write");
+    let side_effect = cwd.join("side-effect.txt");
+    std::fs::write(&side_effect, "externally completed write").expect("external side effect");
+
+    let recovered = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd, data_dir.clone());
+    recovered
+        .ops
+        .send(Op::OpenSession {
+            session_id: session_id.clone(),
+        })
+        .await
+        .expect("open interrupted write history");
+    let replay = recv_until(&recovered.events, Duration::from_secs(10), |event| {
+        matches!(event, Event::SessionReplayComplete { .. })
+    })
+    .await;
+    assert!(replay.iter().any(|event| matches!(
+        event,
+        Event::ToolCallEnd { output, is_error: true, .. } if output.contains("outcome is unknown")
+    )));
+    recovered
+        .ops
+        .send(Op::SendMessage {
+            session_id: session_id.clone(),
+            content: "continue after the unknown write".into(),
+            files: vec![],
+            images: vec![],
+            permissions: ExecMode::Auto.permissions(),
+            delivery: pig_protocol::MessageDelivery::Queue,
+        })
+        .await
+        .expect("continue after unknown outcome");
+    recv_until(&recovered.events, Duration::from_secs(20), |event| {
+        matches!(event, Event::TurnComplete { stats: Some(_), .. })
+    })
+    .await;
+    assert_eq!(
+        std::fs::read_to_string(&side_effect).expect("side effect content"),
+        "externally completed write"
+    );
+    let raw = std::fs::read_to_string(&rollout_path).expect("recovered rollout");
+    assert_eq!(
+        raw.matches("\"type\":\"tool_execution_start\",\"execution_id\":\"run-unknown-write\"")
+            .count(),
+        1
+    );
+    assert!(
+        requests
+            .lock()
+            .expect("request log")
+            .iter()
+            .any(|body| { body.contains("outcome is unknown") })
+    );
+    recovered.close().await.expect("close recovered agent");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn execution_errors_keep_their_runtime_identity() {
+    let (config_path, cwd, data_dir) = setup("execution-error-context");
+    let agent = pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir);
+    let session_id = new_session(&agent, cwd).await;
+    agent
+        .ops
+        .send(Op::SendMessage {
+            session_id: session_id.clone(),
+            content: mock::MALFORMED_STREAM_TRIGGER.into(),
+            files: vec![],
+            images: vec![],
+            permissions: ExecMode::Auto.permissions(),
+            delivery: pig_protocol::MessageDelivery::Queue,
+        })
+        .await
+        .expect("send malformed stream scenario");
+    let events = recv_until(&agent.events, Duration::from_secs(20), |event| {
+        matches!(event, Event::Error { fatal: true, .. })
+    })
+    .await;
+    let error = events
+        .iter()
+        .find_map(|event| match event {
+            Event::Error { error, .. } => Some(error),
+            _ => None,
+        })
+        .expect("structured execution error");
+    let context = error.context().expect("execution context");
+    assert_eq!(context.session_id, session_id);
+    assert_eq!(context.agent_id, session_id);
+    assert!(context.run_id.is_some());
+    assert_eq!(context.attempt, Some(1));
+    assert!(
+        matches!(error.semantic_error(), CoreError::Internal { detail } if detail.contains("Invalid JSON")),
+        "unexpected semantic error: {error:?}"
+    );
+    agent.close().await.expect("close after execution error");
 }

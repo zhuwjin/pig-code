@@ -6,7 +6,10 @@ const TEST_CONTEXT_WINDOW: u64 = 128_000;
 #[cfg(test)]
 pub(super) fn persist_agent_msg(jsonl: &Path, msg: &mut ChatMsg) {
     if let Err(error) = crate::agent::append_agent_message(jsonl, msg, TEST_CONTEXT_WINDOW) {
-        tracing::error!("failed to persist subagent message: {error}");
+        tracing::error!(
+            "failed to persist subagent message: {}",
+            pig_provider::core_error_en(&error)
+        );
     }
 }
 
@@ -44,7 +47,10 @@ pub(super) fn persist_agent_tool(jsonl: &Path, call: &pig_provider::ToolCall, ms
         TEST_CONTEXT_WINDOW,
         crate::agent::AgentMsgMeta::default(),
     ) {
-        tracing::error!("failed to persist subagent tool result: {error}");
+        tracing::error!(
+            "failed to persist subagent tool result: {}",
+            pig_provider::core_error_en(&error)
+        );
     }
 }
 
@@ -52,7 +58,7 @@ pub(super) fn persist_agent_tool(jsonl: &Path, call: &pig_provider::ToolCall, ms
 pub(super) fn persist_child_message(
     session: &mut Session,
     msg: &mut ChatMsg,
-) -> Result<(), String> {
+) -> Result<(), CoreError> {
     persist_child_message_meta(session, msg, crate::agent::AgentMsgMeta::default())
 }
 
@@ -60,7 +66,7 @@ pub(super) fn persist_child_mailbox_message(
     session: &mut Session,
     steer: &crate::agent::AgentSteer,
     msg: &ChatMsg,
-) -> Result<(), String> {
+) -> Result<(), CoreError> {
     let (jsonl, previous) = {
         let sub = session.subagent.as_ref().expect("child session");
         (sub.jsonl.clone(), sub.persist_failure.clone())
@@ -93,7 +99,7 @@ pub(super) fn persist_child_message_meta(
     session: &mut Session,
     msg: &mut ChatMsg,
     meta: crate::agent::AgentMsgMeta,
-) -> Result<(), String> {
+) -> Result<(), CoreError> {
     let (jsonl, context_window, previous) = {
         let sub = session.subagent.as_ref().expect("child session");
         (
@@ -124,7 +130,7 @@ pub(super) fn persist_child_tool_starts(
     execution_ids: &[String],
     start: usize,
     end: usize,
-) -> Result<(), String> {
+) -> Result<(), CoreError> {
     let (jsonl, previous) = {
         let sub = session.subagent.as_ref().expect("child session");
         (sub.jsonl.clone(), sub.persist_failure.clone())
@@ -135,9 +141,10 @@ pub(super) fn persist_child_tool_starts(
     let result = (|| {
         for record in crate::rollout::tool_execution_start_records(calls, execution_ids, start, end)
         {
-            crate::agent::append_agent_conversation_record(&jsonl, &record)?;
+            crate::agent::try_append_agent_conversation_record(&jsonl, &record)?;
         }
-        crate::agent::sync_agent_context(&jsonl)
+        let mut store = crate::agent::AgentConversationStore::new(&jsonl);
+        crate::rollout::ConversationStore::sync(&mut store)
     })();
     if let Err(error) = result {
         session
@@ -183,7 +190,7 @@ pub(super) fn persist_child_tool_result(
     execution_id: &str,
     msg: &mut ChatMsg,
     meta: crate::agent::AgentMsgMeta,
-) -> Result<(), String> {
+) -> Result<(), CoreError> {
     let (jsonl, context_window, previous) = {
         let sub = session.subagent.as_ref().expect("child session");
         (
@@ -218,7 +225,7 @@ pub(super) fn persist_child_tool_result(
 /// Terminal child result for a sticky context-write failure.
 pub(super) fn child_persist_stop(
     session: &Session,
-    error: &str,
+    error: &CoreError,
     turns: usize,
     usage: (u64, u64, u64),
 ) -> SubagentResult {
@@ -227,7 +234,7 @@ pub(super) fn child_persist_stop(
         "subagent context write failed".to_string(),
         crate::agent::child_persist_failure_note(
             &session.agent.id,
-            error,
+            &pig_provider::core_error_en(error),
             true,
             crate::agent::ChildPersistPhase::Stopped,
         ),

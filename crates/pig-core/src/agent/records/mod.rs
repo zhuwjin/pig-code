@@ -22,7 +22,7 @@ pub use display::{display_items, project_display_items};
 pub use jsonl::append_agent_conversation_record;
 #[cfg(test)]
 pub(crate) use jsonl::append_agent_record;
-pub(crate) use jsonl::sync_agent_context;
+pub(crate) use jsonl::try_append_agent_conversation_record;
 pub(crate) use media::fill_document_token_estimates;
 pub(crate) use media::project_history_media;
 pub use media::{

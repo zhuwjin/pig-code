@@ -27,18 +27,21 @@ pub use access::{
     metadata_carve_outs, sandbox_read_denial,
 };
 pub use notification::TaskChange;
-pub(crate) use process::stop_task_with_agents;
 pub use process::{ForegroundOutcome, run_foreground, spawn_background, stop_task};
+pub(crate) use process::{
+    ManagedChild, ProcessTask, request_task_stop_with_agents, spawn as spawn_managed,
+    stop_task_with_agents,
+};
 pub use registry::{
     AgentRunMetadata, ReadState, SessionToolState, TaskEntry, TaskRegistry,
     mark_agent_task_started, note_output, register_agent_run_queued, register_agent_task,
     register_agent_task_queued, snapshot, tail_chars,
 };
 
-pub(crate) use output::kill_process_tree;
 pub(crate) use process::{run_foreground_with_profile, spawn_background_with_profile};
 pub(crate) use registry::{
-    TaskWaitInterest, mark_agent_notification_delivered, release_agent_mailbox, task_wait_delivered,
+    TaskWaitInterest, mark_agent_notification_delivered, release_agent_mailbox,
+    task_wait_is_pending, task_wait_pending,
 };
 
 pub use sandbox::AdditionalPermissions;

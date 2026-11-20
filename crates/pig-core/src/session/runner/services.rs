@@ -527,17 +527,29 @@ impl Manager {
                     Ok(fetched) => {
                         let for_save = fetched.clone();
                         let path2 = cache_path.clone();
-                        let _ = tokio::task::spawn_blocking(move || {
+                        match tokio::task::spawn_blocking(move || {
                             crate::models_registry::save_cache(
                                 &path2,
                                 crate::models_registry::unix_now(),
                                 &for_save,
-                            );
+                            )
                         })
-                        .await;
+                        .await
+                        {
+                            Ok(Ok(())) => {}
+                            Ok(Err(error)) => {
+                                tracing::warn!(%error, "model registry cache save failed")
+                            }
+                            Err(error) => {
+                                tracing::warn!(%error, "model registry cache task failed")
+                            }
+                        }
                         fetched
                     }
-                    Err(_) => index,
+                    Err(error) => {
+                        tracing::warn!(%error, "model registry fetch failed; using cached entries");
+                        index
+                    }
                 }
             };
             let _ = tx

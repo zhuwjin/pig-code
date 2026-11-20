@@ -44,6 +44,14 @@ pub(crate) struct AgentArtifact {
     pub(crate) cwd: Option<std::path::PathBuf>,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct TurnCompletion {
+    pub(crate) duration_ms: u64,
+    pub(crate) run: Option<pig_protocol::AgentRunEnvelope>,
+    pub(crate) stats: Option<pig_protocol::TurnUsageStats>,
+    pub(crate) finish_reason: Option<pig_protocol::FinishReason>,
+}
+
 /// One root or child run's authoritative outcome. Presentation strings and
 /// registry states are derived from `status` rather than independent booleans.
 #[derive(Clone, Debug)]
@@ -56,6 +64,7 @@ pub(crate) struct AgentRunResult {
     pub(crate) turns: usize,
     pub(crate) usage: (u64, u64, u64),
     pub(crate) artifact: Option<AgentArtifact>,
+    pub(crate) completion: Option<TurnCompletion>,
 }
 
 impl AgentRunResult {
@@ -69,6 +78,7 @@ impl AgentRunResult {
             turns: 0,
             usage: (0, 0, 0),
             artifact: None,
+            completion: None,
         }
     }
 
@@ -93,6 +103,7 @@ impl AgentRunResult {
                 structured: None,
                 cwd: None,
             }),
+            completion: None,
         }
     }
 
@@ -214,6 +225,7 @@ impl Session {
             usage: result.usage,
         });
         self.sync_rollout();
+        self.settle_execution_claim();
         self.agent.run = Some(result.clone());
         self.state.agents.settle_run_with_outcome(
             &agent_id,

@@ -1,4 +1,5 @@
-import { mount, View } from "nsh";
+import { mount, Text, View, type ListRef } from "nsh";
+import { Button } from "nsh/base";
 import { MessageList } from "../app/components/messages";
 import { AgentStore } from "../app/store";
 import { ThemeStore } from "../app/theme";
@@ -6,6 +7,7 @@ import type { ChatItem, TurnState } from "../app/protocol";
 
 const store = new AgentStore(true);
 const themeStore = new ThemeStore();
+let activityList: ListRef | undefined;
 const turn: TurnState = {
   id: "turn-1",
   status: "done",
@@ -36,6 +38,17 @@ store.running.set({ "activity-large": false });
 
 mount(() => (
   <View class="h-full w-full">
-    <MessageList store={store} themeStore={themeStore} items={store.items()["activity-large"] ?? []} />
+    <Button
+      testID="show-last-tool"
+      onPress={() => activityList?.scrollToIndex({ index: 998, viewPosition: 1, animated: false })}
+    >
+      <Text>Show last tool</Text>
+    </Button>
+    <MessageList
+      store={store}
+      themeStore={themeStore}
+      items={store.items()["activity-large"] ?? []}
+      activityListRef={(list) => { activityList = list; }}
+    />
   </View>
 ));

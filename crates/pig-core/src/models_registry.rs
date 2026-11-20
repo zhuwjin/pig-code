@@ -138,18 +138,19 @@ pub fn load_cache(cache_path: &Path) -> Option<(u64, HashMap<String, ModelRegist
     Some((fetched_at, index))
 }
 
-pub fn save_cache(cache_path: &Path, fetched_at: u64, index: &HashMap<String, ModelRegistryInfo>) {
+pub fn save_cache(
+    cache_path: &Path,
+    fetched_at: u64,
+    index: &HashMap<String, ModelRegistryInfo>,
+) -> Result<(), String> {
     let value = serde_json::json!({
         "schema": CACHE_SCHEMA,
         "fetched_at": fetched_at,
         "models": index,
     });
-    if let Some(dir) = cache_path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    if let Ok(raw) = serde_json::to_vec(&value) {
-        let _ = std::fs::write(cache_path, raw);
-    }
+    let raw = serde_json::to_vec(&value).map_err(|error| error.to_string())?;
+    crate::config::write_private_file(cache_path, &raw)
+        .map_err(|error| format!("failed to persist model registry cache: {error:?}"))
 }
 
 /// Fetch api.json and parse it into an index (not persisted — the caller decides when to write).
@@ -290,10 +291,31 @@ mod tests {
                 strict_tools: None,
             },
         );
-        save_cache(&path, 42, &index);
+        save_cache(&path, 42, &index).expect("save model cache");
         let (fetched_at, loaded) = load_cache(&path).expect("cache readable");
         assert_eq!(fetched_at, 42);
         assert_eq!(loaded, index);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+
+    #[test]
+    fn cache_write_failures_are_returned() {
+        let root = std::env::temp_dir().join(format!(
+            "pig-model-cache-error-{}-{}",
+            std::process::id(),
+            unix_now()
+        ));
+        std::fs::create_dir_all(&root).expect("test root");
+        let blocker = root.join("blocked");
+        std::fs::write(&blocker, "not a directory").expect("blocking file");
+        let error = save_cache(&blocker.join("cache.json"), 1, &HashMap::new())
+            .expect_err("invalid cache destination must fail");
+        assert!(error.contains("failed to persist model registry cache"));
+        let _ = std::fs::remove_dir_all(root);
     }
 }

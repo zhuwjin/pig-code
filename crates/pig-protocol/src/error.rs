@@ -10,6 +10,15 @@ use super::*;
 /// Introducing rust-i18n for these strings on the core side is forbidden (pig-app's
 /// i18n guard test would catch it).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoreErrorContext {
+    pub session_id: String,
+    pub agent_id: String,
+    pub run_id: Option<String>,
+    pub attempt: Option<u64>,
+    pub call_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CoreError {
     // Config read/write
@@ -119,6 +128,15 @@ pub enum CoreError {
         path: String,
         detail: String,
     },
+    /// The complete durable history reached its explicit retention quota.
+    /// Existing records remain intact; callers must start a new session rather
+    /// than dropping or silently truncating user history.
+    HistoryLimitExceeded {
+        path: String,
+        limit_bytes: u64,
+        used_bytes: u64,
+        attempted_bytes: u64,
+    },
     DataDirCreate {
         path: String,
         detail: String,
@@ -196,9 +214,40 @@ pub enum CoreError {
     Internal {
         detail: String,
     },
+    Contextual {
+        context: CoreErrorContext,
+        error: Box<CoreError>,
+    },
     /// Fallback for unknown kinds during deserialization (forward compatibility)
     #[serde(other)]
     Unknown,
+}
+
+impl CoreError {
+    pub fn with_context(self, context: CoreErrorContext) -> Self {
+        if matches!(self, Self::Contextual { .. }) {
+            self
+        } else {
+            Self::Contextual {
+                context,
+                error: Box::new(self),
+            }
+        }
+    }
+
+    pub fn context(&self) -> Option<&CoreErrorContext> {
+        match self {
+            Self::Contextual { context, .. } => Some(context),
+            _ => None,
+        }
+    }
+
+    pub fn semantic_error(&self) -> &Self {
+        match self {
+            Self::Contextual { error, .. } => error.semantic_error(),
+            other => other,
+        }
+    }
 }
 
 /// Placeholder/truncation note for the git panel's diff view (GitDiff.note; the diff
@@ -228,4 +277,37 @@ pub enum ConnTestResult {
     Failed {
         detail: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn contextual_errors_keep_identity_and_semantic_payload() {
+        let error = CoreError::StreamRead {
+            detail: "connection reset".into(),
+        }
+        .with_context(CoreErrorContext {
+            session_id: "s1".into(),
+            agent_id: "a1".into(),
+            run_id: Some("r1".into()),
+            attempt: Some(2),
+            call_id: Some("c1".into()),
+        });
+        let encoded = serde_json::to_value(&error).expect("serialize contextual error");
+        assert_eq!(encoded["kind"], "contextual");
+        assert_eq!(encoded["context"]["attempt"], 2);
+        assert_eq!(encoded["error"]["kind"], "stream_read");
+        assert_eq!(
+            error.semantic_error().semantic_error(),
+            error.semantic_error()
+        );
+        let decoded: CoreError = serde_json::from_value(encoded).expect("deserialize");
+        assert_eq!(decoded, error);
+        assert_eq!(
+            decoded.context().expect("context").call_id.as_deref(),
+            Some("c1")
+        );
+    }
 }

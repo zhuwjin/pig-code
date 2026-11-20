@@ -50,6 +50,18 @@ Agent 卡片由 `SubagentActivity` 分配完成序号，Swarm 按完成优先及
 
 0.4.0 期间曾使用 `maintainVisibleContentPosition={{ autoscrollToBottomThreshold: 120 }}`，后来把阈值降到 0 仍存在用户上滚与流式新增行的时序竞态，最终改为应用侧延迟跟随。0.5.0 已按 Noop 的写法接入 `alignment="bottom"` + `maintainVisibleContentPosition`，见下面的「0.5.0 升级与窗口」。
 
+## 0.6.0 升级与视图分批挂载
+
+### 1. 升级到 0.6.0（已完成）
+
+CLI 和 `nsh-core` / `nsh-base` / `nsh-engine` / `nsh-platform-windows` / `nsh-testing` 从 0.5.1 升级到 0.6.0，GitHub Actions 安装的 CLI 同步升级，`Cargo.lock` 中的 NSH 配套 crate 一并更新。项目没有声明 `capabilities`，因此 0.6.0 新增的 application / homeDir 声明要求不改变现有行为；Rust 公开 API 无需迁移，`cargo check --all-targets` 和 `nsh check` 通过。
+
+### 2. 分批挂载导致嵌套虚拟列表空白（已完成）
+
+[longbridge/nsh#1783](https://github.com/longbridge/nsh/issues/1783) 已由 #1800 和 #1823 关闭，两个修复均进入 0.6.0：被 view pacing 延迟的 List cell 及其可见行现在会收到实际 Frame，不再等到下一次布局才绘制。
+
+真实 Windows 宿主运行 `App.activity.test.tsx` 的 `virtualizes a long expanded activity` 通过。另用一次性静态 13 项活动夹具验证首次展开：未滚动前视口内所有行连续绘制，没有后半段空白；内部滚动到底后第 13 项完整显示，底部无异常空白。验证不依赖 `shows()` / `waitFor()` 的节点存在性断言，还检查了首次展开和滚动到底的真实窗口截图。
+
 ## 0.5.0 升级与窗口
 
 ### 1. 升级到 0.5.0（已完成）

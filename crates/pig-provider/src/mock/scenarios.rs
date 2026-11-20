@@ -1137,7 +1137,7 @@ pub(super) fn task_wait_scenario_response(body: &str) -> Vec<String> {
         return tool_call_chunks(
             "call_task_wait",
             "TaskWait",
-            &serde_json::json!({"timeout_ms": 2_000}).to_string(),
+            &serde_json::json!({"timeout_ms": 30_000}).to_string(),
             None,
         );
     }
@@ -1498,10 +1498,12 @@ pub(super) fn subagent_parent_response(body: &str) -> Vec<String> {
             )
         }
         "RESUME" => {
+            // BGSTOP creates a stopped child; the next RESUME is its first resume.
+            let resume_after_stop = body.contains(&format!("{SUBAGENT_TRIGGER} BGSTOP"));
             // Trigger occurrence count = messages already sent: the 1st starts
             // a new subagent, the 2nd resumes the original id, the 3rd covers
             // a resume retried after a failed write.
-            if body.matches(SUBAGENT_TRIGGER).count() >= 3 {
+            if !resume_after_stop && body.matches(SUBAGENT_TRIGGER).count() >= 3 {
                 if tool_answered(body, "call_agent_3") {
                     return subagent_parent_done();
                 }
@@ -1516,7 +1518,7 @@ pub(super) fn subagent_parent_response(body: &str) -> Vec<String> {
                     }),
                 );
             }
-            if body.matches(SUBAGENT_TRIGGER).count() >= 2 {
+            if resume_after_stop || body.matches(SUBAGENT_TRIGGER).count() >= 2 {
                 if tool_answered(body, "call_agent_2") {
                     return subagent_parent_done();
                 }
@@ -1682,7 +1684,7 @@ pub(super) fn subagent_child_response(body: &str, tool_results: usize) -> Vec<St
         "NESTED_BG_STEER" if !tool_answered(body, "call_nested_pause") => tool_call_chunks(
             "call_nested_pause",
             "ExecCommand",
-            &serde_json::json!({"command": "sleep 0.2"}).to_string(),
+            &serde_json::json!({"command": "sleep 2"}).to_string(),
             None,
         ),
         "NESTED_BG_STOP" if !tool_answered(body, "call_nested_stop") => {

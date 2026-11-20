@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout};
+use tokio::process::{ChildStderr, ChildStdin, ChildStdout};
 use tokio::sync::oneshot;
 
 use crate::NoConsoleExt as _;
@@ -307,7 +307,7 @@ struct StdioTransport {
     name: String,
     timeout: Duration,
     writer: Writer,
-    child: tokio::sync::Mutex<Child>,
+    child: tokio::sync::Mutex<crate::task::ManagedChild>,
     pending: PendingMap,
     next_id: AtomicU64,
     closed: Arc<AtomicBool>,
@@ -393,10 +393,11 @@ impl StdioTransport {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
-        let mut child = command.spawn().map_err(|e| CoreError::McpSpawn {
-            command: config.command.clone(),
-            detail: e.to_string(),
-        })?;
+        let mut child =
+            crate::task::spawn_managed(&mut command).map_err(|e| CoreError::McpSpawn {
+                command: config.command.clone(),
+                detail: e.to_string(),
+            })?;
         let stdin = child.stdin.take().expect("stdin piped");
         let stdout = child.stdout.take().expect("stdout piped");
         let stderr = child.stderr.take().expect("stderr piped");
@@ -474,8 +475,25 @@ impl StdioTransport {
     async fn shutdown(&self) {
         self.closed.store(true, Ordering::Release);
         let mut child = self.child.lock().await;
-        let _ = child.kill().await;
-        let _ = child.wait().await;
+        let process = child.process();
+        let termination = process.terminate();
+        let waited = tokio::time::timeout(Duration::from_secs(5), async {
+            child.wait().await.map_err(|error| error.to_string())?;
+            process.wait_empty().await
+        })
+        .await;
+        match (termination, waited) {
+            (Ok(()), Ok(Ok(()))) => {}
+            (Err(error), _) => {
+                tracing::warn!(server = self.name, %error, "MCP process-tree termination failed")
+            }
+            (_, Ok(Err(error))) => {
+                tracing::warn!(server = self.name, %error, "MCP process-tree wait failed")
+            }
+            (_, Err(_)) => {
+                tracing::warn!(server = self.name, "MCP process-tree shutdown timed out")
+            }
+        }
         fail_all(&self.pending);
     }
 
@@ -747,6 +765,67 @@ mod tests {
         assert_eq!(tool.schema()["function"]["name"], "mcp__fake__echo");
 
         client.shutdown().await;
+        client.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stdio_shutdown_is_idempotent_and_stops_descendants() {
+        let root = std::env::temp_dir().join(format!(
+            "pig-mcp-shutdown-tree-{}-{}",
+            std::process::id(),
+            crate::model_io::now_ms()
+        ));
+        std::fs::create_dir_all(&root).expect("test directory");
+        let started = root.join("started");
+        let late = root.join("late");
+        #[cfg(windows)]
+        let config = {
+            let script = root.join("grandchild.cmd");
+            std::fs::write(
+                &script,
+                format!(
+                    "@echo off\r\necho started > \"{}\"\r\nping -n 2 127.0.0.1 >nul\r\necho late > \"{}\"\r\n",
+                    started.display(),
+                    late.display()
+                ),
+            )
+            .expect("grandchild script");
+            McpStdioConfig {
+                command: "cmd.exe".into(),
+                args: vec!["/C".into(), script.display().to_string()],
+                env: HashMap::new(),
+            }
+        };
+        #[cfg(unix)]
+        let config = McpStdioConfig {
+            command: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                format!(
+                    "(touch \"{}\"; sleep 1; printf late > \"{}\") & wait",
+                    started.display(),
+                    late.display()
+                ),
+            ],
+            env: HashMap::new(),
+        };
+        let transport =
+            StdioTransport::spawn("shutdown-tree", &config, Duration::from_secs(1), &root)
+                .await
+                .expect("spawn MCP transport");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !started.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("descendant started");
+        transport.shutdown().await;
+        transport.shutdown().await;
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        assert!(!late.exists(), "MCP descendant survived repeated shutdown");
+        drop(transport);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// Windows program resolution: .cmd shims / .exe / explicit paths with extension appended / bare names searched in the directory list

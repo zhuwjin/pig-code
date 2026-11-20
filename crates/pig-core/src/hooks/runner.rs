@@ -66,7 +66,7 @@ pub(crate) async fn run_entry(
         .env("CLAUDE_SESSION_ID", &run.session_id)
         .env("CLAUDE_CODE_SESSION_ID", &run.session_id)
         .env("CLAUDE_PROJECT_DIR", run.cwd.display().to_string());
-    let mut child = match command.spawn() {
+    let mut child = match crate::task::spawn_managed(&mut command) {
         Ok(child) => child,
         Err(error) => {
             return HookRaw {
@@ -76,7 +76,7 @@ pub(crate) async fn run_entry(
             };
         }
     };
-    let pid = child.id();
+    let process = child.process();
     let mut stdin_handle = child.stdin.take();
     let mut stdout_handle = child.stdout.take();
     let mut stderr_handle = child.stderr.take();
@@ -110,7 +110,9 @@ pub(crate) async fn run_entry(
         };
         let status = child.wait();
         let (_, _, _, status) = tokio::join!(write, read_out, read_err, status);
-        status
+        let status = status.map_err(|error| error.to_string())?;
+        process.wait_empty().await?;
+        Ok::<std::process::ExitStatus, String>(status)
     });
     let status = tokio::select! {
         status = timed => match status {
@@ -123,20 +125,27 @@ pub(crate) async fn run_entry(
                 };
             }
             Err(_) => {
-                kill(pid);
+                let mut stderr = decode_capped(&mut stderr_buf, max_output_bytes);
+                if let Err(error) = kill(&mut child, &process).await {
+                    stderr.push_str(&format!("\n[Process cleanup failed: {error}]"));
+                }
                 return HookRaw {
                     outcome: RawOutcome::TimedOut,
                     stdout: decode_capped(&mut stdout_buf, max_output_bytes),
-                    stderr: decode_capped(&mut stderr_buf, max_output_bytes),
+                    stderr,
                 };
             }
         },
         _ = run.cancel.cancelled() => {
-            kill(pid);
+            let stderr = kill(&mut child, &process)
+                .await
+                .err()
+                .map(|error| format!("[Process cleanup failed: {error}]"))
+                .unwrap_or_default();
             return HookRaw {
                 outcome: RawOutcome::Cancelled,
                 stdout: String::new(),
-                stderr: String::new(),
+                stderr,
             };
         }
     };
@@ -186,11 +195,20 @@ impl Drop for TranscriptFile {
     }
 }
 
-/// kill_on_drop already reaps the direct child on drop; the explicit tree kill
-/// covers group members spawned by the hook (same helper as task timeouts)
-fn kill(pid: Option<u32>) {
-    if let Some(pid) = pid {
-        crate::task::kill_process_tree(pid);
+async fn kill(
+    child: &mut crate::task::ManagedChild,
+    process: &crate::task::ProcessTask,
+) -> Result<(), String> {
+    let termination = process.terminate();
+    let waited = tokio::time::timeout(Duration::from_secs(5), async {
+        child.wait().await.map_err(|error| error.to_string())?;
+        process.wait_empty().await
+    })
+    .await
+    .map_err(|_| "timed out waiting for the hook process tree".to_string())?;
+    match (termination, waited) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), _) | (_, Err(error)) => Err(error),
     }
 }
 

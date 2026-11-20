@@ -48,6 +48,7 @@ mod runner;
 mod subagent;
 pub use subagent::AgentRunSupervisor;
 pub(crate) use subagent::DelegatedAgentStarted;
+pub(crate) use subagent::{LocalAgentExecutionHandle, ManagedOutcome};
 mod stats;
 mod step;
 #[cfg(test)]
