@@ -94,7 +94,7 @@ pub(crate) async fn exec_tool_gated_ctx(
             .any(|extra| extra.name() == call.name && extra.is_plugin());
     let perm_subject = match call.name.as_str() {
         name if crate::tool::is_exec_command(name) => bash_command.clone(),
-        "Write" | "Edit" => Some(tool::approval_subject(call)),
+        "Write" | "Edit" | "FetchURL" => Some(tool::approval_subject(call)),
         name if name.starts_with("mcp__") || plugin_tool => Some(call.name.clone()),
         _ => None,
     };
@@ -114,6 +114,16 @@ pub(crate) async fn exec_tool_gated_ctx(
             .as_deref()
             .is_some_and(|subject| rules.allow_hit(&call.name, subject))
     };
+
+    if call.name == "FetchURL"
+        && ctx.permissions.sandbox.mode != SandboxMode::DangerFullAccess
+        && crate::task::network_blocked_for(ctx.state)
+    {
+        return GatedToolOutcome::Rejected {
+            note: "Network access is blocked by the sandbox policy; FetchURL cannot make outbound requests."
+                .to_string(),
+        };
+    }
 
     let danger_reason = bash_command.as_deref().and_then(tool::is_dangerous_command);
     if ctx.permissions.sandbox.mode == SandboxMode::DangerFullAccess

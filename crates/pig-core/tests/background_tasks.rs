@@ -193,7 +193,7 @@ async fn automatic_notification(
                     .iter()
                     .find(|notification| notification.task_id == task_id)
                 {
-                    assert_eq!(note.status, status);
+                    assert_eq!(note.status, status, "unexpected notification: {note:?}");
                     notification = Some(note.clone());
                 }
             }

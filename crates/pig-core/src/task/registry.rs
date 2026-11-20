@@ -511,7 +511,7 @@ impl SessionToolState {
         let scheduler = Arc::new(crate::agent::AgentScheduler::new(
             crate::agent::MAX_CONCURRENT_AGENT_RUNS,
         ));
-        let backends = Arc::new(crate::agent::AgentBackendRegistry::with_local());
+        let backends = Arc::new(crate::agent::AgentBackendRegistry::with_default());
         backends.attach_scheduler(scheduler.clone());
         Self {
             todos: TodoHandle::default(),

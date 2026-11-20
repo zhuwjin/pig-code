@@ -1,4 +1,6 @@
-use std::time::Duration;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use pig_protocol::CoreError;
 
@@ -60,6 +62,30 @@ fn retry_after_secs(response: &reqwest::Response, cap: Duration) -> Option<u64> 
         .map(|secs| secs.min(cap.as_secs()))
 }
 
+fn jitter_unit() -> f64 {
+    static STATE: AtomicU64 = AtomicU64::new(0);
+    let seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0x9e37_79b9_7f4a_7c15, |d| d.as_nanos() as u64)
+        ^ u64::from(std::process::id()).rotate_left(17);
+    let counter = STATE.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+    // SplitMix64 mixing so concurrent swarm retries spread cleanly across the window.
+    let mut z = seed
+        .wrapping_add(counter.wrapping_mul(0x9e37_79b9_7f4a_7c15));
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^= z >> 31;
+    // Map top 53 bits to [0.0, 1.0).
+    ((z >> 11) as f64) / ((1u64 << 53) as f64)
+}
+
+fn apply_jitter(base: Duration, unit: f64) -> Duration {
+    // +/- 25% jitter around the exponential base, capped at RETRY_CAP.
+    let factor = 0.75 + 0.5 * unit.clamp(0.0, 1.0);
+    let ms = ((base.as_millis() as f64) * factor).round() as u64;
+    Duration::from_millis(ms.max(1)).min(RETRY_CAP)
+}
+
 fn backoff_delay(
     retry: u32,
     response: Option<&reqwest::Response>,
@@ -71,9 +97,10 @@ fn backoff_delay(
     {
         return Duration::from_secs(secs);
     }
-    RETRY_BASE
+    let base = RETRY_BASE
         .saturating_mul(2u32.saturating_pow(retry))
-        .min(RETRY_CAP)
+        .min(RETRY_CAP);
+    apply_jitter(base, jitter_unit())
 }
 
 /// reqwest's Display only says "error sending request"; the real cause (DNS/certificate/proxy/connection refused)
@@ -115,12 +142,20 @@ pub(crate) fn send_error(error: reqwest::Error) -> CoreError {
     }
 }
 
-/// Streaming requests cannot set an overall timeout (the response body may not end for a long time); only the connect time is limited.
+/// Streaming requests cannot set an overall timeout (the response body may not end for a long time);
+/// only the connect time is limited. A process-wide client is shared so TCP/TLS/HTTP2 connection
+/// pools are reused across turns and sidecar calls instead of re-handshaking on every step.
 pub(crate) fn http_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(15))
-        .build()
-        .unwrap_or_default()
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(15))
+                .pool_idle_timeout(Duration::from_secs(90))
+                .build()
+                .unwrap_or_default()
+        })
+        .clone()
 }
 
 /// Shared retry driver for streams and one-shots. Every accepted retry is
@@ -407,5 +442,24 @@ mod tests {
             send_error(builder_error),
             CoreError::Internal { .. }
         ));
+    }
+
+    #[test]
+    fn backoff_jitter_stays_within_bounds_and_varies() {
+        assert_eq!(apply_jitter(Duration::from_secs(1), 0.0), Duration::from_millis(750));
+        assert_eq!(apply_jitter(Duration::from_secs(1), 0.5), Duration::from_millis(1000));
+        assert_eq!(apply_jitter(Duration::from_secs(1), 1.0), Duration::from_millis(1250));
+        assert_eq!(apply_jitter(RETRY_CAP, 1.0), RETRY_CAP);
+
+        let mut samples = std::collections::HashSet::new();
+        for _ in 0..32 {
+            let delay = backoff_delay(0, None, STREAM_RETRY_POLICY);
+            assert!(
+                (Duration::from_millis(750)..=Duration::from_millis(1250)).contains(&delay),
+                "jittered retry 0 delay out of range: {delay:?}"
+            );
+            samples.insert(delay.as_millis());
+        }
+        assert!(samples.len() > 1, "jitter should spread concurrent retries");
     }
 }

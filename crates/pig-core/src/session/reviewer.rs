@@ -154,6 +154,158 @@ impl ApprovalReviewer for PolicyApprovalReviewer {
     }
 }
 
+/// Read-only, tool-free LLM approval reviewer (aligned with Codex Guardian /
+/// DeepSeek Harness auto-review).
+///
+/// Structural invariants:
+/// - Invokes `pig_provider::complete_text` with zero tools and no side effects,
+///   making recursive approvals or tool execution impossible.
+/// - Never overrides `ApprovalPolicy::Never`.
+/// - High-risk verdicts or requests carrying a `danger_key` are never
+///   auto-allowed: they downgrade to `DeferToUser` so a human decides.
+/// - Unparseable responses, missing models, or provider errors defer/error cleanly
+///   so `FallbackApprovalReviewer` escalates to the user.
+pub(crate) struct AgentApprovalReviewer {
+    resolve_model: Arc<dyn Fn() -> Option<pig_provider::ResolvedModel> + Send + Sync>,
+}
+
+#[derive(serde::Deserialize)]
+struct AgentReviewVerdict {
+    decision: String,
+    #[serde(default)]
+    risk: String,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+impl AgentApprovalReviewer {
+    pub(crate) fn new(
+        resolve_model: Arc<dyn Fn() -> Option<pig_provider::ResolvedModel> + Send + Sync>,
+    ) -> Self {
+        Self { resolve_model }
+    }
+
+    fn review_schema() -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "decision": { "type": "string", "enum": ["allow", "deny", "defer"] },
+                "risk": { "type": "string", "enum": ["low", "medium", "high"] },
+                "reason": { "type": "string" }
+            },
+            "required": ["decision", "risk", "reason"],
+            "additionalProperties": false
+        })
+    }
+
+    fn build_prompt(request: &ApprovalRequest) -> String {
+        let payload = serde_json::json!({
+            "session_id": request.session_id,
+            "agent_id": request.agent_id,
+            "tool": request.tool,
+            "detail": request.detail,
+            "action": request.action,
+            "cwd": request.cwd.display().to_string(),
+            "sandbox_mode": format!("{:?}", request.permissions.sandbox.mode),
+            "danger_key": request.danger_key,
+            "requested_write_roots": request.requested_write_roots,
+        });
+        format!(
+            "You are a strict, read-only security approval reviewer for a coding agent.\n\
+             You have NO tools and cannot run commands. Evaluate whether the requested action is safe.\n\
+             Rules:\n\
+             - Return ONLY a JSON object: {{\"decision\":\"allow\"|\"deny\"|\"defer\",\"risk\":\"low\"|\"medium\"|\"high\",\"reason\":\"...\"}}\n\
+             - Choose \"deny\" for data exfiltration, credential theft, destructive operations, or unauthorized scope widening.\n\
+             - Choose \"defer\" whenever uncertain or when human confirmation is appropriate.\n\
+             - Choose \"allow\" only for clearly safe, scoped low/medium-risk actions.\n\n\
+             Request:\n{}",
+            serde_json::to_string_pretty(&payload).unwrap_or_default()
+        )
+    }
+
+    fn parse_verdict(raw: &str, request: &ApprovalRequest) -> ApprovalReply {
+        let trimmed = raw.trim();
+        let cleaned = trimmed
+            .strip_prefix("```json")
+            .or_else(|| trimmed.strip_prefix("```"))
+            .and_then(|s| s.strip_suffix("```"))
+            .unwrap_or(trimmed)
+            .trim();
+        let Ok(verdict) = serde_json::from_str::<AgentReviewVerdict>(cleaned) else {
+            return ApprovalReply {
+                decision: ApprovalDecision::DeferToUser,
+                feedback: None,
+            };
+        };
+        let decision = verdict.decision.trim().to_ascii_lowercase();
+        let risk = verdict.risk.trim().to_ascii_lowercase();
+        let reason = verdict
+            .reason
+            .map(|r| r.trim().to_string())
+            .filter(|r| !r.is_empty());
+        match decision.as_str() {
+            "allow" => {
+                // High-risk assessments and destructive commands always require human review.
+                if risk == "high" || request.danger_key.is_some() {
+                    ApprovalReply {
+                        decision: ApprovalDecision::DeferToUser,
+                        feedback: reason,
+                    }
+                } else {
+                    ApprovalReply {
+                        decision: ApprovalDecision::Allow,
+                        feedback: reason,
+                    }
+                }
+            }
+            "deny" | "reject" => ApprovalReply {
+                decision: ApprovalDecision::Reject,
+                feedback: reason.or_else(|| Some("Denied by automated review agent.".to_string())),
+            },
+            _ => ApprovalReply {
+                decision: ApprovalDecision::DeferToUser,
+                feedback: reason,
+            },
+        }
+    }
+}
+
+impl ApprovalReviewer for AgentApprovalReviewer {
+    fn review(
+        &self,
+        request: ApprovalRequest,
+        _events: async_channel::Sender<Event>,
+    ) -> BoxFuture<'_, Result<ApprovalReply, ApprovalReviewError>> {
+        let resolve_model = self.resolve_model.clone();
+        Box::pin(async move {
+            if request.permissions.approval == pig_protocol::ApprovalPolicy::Never {
+                return Ok(ApprovalReply {
+                    decision: ApprovalDecision::Reject,
+                    feedback: Some("Approval policy forbids automated allowance.".to_string()),
+                });
+            }
+            let Some(mut model) = (resolve_model)() else {
+                return Err(ApprovalReviewError {
+                    detail: "no model configured for automated approval reviewer".to_string(),
+                });
+            };
+            model.max_output_tokens = model.max_output_tokens.min(512);
+            let prompt = Self::build_prompt(&request);
+            let structured = model.cap_structured.then(|| pig_provider::StructuredOutput {
+                name: "approval_review_verdict",
+                schema: Self::review_schema(),
+            });
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let call = pig_provider::complete_text(&model, prompt, structured, &cancel)
+                .await
+                .map_err(|err| ApprovalReviewError {
+                    detail: pig_provider::core_error_en(&err.error),
+                })?;
+            Ok(Self::parse_verdict(&call.text, &request))
+        })
+    }
+}
+
 pub(crate) struct FallbackApprovalReviewer {
     primary: Arc<dyn ApprovalReviewer>,
     fallback: Arc<dyn ApprovalReviewer>,
@@ -323,5 +475,142 @@ mod tests {
         super::super::resolve_approval(&pending, &request_id, ApprovalDecision::Allow, None);
         let reply = review.await.expect("review task").expect("fallback reply");
         assert_eq!(reply.decision, ApprovalDecision::Allow);
+    }
+
+    async fn start_review_mock_server(
+        reply_content: &'static str,
+    ) -> (
+        String,
+        Arc<std::sync::Mutex<Option<String>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        let captured_clone = captured.clone();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut buf = vec![0u8; 16 * 1024];
+            let n = socket.read(&mut buf).await.unwrap_or(0);
+            let raw = String::from_utf8_lossy(&buf[..n]).to_string();
+            *captured_clone.lock().unwrap() = Some(raw);
+            let body = serde_json::json!({
+                "id": "review-1",
+                "choices": [{
+                    "message": { "role": "assistant", "content": reply_content }
+                }]
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+            let _ = socket.shutdown().await;
+        });
+        (format!("http://{addr}/v1"), captured, server)
+    }
+
+    fn review_model(base_url: String) -> pig_provider::ResolvedModel {
+        pig_provider::ResolvedModel {
+            base_url,
+            api_key: "test-key".into(),
+            model: "review-model".into(),
+            context_window: 32_000,
+            max_output_tokens: 1_024,
+            api_format: pig_protocol::ApiFormat::OpenAiChat,
+            reasoning_params: None,
+            cap_structured: true,
+            cap_strict_tools: false,
+            cap_web_search: false,
+            web_search_tool: None,
+            input_image: false,
+            input_pdf: false,
+            anthropic_cache_control: false,
+            replay_native_search: false,
+            prompt_cache_key: None,
+            provider_name: "mock".into(),
+            tool_settings: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_reviewer_allows_low_risk_action_without_exposing_tools() {
+        let (base_url, captured, server) = start_review_mock_server(
+            r#"{"decision":"allow","risk":"low","reason":"Scoped workspace write"}"#,
+        )
+        .await;
+        let model = review_model(base_url);
+        let reviewer = AgentApprovalReviewer::new(Arc::new(move || Some(model.clone())));
+        let (events, _rx) = async_channel::unbounded();
+        let reply = reviewer
+            .review(request(), events)
+            .await
+            .expect("agent review reply");
+        server.await.expect("server");
+        assert_eq!(reply.decision, ApprovalDecision::Allow);
+        let raw_request = captured.lock().unwrap().clone().expect("captured request");
+        assert!(
+            !raw_request.contains("\"tools\""),
+            "read-only agent reviewer must never send tools: {raw_request}"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_reviewer_downgrades_high_risk_allow_to_user_fallback() {
+        let (base_url, _captured, server) = start_review_mock_server(
+            r#"{"decision":"allow","risk":"high","reason":"Risky command"}"#,
+        )
+        .await;
+        let model = review_model(base_url);
+        let pending = PendingApprovals::default();
+        let reviewer = FallbackApprovalReviewer::new(
+            Arc::new(AgentApprovalReviewer::new(Arc::new(move || Some(model.clone())))),
+            Arc::new(UserApprovalReviewer::new(pending.clone())),
+            std::time::Duration::from_secs(5),
+        );
+        let (events, receiver) = async_channel::unbounded();
+        let task = tokio::spawn(async move { reviewer.review(request(), events).await });
+        let Event::ApprovalRequested { request_id, .. } =
+            receiver.recv().await.expect("high risk must defer to user")
+        else {
+            panic!("expected ApprovalRequested fallback");
+        };
+        super::super::resolve_approval(&pending, &request_id, ApprovalDecision::Reject, None);
+        let reply = task.await.expect("task").expect("reply");
+        server.await.expect("server");
+        assert_eq!(reply.decision, ApprovalDecision::Reject);
+    }
+
+    #[tokio::test]
+    async fn agent_reviewer_rejects_deny_verdict_and_never_policy() {
+        let (base_url, _captured, server) = start_review_mock_server(
+            r#"{"decision":"deny","risk":"medium","reason":"Outside scope"}"#,
+        )
+        .await;
+        let model = review_model(base_url);
+        let reviewer = AgentApprovalReviewer::new(Arc::new(move || Some(model.clone())));
+        let (events, _rx) = async_channel::unbounded();
+        let reply = reviewer
+            .review(request(), events.clone())
+            .await
+            .expect("deny reply");
+        server.await.expect("server");
+        assert_eq!(reply.decision, ApprovalDecision::Reject);
+        assert_eq!(reply.feedback.as_deref(), Some("Outside scope"));
+
+        let mut never_req = request();
+        never_req.permissions.approval = pig_protocol::ApprovalPolicy::Never;
+        let never_reviewer = AgentApprovalReviewer::new(Arc::new(|| None));
+        let reply = never_reviewer
+            .review(never_req, events)
+            .await
+            .expect("never policy reply");
+        assert_eq!(reply.decision, ApprovalDecision::Reject);
     }
 }

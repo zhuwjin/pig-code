@@ -298,6 +298,7 @@ pub(crate) fn mode_line(permissions: PermissionSettings) -> String {
             let reviewer = match permissions.reviewer {
                 ApprovalsReviewer::User => "the user",
                 ApprovalsReviewer::Policy => "a fixed policy",
+                ApprovalsReviewer::Agent => "an automated review agent",
             };
             format!(
                 "Current permissions: sandbox {sandbox}, approval {approval}, reviewer {reviewer}. \

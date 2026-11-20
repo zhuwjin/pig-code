@@ -180,6 +180,16 @@ pub struct AgentBackendRegistry {
 }
 
 impl AgentBackendRegistry {
+    /// Production backend registry containing both in-process (`local`) and
+    /// cross-process worker (`ipc`) backends.
+    pub fn with_default() -> Self {
+        let registry = Self::with_local();
+        registry
+            .register("ipc", crate::agent::ipc::ManagedIpcAgentBackendFactory::default())
+            .expect("the ipc backend is registered once");
+        registry
+    }
+
     pub fn with_local() -> Self {
         let registry = Self::default();
         registry
@@ -210,6 +220,7 @@ impl AgentBackendRegistry {
 
     pub(crate) fn attach_scheduler(&self, scheduler: Arc<super::AgentScheduler>) {
         scheduler.configure_backend("local", super::MAX_CONCURRENT_AGENT_RUNS);
+        scheduler.configure_backend("ipc", super::MAX_CONCURRENT_AGENT_RUNS);
         *self
             .scheduler
             .write()
@@ -562,5 +573,20 @@ mod tests {
         assert_eq!(scheduler.available(), capacity - 1);
         handle.release().await.expect("release handle");
         assert_eq!(scheduler.available(), capacity);
+    }
+
+    #[test]
+    fn default_registry_registers_local_and_production_ipc_backends() {
+        let registry = AgentBackendRegistry::with_default();
+        let local_caps = registry
+            .capabilities("local")
+            .expect("local backend registered");
+        assert!(local_caps.contains(&AgentExecutionCapability::Background));
+        let ipc_caps = registry
+            .capabilities("ipc")
+            .expect("ipc backend registered in production default registry");
+        assert!(ipc_caps.contains(&AgentExecutionCapability::Reconnect));
+        assert!(ipc_caps.contains(&AgentExecutionCapability::Steer));
+        assert!(ipc_caps.contains(&AgentExecutionCapability::Stop));
     }
 }

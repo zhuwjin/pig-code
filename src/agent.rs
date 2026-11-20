@@ -96,6 +96,9 @@ default_reasoning_level = "low"
             let data_dir = pig_utils::data_dir();
             (pig_core::spawn_agent(None, cwd.clone()), None, data_dir)
         };
+        // The native UI consumes the ordered EventJournal exclusively; closing
+        // the legacy raw receiver avoids buffering or cloning duplicate events.
+        handle.events.close();
         for op in [Op::ListSessions, Op::ListWorkspaces, Op::GetConfig] {
             let _ = handle.ops.try_send(op);
         }
@@ -143,6 +146,12 @@ default_reasoning_level = "low"
             "gpu": sample.gpu,
         })
         .to_string()
+    }
+
+    /// Cross-platform OS sandbox status (`enabled`, `supported`, `backend`, `detail`).
+    pub fn sandbox_status(&self) -> String {
+        let status = pig_core::task::platform_sandbox_status();
+        serde_json::to_string(&status).unwrap_or_else(|_| "{}".to_string())
     }
 
     /// Chooses a workspace directory with the system's folder picker.
@@ -754,13 +763,17 @@ mod tests {
         let (agent, root, session_id) = session_journal_fixture("expired").await;
         let journal = agent.journal.clone();
         while journal.try_recv().is_ok() {}
-        let raw_events = agent.events.clone();
-        let raw_drain = tokio::spawn(async move { while raw_events.recv().await.is_ok() {} });
+        let start_cursor = journal.snapshot().cursor;
+        let target_cursor = start_cursor + 1_100;
         let draining_journal = journal.clone();
         let drain = tokio::spawn(async move {
             let mut latest = None;
-            for _ in 0..1_100 {
-                latest = Some(draining_journal.recv().await.expect("journal event"));
+            while let Ok(event) = draining_journal.recv().await {
+                let seq = event.sequence;
+                latest = Some(event);
+                if seq >= target_cursor {
+                    break;
+                }
             }
             latest
         });
@@ -797,7 +810,6 @@ mod tests {
         );
         assert!(output.is_empty());
         agent.close().await.expect("close journal fixture");
-        raw_drain.await.expect("raw event drain");
         let _ = std::fs::remove_dir_all(root);
     }
 }

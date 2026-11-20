@@ -51,6 +51,10 @@ const HOME_RUNTIME_READ_ROOTS: &[&str] = &[
     "go/pkg/mod",
 ];
 
+pub(crate) fn is_available() -> bool {
+    Path::new(SANDBOX_EXEC).is_file()
+}
+
 pub(crate) fn prepare_command(
     command: SandboxCommand,
     policy: &ResolvedPolicy,
@@ -59,6 +63,15 @@ pub(crate) fn prepare_command(
     // building a policy for Full mode.
     if policy.kind == SandboxKind::Unrestricted {
         return Ok(command);
+    }
+    if !is_available() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            format!(
+                "command cannot be sandboxed: {SANDBOX_EXEC} is unavailable on this host. Set \
+                 `[sandbox] enabled = false` in user config to run without an OS sandbox."
+            ),
+        ));
     }
     let mut definitions = Vec::new();
     let mut sections = vec![BASE_POLICY.to_string()];

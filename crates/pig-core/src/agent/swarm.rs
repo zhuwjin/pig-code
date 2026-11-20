@@ -585,6 +585,24 @@ mod tests {
         )
         .expect("resume worktree");
         assert_eq!(resumed.cwd, worktree);
+        drop(resumed);
+
+        // Cleaning up session worktrees must unregister from `.git/worktrees` instead of leaving orphans.
+        let session_worktrees = tmp.0.join("worktrees").join(ctx.session_id);
+        remove_session_worktrees(&session_worktrees).expect("clean up session worktrees");
+        assert!(!worktree.exists(), "worktree directory must be removed");
+        let git_worktrees = workspace.join(".git").join("worktrees");
+        let remaining = if git_worktrees.exists() {
+            std::fs::read_dir(&git_worktrees)
+                .expect("read .git/worktrees")
+                .count()
+        } else {
+            0
+        };
+        assert_eq!(
+            remaining, 0,
+            "git worktree admin entries must be pruned on cleanup"
+        );
     }
 
     #[test]

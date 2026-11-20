@@ -47,6 +47,12 @@ impl ProjectSandboxLayer {
     pub fn parse(root: &toml::Value, workspace: &Path) -> Self {
         let mut entries: BTreeMap<String, SandboxFsPermission> = BTreeMap::new();
         if let Some(table) = root.get("sandbox").and_then(toml::Value::as_table) {
+            if table.contains_key("enabled") {
+                tracing::warn!(
+                    "ignoring `[sandbox] enabled` from a project config: enabling or disabling \
+                     the OS sandbox is a machine-level decision"
+                );
+            }
             if table.contains_key("deny") {
                 tracing::warn!(
                     "ignoring `[[sandbox.deny]]` from a project config: the sensitive-file \

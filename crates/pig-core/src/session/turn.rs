@@ -845,7 +845,7 @@ impl Session {
                 &rules,
                 &self.state,
                 &self.agent.cwd,
-                self.hooks.is_active(),
+                &self.hooks,
             )
         };
         let mut next_ix = 0usize;
@@ -2159,18 +2159,29 @@ fn parallel_safe(
     permission_rules: &crate::permissions::PermissionRules,
     state: &crate::task::SessionToolState,
     cwd: &std::path::Path,
-    hooks_active: bool,
+    hooks: &crate::hooks::HookSet,
 ) -> bool {
     if PARALLEL_EXCLUDED.contains(&call.name.as_str()) || call.name == "TaskWait" {
         return false;
     }
-    // Lifecycle hooks are user shell commands with ordering semantics; the
-    // serial gate owns their PreToolUse/PermissionRequest/PostToolUse chains
-    // (a hook may rewrite the input or block, changing what executes). Until
-    // the parallel dispatcher can run the same preflight, any active hook set
-    // forces the serial path — hooks are always observed, never skipped.
-    if hooks_active {
+    // Only serialize a call when a runnable tool-lifecycle hook actually matches
+    // this tool. Session/turn-level hooks or hooks targeting other tools must
+    // not collapse unrelated read-only calls into serial execution.
+    if hooks.matches_tool(&call.name) {
         return false;
+    }
+    // FetchURL checks sandbox network block and user deny rules through the
+    // serial gate whenever either policy would reject it.
+    if call.name == "FetchURL" {
+        if permissions.sandbox.mode != pig_protocol::SandboxMode::DangerFullAccess
+            && crate::task::network_blocked_for(state)
+        {
+            return false;
+        }
+        let subject = tool::approval_subject(call);
+        if permission_rules.deny_hit(&call.name, &subject).is_some() {
+            return false;
+        }
     }
     // An out-of-workspace WRITE needs the approval popup — only the serial gate
     // can request one, so such calls are sync points. Reads are never gated,
@@ -2205,8 +2216,8 @@ fn parallel_safe(
 
 /// Slices one step's tool_calls into a parallel-segment mask: true = may join
 /// a parallel read-only group; false = sync point (writes/shell/needs
-/// approval/session-layer interception/unknown tool/MCP deny hit/hooks
-/// active), executed serially on its own after the preceding group drains.
+/// approval/session-layer interception/unknown tool/deny hit/matching tool hook),
+/// executed serially on its own after the preceding group drains.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn parallel_mask(
     calls: &[ToolCall],
@@ -2216,7 +2227,7 @@ pub(super) fn parallel_mask(
     permission_rules: &crate::permissions::PermissionRules,
     state: &crate::task::SessionToolState,
     cwd: &std::path::Path,
-    hooks_active: bool,
+    hooks: &crate::hooks::HookSet,
 ) -> Vec<bool> {
     calls
         .iter()
@@ -2229,7 +2240,7 @@ pub(super) fn parallel_mask(
                 permission_rules,
                 state,
                 cwd,
-                hooks_active,
+                hooks,
             )
         })
         .collect()
@@ -2280,6 +2291,7 @@ mod tests {
             crate::task::SessionToolState::new("mask-out".to_string(), task_notify, vec![], vec![]);
         let tools = tool::all();
         let rules = crate::permissions::PermissionRules::default();
+        let empty_hooks = crate::hooks::HookSet::empty();
         let call = |name: &str, path: &str| ToolCall {
             id: "c1".to_string(),
             name: name.to_string(),
@@ -2294,7 +2306,7 @@ mod tests {
                 &rules,
                 &state,
                 &ws,
-                false,
+                &empty_hooks,
             ),
             "an outside WRITE must fall to the serial gate for its approval"
         );
@@ -2307,9 +2319,78 @@ mod tests {
                 &rules,
                 &state,
                 &ws,
-                false,
+                &empty_hooks,
             ),
             "an inside read stays parallel-eligible"
+        );
+    }
+
+    #[test]
+    fn hooks_only_serialize_tools_matching_a_tool_hook() {
+        let mut config = pig_protocol::AppConfig::default();
+        config.hooks.enabled = true;
+        config.hooks.stop.push(pig_protocol::HookEntry {
+            kind: pig_protocol::HookKind::Command,
+            command: "true".into(),
+            args: vec![],
+            shell: pig_protocol::HookShell::Auto,
+            matcher: None,
+            timeout_ms: None,
+            r#async: false,
+            enabled: true,
+            status_message: None,
+            source: None,
+            custom: Default::default(),
+        });
+        config.hooks.pre_tool_use.push(pig_protocol::HookEntry {
+            kind: pig_protocol::HookKind::Command,
+            command: "true".into(),
+            args: vec![],
+            shell: pig_protocol::HookShell::Auto,
+            matcher: Some("ExecCommand|FetchURL".into()),
+            timeout_ms: None,
+            r#async: false,
+            enabled: true,
+            status_message: None,
+            source: None,
+            custom: Default::default(),
+        });
+        let ws = std::env::temp_dir();
+        let hooks = crate::hooks::HookSet::load(&ws, Some(&config));
+        let tools = tool::all();
+        let rules = crate::permissions::PermissionRules::default();
+        let state = crate::task::SessionToolState::for_test();
+        let calls = vec![
+            ToolCall {
+                id: "1".into(),
+                name: "Read".into(),
+                arguments: r#"{"path":"a.txt"}"#.into(),
+            },
+            ToolCall {
+                id: "2".into(),
+                name: "Grep".into(),
+                arguments: r#"{"pattern":"x"}"#.into(),
+            },
+            ToolCall {
+                id: "3".into(),
+                name: "FetchURL".into(),
+                arguments: r#"{"url":"https://example.com"}"#.into(),
+            },
+        ];
+        let mask = parallel_mask(
+            &calls,
+            &tools,
+            ExecMode::Auto.permissions(),
+            tool::MediaCapabilities::new(true, false),
+            &rules,
+            &state,
+            &ws,
+            &hooks,
+        );
+        assert_eq!(
+            mask,
+            vec![true, true, false],
+            "unmatched read-only tools stay parallel while matched FetchURL serializes"
         );
     }
 
@@ -2354,7 +2435,7 @@ mod tests {
             &permissions,
             &state,
             std::path::Path::new("/ws"),
-            false,
+            &crate::hooks::HookSet::empty(),
         )
     }
 

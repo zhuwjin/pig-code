@@ -506,6 +506,22 @@ mod layering_tests {
         assert!(layer.is_empty(), "the project layer must not carry it");
     }
 
+    /// Enabling or disabling OS sandboxing is a machine-level decision: a
+    /// project config can never set `[sandbox] enabled = false`.
+    #[test]
+    fn a_project_layer_cannot_disable_the_os_sandbox() {
+        let fixture = Fixture::new("sandbox-enabled");
+        fixture.write_user(&fixture.trusted_user("[sandbox]\nenabled = true\n"));
+        fixture.write_project("[sandbox]\nenabled = false\n");
+        let config = load(&fixture);
+        assert!(
+            config.sandbox.enabled,
+            "a project config must never disable the OS sandbox"
+        );
+        let layer = project_sandbox_layer(&fixture.workspace, /*trusted*/ true);
+        assert!(layer.is_empty());
+    }
+
     /// The trust decision is canonical and bound to one workspace; a token for
     /// another root (or even a similar-looking path) admits nothing.
     #[test]

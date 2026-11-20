@@ -58,8 +58,8 @@ mod turn;
 mod usage;
 
 pub(crate) use reviewer::{
-    ApprovalReply, ApprovalRequest, ApprovalReviewer, FallbackApprovalReviewer,
-    PolicyApprovalReviewer, UserApprovalReviewer,
+    AgentApprovalReviewer, ApprovalReply, ApprovalRequest, ApprovalReviewer,
+    FallbackApprovalReviewer, PolicyApprovalReviewer, UserApprovalReviewer,
 };
 use run_state::SessionRunState;
 

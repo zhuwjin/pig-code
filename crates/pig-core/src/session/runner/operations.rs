@@ -874,15 +874,18 @@ pub(super) fn delete_session_artifacts(
             "Invalid session id for artifact cleanup: {session_id}"
         ));
     }
-    let mut directories = vec![
+    let directories = vec![
         sessions_dir.join(session_id).join("tool-results"),
         pig_utils::paths::media_dir(sessions_dir, session_id),
         crate::agent::agents_dir(sessions_dir, session_id),
     ];
-    if let Some(data_dir) = sessions_dir.parent() {
-        directories.push(data_dir.join("worktrees").join(session_id));
-    }
     let mut failures = Vec::new();
+    if let Some(data_dir) = sessions_dir.parent() {
+        let worktrees = data_dir.join("worktrees").join(session_id);
+        if let Err(error) = crate::agent::remove_session_worktrees(&worktrees) {
+            failures.push(error);
+        }
+    }
     for path in directories {
         if let Err(error) = std::fs::remove_dir_all(&path)
             && error.kind() != std::io::ErrorKind::NotFound

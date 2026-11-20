@@ -52,7 +52,11 @@ async fn retry_notice_emitted_and_retry_now_skips_wait() {
     };
     assert_eq!(notice.attempt, 1);
     assert_eq!(notice.max_attempts, 10);
-    assert_eq!(notice.delay, Duration::from_secs(1));
+    assert!(
+        (Duration::from_millis(750)..=Duration::from_millis(1250)).contains(&notice.delay),
+        "expected jittered ~1s backoff, got {:?}",
+        notice.delay
+    );
     assert_eq!(notice.reason, RetryReason::Server(500));
 
     // Skipping the wait is proven deterministically by the paused-clock unit

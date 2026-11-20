@@ -46,12 +46,7 @@ fn test_dir(name: &str) -> PathBuf {
 
 #[allow(dead_code)]
 pub fn native_sandbox_usable() -> bool {
-    #[cfg(windows)]
-    {
-        return pig_core::task::sandbox_readiness().usable();
-    }
-    #[cfg(not(windows))]
-    true
+    pig_core::task::platform_sandbox_status().supported
 }
 
 #[allow(dead_code)]

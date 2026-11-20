@@ -63,8 +63,7 @@ fn with_plugin_providers(
 /// The workspace's own layer is not part of this: it is per workspace and lives
 /// on the session state, applied on top at launch time.
 pub(super) fn install_sandbox_settings(config: &AppConfig) {
-    #[cfg(target_os = "windows")]
-    crate::task::init_windows_sandbox_network(matches!(
+    crate::task::init_sandbox_network(matches!(
         config.windows.sandbox_network,
         pig_protocol::WindowsSandboxNetworkChoice::Block
     ));

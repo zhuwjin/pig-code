@@ -32,10 +32,12 @@ import {
   PluginMarketplacePreview,
   PluginMarketplaceSource,
   PluginRuntimeState,
+  PlatformSandboxStatus,
   ProcessSample,
   ProjectHooksNotice,
   RetryStatus,
   RightPanelRequest,
+  SandboxConfig,
   ProviderConfig,
   ProviderCredentialStatus,
   QueueItem,
@@ -861,6 +863,28 @@ export class AgentStore {
   saveDeveloperOptions(options: Partial<DeveloperConfig>): void {
     const config = this.config();
     if (config) this.saveConfig({ ...config, developer: { ...config.developer, ...options } });
+  }
+
+  saveSandboxOptions(options: Partial<SandboxConfig>): void {
+    const config = this.config();
+    if (config) this.saveConfig({ ...config, sandbox: { ...config.sandbox, ...options } });
+  }
+
+  sandboxStatus(): PlatformSandboxStatus | null {
+    try {
+      const parsed = JSON.parse(this.agent.sandboxStatus()) as Partial<PlatformSandboxStatus>;
+      if (typeof parsed.supported === "boolean" && typeof parsed.backend === "string") {
+        return {
+          enabled: parsed.enabled ?? true,
+          supported: parsed.supported,
+          backend: parsed.backend,
+          detail: parsed.detail ?? null,
+        };
+      }
+      return null;
+    } catch {
+      return null;
+    }
   }
 
   processSample(): ProcessSample {

@@ -130,6 +130,19 @@ pub struct HookSet {
 }
 
 impl HookSet {
+    pub fn empty() -> Self {
+        Self {
+            enabled: false,
+            timeout_ms: 60_000,
+            max_output_bytes: 16 * 1024,
+            entries: vec![Vec::new(); HOOK_EVENTS.len()],
+            project_root: None,
+            project_count: 0,
+            project_trusted: false,
+            plugins: None,
+        }
+    }
+
     pub fn load(cwd: &Path, app_config: Option<&AppConfig>) -> Self {
         let user = app_config.map(|c| c.hooks.clone()).unwrap_or_default();
         let mut set = Self {
@@ -288,6 +301,30 @@ impl HookSet {
     /// persisted trusted_projects list is the runner's business
     pub fn trust_project(&mut self) {
         self.project_trusted = true;
+    }
+
+    /// Whether any runnable tool-lifecycle hook (`PreToolUse`, `PermissionRequest`,
+    /// `PostToolUse`, `PostToolUseFailure`) matches `tool_name`.
+    ///
+    /// Session/turn-level hooks (`SessionStart`, `UserPromptSubmit`, `Stop`) or
+    /// tool hooks whose matcher targets other tools do not force unrelated
+    /// read-only tools onto the serial path.
+    pub fn matches_tool(&self, tool_name: &str) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        [
+            HookEvent::PreToolUse,
+            HookEvent::PermissionRequest,
+            HookEvent::PostToolUse,
+            HookEvent::PostToolUseFailure,
+        ]
+        .into_iter()
+        .any(|event| {
+            self.runnable(event)
+                .into_iter()
+                .any(|entry| matcher_matches(entry.matcher.as_deref(), Some(tool_name)))
+        })
     }
 
     /// Global timeout/max-output knobs for the runner (entry overrides apply

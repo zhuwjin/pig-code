@@ -1288,6 +1288,177 @@ impl super::AgentBackendFactory for IpcAgentBackendFactory {
     }
 }
 
+struct ManagedIpcWorker {
+    address: SocketAddr,
+    child: tokio::process::Child,
+}
+
+impl Drop for ManagedIpcWorker {
+    fn drop(&mut self) {
+        let _ = self.child.start_kill();
+    }
+}
+
+/// Production IPC backend factory registered by default under `"ipc"`.
+/// Connects to `PIG_AGENT_WORKER_ADDR` if configured, or lazily launches the
+/// sibling `pig-agent-worker` executable on loopback and reuses it across runs.
+#[derive(Clone, Default)]
+pub struct ManagedIpcAgentBackendFactory {
+    worker: Arc<tokio::sync::Mutex<Option<ManagedIpcWorker>>>,
+}
+
+impl ManagedIpcAgentBackendFactory {
+    fn worker_binary() -> Result<PathBuf, AgentBackendError> {
+        let exe = std::env::current_exe().map_err(|error| {
+            AgentBackendError::Failed(format!("failed to locate current executable: {error}"))
+        })?;
+        let name = if cfg!(windows) {
+            "pig-agent-worker.exe"
+        } else {
+            "pig-agent-worker"
+        };
+        let mut candidates = Vec::new();
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join(name));
+            // Unit/integration test binaries live under `target/debug/deps/`.
+            if let Some(parent) = dir.parent() {
+                candidates.push(parent.join(name));
+            }
+        }
+        for candidate in &candidates {
+            if candidate.is_file() {
+                return Ok(candidate.clone());
+            }
+        }
+        Err(AgentBackendError::Failed(format!(
+            "pig-agent-worker executable not found (checked {})",
+            candidates
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )))
+    }
+
+    async fn resolve_address(&self, data_dir: &std::path::Path) -> Result<SocketAddr, AgentBackendError> {
+        if let Ok(raw) = std::env::var("PIG_AGENT_WORKER_ADDR") {
+            let trimmed = raw.trim();
+            if !trimmed.is_empty() {
+                return trimmed.parse::<SocketAddr>().map_err(|error| {
+                    AgentBackendError::InvalidContext(format!(
+                        "invalid PIG_AGENT_WORKER_ADDR `{trimmed}`: {error}"
+                    ))
+                });
+            }
+        }
+        let mut guard = self.worker.lock().await;
+        if let Some(existing) = guard.as_mut() {
+            match existing.child.try_wait() {
+                Ok(None) => return Ok(existing.address),
+                Ok(Some(_)) | Err(_) => {
+                    *guard = None;
+                }
+            }
+        }
+        let binary = Self::worker_binary()?;
+        let state_dir = data_dir.join("worker-ipc");
+        std::fs::create_dir_all(&state_dir).map_err(|error| {
+            AgentBackendError::Failed(format!(
+                "failed to create IPC worker state directory {}: {error}",
+                state_dir.display()
+            ))
+        })?;
+        let mut command = tokio::process::Command::new(&binary);
+        command
+            .arg("--bind=127.0.0.1:0")
+            .arg(format!("--state-dir={}", state_dir.display()))
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        crate::NoConsoleExt::no_console(&mut command);
+        let mut child = command.spawn().map_err(|error| {
+            AgentBackendError::Failed(format!(
+                "failed to spawn pig-agent-worker {}: {error}",
+                binary.display()
+            ))
+        })?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            AgentBackendError::Failed("pig-agent-worker stdout pipe unavailable".to_string())
+        })?;
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        let read = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            reader.read_line(&mut line),
+        )
+        .await
+        .map_err(|_| {
+            let _ = child.start_kill();
+            AgentBackendError::Failed("timed out waiting for pig-agent-worker address".to_string())
+        })?
+        .map_err(|error| {
+            let _ = child.start_kill();
+            AgentBackendError::Failed(format!("failed reading pig-agent-worker stdout: {error}"))
+        })?;
+        if read == 0 {
+            let _ = child.start_kill();
+            return Err(AgentBackendError::Failed(
+                "pig-agent-worker exited before announcing its listen address".to_string(),
+            ));
+        }
+        let raw_addr = line
+            .trim()
+            .strip_prefix("PIG_AGENT_WORKER_ADDR=")
+            .ok_or_else(|| {
+                let _ = child.start_kill();
+                AgentBackendError::Failed(format!(
+                    "unexpected pig-agent-worker startup banner: {}",
+                    line.trim()
+                ))
+            })?;
+        let address = raw_addr.parse::<SocketAddr>().map_err(|error| {
+            let _ = child.start_kill();
+            AgentBackendError::Failed(format!(
+                "invalid pig-agent-worker listen address `{raw_addr}`: {error}"
+            ))
+        })?;
+        *guard = Some(ManagedIpcWorker { address, child });
+        Ok(address)
+    }
+}
+
+impl super::AgentBackendFactory for ManagedIpcAgentBackendFactory {
+    type Context = IpcRunSpec;
+
+    fn capabilities(&self) -> std::collections::BTreeSet<super::AgentExecutionCapability> {
+        [
+            super::AgentExecutionCapability::Background,
+            super::AgentExecutionCapability::Steer,
+            super::AgentExecutionCapability::Resume,
+            super::AgentExecutionCapability::Reconnect,
+            super::AgentExecutionCapability::Stop,
+            super::AgentExecutionCapability::Detach,
+        ]
+        .into_iter()
+        .collect()
+    }
+
+    fn create(
+        &self,
+        context: Self::Context,
+    ) -> BoxFuture<'static, Result<Box<dyn super::AgentExecutionBackend>, super::AgentBackendError>>
+    {
+        let factory = self.clone();
+        Box::pin(async move {
+            let address = factory.resolve_address(&context.data_dir).await?;
+            Ok(Box::new(IpcAgentExecutionBackend {
+                address,
+                spec: context,
+            }) as Box<dyn super::AgentExecutionBackend>)
+        })
+    }
+}
+
 struct IpcAgentExecutionBackend {
     address: SocketAddr,
     spec: IpcRunSpec,

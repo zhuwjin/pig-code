@@ -95,6 +95,29 @@ test("toggles the developer resource HUD", async () => {
   await app.waitFor("id:fps-meter", { state: "gone" });
 });
 
+test("toggles the OS sandbox switch in developer settings", async () => {
+  const app = await openApp();
+  await app.press("id:settings-open");
+  await app.waitFor("id:settings-navigation");
+  await app.waitFor("id:settings-developer");
+  await app.press("id:settings-developer");
+  await app.waitFor("id:developer-settings");
+  expect(app.texts()).toContain("启用系统沙盒");
+
+  await app.waitUntil(() => app.enabled("id:developer-sandbox-enabled"), { timeout: 10000 });
+  await app.press("id:developer-sandbox-enabled");
+  await app.waitUntil(
+    () => app.texts().includes("已显式关闭系统沙盒——命令将不经操作系统沙盒隔离运行。"),
+    { timeout: 10000 },
+  );
+
+  await app.press("id:developer-sandbox-enabled");
+  await app.waitUntil(
+    () => !app.texts().includes("已显式关闭系统沙盒——命令将不经操作系统沙盒隔离运行。"),
+    { timeout: 10000 },
+  );
+});
+
 test("creates, edits and deletes providers and models through real config", async () => {
   const app = await openApp();
   await app.press("id:settings-open");

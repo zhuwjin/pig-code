@@ -82,6 +82,13 @@
       "show_fps": {
         "label": "显示性能 HUD",
         "description": "在窗口角落实时显示本进程的 CPU 和内存占用。"
+      },
+      "sandbox": {
+        "label": "启用系统沙盒",
+        "description": "使用操作系统沙盒隔离模型执行的命令。启用后若当前主机不支持，将拒绝执行而非静默降级。",
+        "status_ready": "当前主机支持（{backend}）",
+        "status_unsupported": "当前主机不支持（{backend}）——开启期间将拒绝执行沙盒命令。",
+        "status_disabled": "已显式关闭系统沙盒——命令将不经操作系统沙盒隔离运行。"
       }
     },
     "appearance": {
@@ -586,6 +593,10 @@
       "dd_block": "可能直接覆写磁盘或块设备",
       "shutdown": "可能关闭或重启计算机",
       "chmod_root": "可能修改系统目录权限",
+      "chmod_world_writable": "可能递归将文件设为全局可写（chmod 777）",
+      "pipe_to_shell": "可能将远程或解码内容直接交给 Shell 执行",
+      "git_force_push": "可能强制推送并覆盖远程 Git 历史",
+      "dynamic_command": "使用了动态 Shell 命令名，无法验证安全性",
       "prefix": "高危命令：{reason}"
     },
     "plan_prompt": "是否按此计划开始实施？",

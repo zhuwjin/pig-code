@@ -46,6 +46,7 @@ pub(crate) use registry::{
 
 pub use sandbox::AdditionalPermissions;
 pub use sandbox::MissingPathBehavior;
+pub use sandbox::PlatformSandboxStatus;
 pub use sandbox::SandboxAccess;
 pub use sandbox::SandboxEntry;
 pub use sandbox::SandboxKind;
@@ -57,8 +58,10 @@ pub use sandbox::SandboxSpecialPath;
 #[cfg(target_os = "windows")]
 pub(crate) use sandbox::helper_main;
 /// User-level sandbox settings: platform-neutral, because the read-deny table is
-/// enforced by every backend (Seatbelt included).
+/// enforced by every backend (Seatbelt, Linux bwrap, and Windows PSEC).
+pub use sandbox::init_sandbox_network;
 pub use sandbox::init_sandbox_settings;
+pub use sandbox::platform_sandbox_status;
 #[cfg(target_os = "windows")]
 pub use sandbox::init_windows_sandbox_network;
 #[cfg(target_os = "windows")]
@@ -67,7 +70,7 @@ pub use sandbox::{
     validate_deny_rule,
 };
 pub(crate) use sandbox::{
-    canonical_root, denial_summary, sandbox_profile_for, session_write_roots,
+    canonical_root, denial_summary, network_blocked_for, sandbox_profile_for, session_write_roots,
     validate_project_filesystem_entry, within as sandbox_within,
 };
 pub(crate) use shell::*;

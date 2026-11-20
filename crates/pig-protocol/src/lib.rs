@@ -66,14 +66,16 @@ pub enum ApprovalPolicy {
 
 /// Who reviews an eligible approval request (Codex's `ApprovalsReviewer`).
 ///
-/// `Policy` uses the deterministic gate policy and falls back to `User` when it
-/// cannot decide, is unavailable, or exceeds the configured review deadline.
+/// `Policy` uses the deterministic gate policy and `Agent` uses a read-only,
+/// tool-free LLM reviewer; both fall back to `User` when they defer, cannot
+/// decide, are unavailable, or exceed the configured review deadline.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalsReviewer {
     #[default]
     User,
     Policy,
+    Agent,
 }
 
 /// Canonical permission state: Codex's three orthogonal axes.

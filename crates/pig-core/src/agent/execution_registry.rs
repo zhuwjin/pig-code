@@ -197,7 +197,14 @@ impl Drop for AgentWriterGuard {
 
 #[derive(Clone)]
 pub(crate) struct AgentExecutionRegistry {
-    nodes: Arc<Mutex<HashMap<String, AgentNode>>>,
+    /// Store-free unit-test fallback ONLY. Whenever `runtime` is attached (all
+    /// production sessions), `AgentRuntime` is the sole authority for agents,
+    /// runs, lineage, closed state, and mailbox; `fallback_nodes` is untouched.
+    fallback_nodes: Arc<Mutex<HashMap<String, AgentNode>>>,
+    /// Ephemeral process-local live partial text per agent (never persisted).
+    partials: Arc<Mutex<HashMap<String, AgentPartial>>>,
+    /// Process-local active-driver supervision set backing `wait_for_idle`.
+    supervised: Arc<Mutex<HashSet<String>>>,
     writers: Arc<Mutex<HashSet<String>>>,
     executions: Arc<tokio::sync::watch::Sender<usize>>,
     session_id: String,
@@ -258,7 +265,7 @@ impl AgentExecutionRegistry {
     pub(crate) fn new(session_id: String) -> Self {
         Self::with_backends(
             session_id,
-            Arc::new(super::AgentBackendRegistry::with_local()),
+            Arc::new(super::AgentBackendRegistry::with_default()),
         )
     }
 
@@ -267,7 +274,9 @@ impl AgentExecutionRegistry {
         backends: Arc<super::AgentBackendRegistry>,
     ) -> Self {
         Self {
-            nodes: Arc::new(Mutex::new(HashMap::new())),
+            fallback_nodes: Arc::new(Mutex::new(HashMap::new())),
+            partials: Arc::new(Mutex::new(HashMap::new())),
+            supervised: Arc::new(Mutex::new(HashSet::new())),
             writers: Arc::new(Mutex::new(HashSet::new())),
             executions: Arc::new(tokio::sync::watch::channel(0).0),
             session_id,
@@ -290,9 +299,130 @@ impl AgentExecutionRegistry {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, AgentNode>> {
-        self.nodes
+        self.fallback_nodes
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn supervise_id(&self, agent_id: &str) {
+        let mut set = self
+            .supervised
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if set.insert(agent_id.to_string()) {
+            self.executions.send_modify(|count| *count += 1);
+        }
+    }
+
+    fn finish_supervision_id(&self, agent_id: &str) {
+        let mut set = self
+            .supervised
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if set.remove(agent_id) {
+            self.executions
+                .send_modify(|count| *count = count.saturating_sub(1));
+        }
+    }
+
+    fn runtime_run_status(status: super::runtime::RuntimeRunStatus) -> AgentRunStatus {
+        match status {
+            super::runtime::RuntimeRunStatus::Queued => AgentRunStatus::Queued,
+            super::runtime::RuntimeRunStatus::Running
+            | super::runtime::RuntimeRunStatus::Stopping => AgentRunStatus::Running,
+            super::runtime::RuntimeRunStatus::Completed => AgentRunStatus::Completed,
+            super::runtime::RuntimeRunStatus::Cancelled => AgentRunStatus::Cancelled,
+            super::runtime::RuntimeRunStatus::Failed => AgentRunStatus::Failed,
+            super::runtime::RuntimeRunStatus::Lost => AgentRunStatus::Lost,
+        }
+    }
+
+    fn project_runtime_nodes(&self, snapshot: super::runtime::RuntimeSnapshotView) -> Vec<AgentNode> {
+        let partials = self
+            .partials
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let supervised = self
+            .supervised
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let mut runs_by_agent: HashMap<String, Vec<super::runtime::RuntimeRun>> = HashMap::new();
+        for run in snapshot.runs {
+            runs_by_agent
+                .entry(run.agent_id.clone())
+                .or_default()
+                .push(run);
+        }
+        let mut mail_by_agent: HashMap<String, AgentMailbox> = HashMap::new();
+        for message in snapshot.mailbox {
+            if message.state == super::runtime::MailboxDeliveryState::Consumed {
+                continue;
+            }
+            if let Ok(steer) = steer_from_runtime_mailbox(message.clone()) {
+                mail_by_agent
+                    .entry(message.target_agent_id)
+                    .or_default()
+                    .restore(steer);
+            }
+        }
+        snapshot
+            .agents
+            .into_iter()
+            .map(|agent| {
+                let mut runs = runs_by_agent.remove(&agent.agent_id).unwrap_or_default();
+                runs.sort_by(|a, b| {
+                    a.started_at_ms
+                        .cmp(&b.started_at_ms)
+                        .then_with(|| a.run_id.cmp(&b.run_id))
+                });
+                let latest = runs.pop();
+                let current_run = latest.as_ref().map(|run| {
+                    AgentRunState::new(
+                        run.run_id.clone(),
+                        Self::runtime_run_status(run.status),
+                        agent.parent_agent_id.clone(),
+                        agent.depth,
+                    )
+                });
+                let run_history = runs
+                    .into_iter()
+                    .map(|run| {
+                        AgentRunState::new(
+                            run.run_id,
+                            Self::runtime_run_status(run.status),
+                            agent.parent_agent_id.clone(),
+                            agent.depth,
+                        )
+                    })
+                    .collect();
+                let lifecycle = if agent.closed_at_ms.is_some() {
+                    AgentLifecycle::Closed
+                } else {
+                    match latest.as_ref().map(|r| r.status) {
+                        Some(super::runtime::RuntimeRunStatus::Queued) => AgentLifecycle::Queued,
+                        Some(
+                            super::runtime::RuntimeRunStatus::Running
+                            | super::runtime::RuntimeRunStatus::Stopping,
+                        ) => AgentLifecycle::Running,
+                        Some(super::runtime::RuntimeRunStatus::Lost) => AgentLifecycle::Lost,
+                        _ => AgentLifecycle::Idle,
+                    }
+                };
+                AgentNode {
+                    partial: partials.get(&agent.agent_id).cloned(),
+                    supervised: supervised.contains(&agent.agent_id),
+                    mailbox: mail_by_agent.remove(&agent.agent_id).unwrap_or_default(),
+                    agent_id: agent.agent_id,
+                    parent_agent_id: agent.parent_agent_id,
+                    depth: agent.depth,
+                    lifecycle,
+                    current_run,
+                    run_history,
+                }
+            })
+            .collect()
     }
 
     pub(crate) fn claim_writer(&self, agent_id: &str) -> Option<AgentWriterGuard> {
@@ -368,6 +498,21 @@ impl AgentExecutionRegistry {
     }
 
     pub(crate) fn register_root(&self, agent_id: String) {
+        if let Some(runtime) = &self.runtime {
+            if runtime
+                .snapshot_blocking()
+                .ok()
+                .is_some_and(|snapshot| snapshot.agents.iter().any(|a| a.agent_id == agent_id))
+            {
+                return;
+            }
+            let _ = runtime.register_agent_blocking(super::runtime::RuntimeAgent::root(
+                agent_id,
+                "main".to_string(),
+                crate::model_io::now_ms(),
+            ));
+            return;
+        }
         self.lock()
             .entry(agent_id.clone())
             .or_insert_with(|| AgentNode::root(agent_id));
@@ -453,16 +598,26 @@ impl AgentExecutionRegistry {
     /// A child may be adopted by a new direct parent only between runs.
     /// An active run or a closed conversation cannot be taken over.
     pub(crate) fn activate_child(&self, mut child: AgentNode) -> Result<(), String> {
-        let mut nodes = self.lock();
-        if let Some(existing) = nodes.get(&child.agent_id) {
-            if existing.lifecycle.is_active() {
-                return Err(format!("Agent {} is already running", child.agent_id));
-            }
-            if existing.lifecycle == AgentLifecycle::Closed {
-                return Err(format!("Agent {} is closed", child.agent_id));
-            }
-        }
         if let Some(runtime) = &self.runtime {
+            let snapshot = runtime
+                .snapshot_blocking()
+                .map_err(|error| error.to_string())?;
+            if let Some(existing) = snapshot
+                .agents
+                .iter()
+                .find(|agent| agent.agent_id == child.agent_id)
+            {
+                if existing.closed_at_ms.is_some() {
+                    return Err(format!("Agent {} is closed", child.agent_id));
+                }
+                if snapshot
+                    .runs
+                    .iter()
+                    .any(|run| run.agent_id == child.agent_id && run.status.is_active())
+                {
+                    return Err(format!("Agent {} is already running", child.agent_id));
+                }
+            }
             let current_run = child
                 .current_run
                 .clone()
@@ -471,9 +626,11 @@ impl AgentExecutionRegistry {
                 .parent_agent_id
                 .clone()
                 .ok_or_else(|| format!("Child agent {} has no direct parent", child.agent_id))?;
-            let parent_run_id = nodes
-                .get(&parent_agent_id)
-                .and_then(|parent| parent.current_run.as_ref())
+            let parent_run_id = snapshot
+                .runs
+                .iter()
+                .filter(|run| run.agent_id == parent_agent_id && run.status.is_active())
+                .max_by_key(|run| (run.started_at_ms, run.run_id.as_str()))
                 .map(|run| run.run_id.clone())
                 .unwrap_or_default();
             runtime
@@ -505,6 +662,17 @@ impl AgentExecutionRegistry {
                     watchdog: Default::default(),
                 })
                 .map_err(|error| error.to_string())?;
+            self.supervise_id(&child.agent_id);
+            return Ok(());
+        }
+        let mut nodes = self.lock();
+        if let Some(existing) = nodes.get(&child.agent_id) {
+            if existing.lifecycle.is_active() {
+                return Err(format!("Agent {} is already running", child.agent_id));
+            }
+            if existing.lifecycle == AgentLifecycle::Closed {
+                return Err(format!("Agent {} is closed", child.agent_id));
+            }
         }
         if let Some(mut existing) = nodes.remove(&child.agent_id) {
             existing.remember_current_run();
@@ -543,6 +711,8 @@ impl AgentExecutionRegistry {
                     return false;
                 }
             }
+            self.supervise_id(agent_id);
+            return true;
         }
         let mut nodes = self.lock();
         let Some(node) = nodes.get_mut(agent_id) else {
@@ -594,11 +764,7 @@ impl AgentExecutionRegistry {
         let Some(runtime) = &self.runtime else {
             return;
         };
-        let Some(run_id) = self
-            .lock()
-            .get(agent_id)
-            .and_then(|node| node.current_run.as_ref().map(|run| run.run_id.clone()))
-        else {
+        let Some(run_id) = self.active_runtime_run_id(agent_id) else {
             return;
         };
         let runtime = runtime.clone();
@@ -635,19 +801,6 @@ impl AgentExecutionRegistry {
         usage: (u64, u64, u64),
         turns: usize,
     ) -> bool {
-        {
-            let nodes = self.lock();
-            let Some(node) = nodes.get(agent_id) else {
-                return false;
-            };
-            if node
-                .current_run
-                .as_ref()
-                .is_none_or(|run| run.run_id != run_id)
-            {
-                return false;
-            }
-        }
         if let Some(runtime) = &self.runtime {
             let runtime_status = match status {
                 AgentRunStatus::Completed => super::runtime::RuntimeRunStatus::Completed,
@@ -666,6 +819,8 @@ impl AgentExecutionRegistry {
                 tracing::warn!(%agent_id, %run_id, %error, "runtime run settlement failed");
                 return false;
             }
+            self.finish_supervision_id(agent_id);
+            return true;
         }
         let mut nodes = self.lock();
         let Some(node) = nodes.get_mut(agent_id) else {
@@ -693,6 +848,10 @@ impl AgentExecutionRegistry {
     }
 
     pub(crate) fn restore(&self, mut node: AgentNode) {
+        if self.runtime.is_some() {
+            // Authoritative agent/run state lives in AgentRuntime (restored from SQLite).
+            return;
+        }
         let mut nodes = self.lock();
         if let Some(mut previous) = nodes.remove(&node.agent_id) {
             if previous.supervised {
@@ -727,19 +886,20 @@ impl AgentExecutionRegistry {
     }
 
     pub(crate) fn close(&self, agent_id: &str) -> bool {
-        let active_run = self.lock().get(agent_id).and_then(|node| {
-            node.current_run
-                .as_ref()
-                .filter(|run| {
-                    matches!(run.status, AgentRunStatus::Queued | AgentRunStatus::Running)
-                })
-                .map(|run| run.run_id.clone())
-        });
-        if let Some(run_id) = active_run
-            && let Err(error) = self.request_run_stop(&run_id, "Session is closing")
-        {
-            tracing::warn!(%agent_id, %run_id, %error, "runtime stop request failed");
-            return false;
+        if let Some(runtime) = &self.runtime {
+            if let Some(run_id) = self.active_runtime_run_id(agent_id)
+                && let Err(error) = self.request_run_stop(&run_id, "Session is closing")
+            {
+                tracing::warn!(%agent_id, %run_id, %error, "runtime stop request failed");
+                return false;
+            }
+            return match runtime.close_agent_blocking(agent_id.to_string()) {
+                Ok(_) => true,
+                Err(error) => {
+                    tracing::warn!(%agent_id, %error, "runtime close agent failed");
+                    false
+                }
+            };
         }
         let mut nodes = self.lock();
         let Some(node) = nodes.get_mut(agent_id) else {
@@ -750,6 +910,12 @@ impl AgentExecutionRegistry {
     }
 
     pub(crate) fn close_all(&self) {
+        if let Some(snapshot) = self.runtime_snapshot() {
+            for agent in snapshot.agents {
+                self.close(&agent.agent_id);
+            }
+            return;
+        }
         let ids: Vec<String> = self.lock().keys().cloned().collect();
         for agent_id in ids {
             self.close(&agent_id);
@@ -765,6 +931,12 @@ impl AgentExecutionRegistry {
 
     #[cfg(test)]
     pub(crate) fn node(&self, agent_id: &str) -> Option<AgentNode> {
+        if let Some(snapshot) = self.runtime_snapshot() {
+            return self
+                .project_runtime_nodes(snapshot)
+                .into_iter()
+                .find(|node| node.agent_id == agent_id);
+        }
         self.lock().get(agent_id).cloned()
     }
 
@@ -774,15 +946,7 @@ impl AgentExecutionRegistry {
                 .runs
                 .iter()
                 .find(|run| run.agent_id == agent_id && run.run_id == run_id)
-                .map(|run| match run.status {
-                    super::runtime::RuntimeRunStatus::Queued => AgentRunStatus::Queued,
-                    super::runtime::RuntimeRunStatus::Running
-                    | super::runtime::RuntimeRunStatus::Stopping => AgentRunStatus::Running,
-                    super::runtime::RuntimeRunStatus::Completed => AgentRunStatus::Completed,
-                    super::runtime::RuntimeRunStatus::Cancelled => AgentRunStatus::Cancelled,
-                    super::runtime::RuntimeRunStatus::Failed => AgentRunStatus::Failed,
-                    super::runtime::RuntimeRunStatus::Lost => AgentRunStatus::Lost,
-                });
+                .map(|run| Self::runtime_run_status(run.status));
         }
         self.lock()
             .get(agent_id)
@@ -792,14 +956,15 @@ impl AgentExecutionRegistry {
     }
 
     pub(crate) fn is_active(&self, agent_id: &str) -> bool {
-        if self
-            .lock()
-            .get(agent_id)
-            .is_some_and(|node| node.lifecycle == AgentLifecycle::Closed)
-        {
-            return false;
-        }
         if let Some(snapshot) = self.runtime_snapshot() {
+            let closed = snapshot
+                .agents
+                .iter()
+                .find(|agent| agent.agent_id == agent_id)
+                .is_some_and(|agent| agent.closed_at_ms.is_some());
+            if closed {
+                return false;
+            }
             return snapshot
                 .runs
                 .iter()
@@ -825,33 +990,15 @@ impl AgentExecutionRegistry {
         task: &crate::store::BackgroundTask,
         steer: AgentSteer,
     ) -> Result<(), String> {
-        let run_id = if self.runtime.is_some() {
-            self.active_runtime_run_id(agent_id)
-                .ok_or_else(|| format!("Agent {agent_id} is not active"))?
-        } else {
-            let nodes = self.lock();
-            let node = nodes
-                .get(agent_id)
-                .ok_or_else(|| format!("Agent {agent_id} is not registered"))?;
-            if !node.lifecycle.is_active() {
-                return Err(format!("Agent {agent_id} is not active"));
-            }
-            node.current_run
-                .as_ref()
-                .map(|run| run.run_id.clone())
-                .ok_or_else(|| format!("Agent {agent_id} has no current run"))?
-        };
         if let Some(runtime) = &self.runtime {
+            let run_id = self
+                .active_runtime_run_id(agent_id)
+                .ok_or_else(|| format!("Agent {agent_id} is not active"))?;
             let message = runtime_mailbox_message(&self.session_id, agent_id, &run_id, &steer)?;
             runtime
                 .enqueue_task_notification_blocking(task.clone(), message)
                 .map_err(|error| error.to_string())?;
-        } else if let Some(store) = &self.store {
-            store
-                .lock()
-                .expect("store lock")
-                .upsert_background_task(&self.session_id, task)
-                .map_err(|error| pig_provider::core_error_en(&error))?;
+            return Ok(());
         }
         let mut nodes = self.lock();
         let node = nodes
@@ -859,6 +1006,13 @@ impl AgentExecutionRegistry {
             .ok_or_else(|| format!("Agent {agent_id} is not registered"))?;
         if !node.lifecycle.is_active() {
             return Err(format!("Agent {agent_id} is not active"));
+        }
+        if let Some(store) = &self.store {
+            store
+                .lock()
+                .expect("store lock")
+                .upsert_background_task(&self.session_id, task)
+                .map_err(|error| pig_provider::core_error_en(&error))?;
         }
         node.mailbox.push(steer);
         Ok(())
@@ -898,9 +1052,6 @@ impl AgentExecutionRegistry {
             runtime
                 .enqueue_mailbox_blocking(message)
                 .map_err(|error| format!("Failed to persist Agent mailbox message: {error}"))?;
-            if let Some(node) = self.lock().get_mut(agent_id) {
-                node.mailbox.push(steer);
-            }
             return Ok(());
         }
         let mut nodes = self.lock();
@@ -918,11 +1069,14 @@ impl AgentExecutionRegistry {
     }
 
     pub(crate) fn prepend_steer(&self, agent_id: &str, steer: AgentSteer) -> bool {
-        if let Some(runtime) = &self.runtime
-            && let Err(error) = runtime.requeue_mailbox_blocking(steer.id.clone())
-        {
-            tracing::warn!(%agent_id, %error, "mailbox requeue failed");
-            return false;
+        if let Some(runtime) = &self.runtime {
+            return match runtime.requeue_mailbox_blocking(steer.id) {
+                Ok(_) => true,
+                Err(error) => {
+                    tracing::warn!(%agent_id, %error, "mailbox requeue failed");
+                    false
+                }
+            };
         }
         let mut nodes = self.lock();
         let Some(node) = nodes.get_mut(agent_id) else {
@@ -950,34 +1104,15 @@ impl AgentExecutionRegistry {
                 return Vec::new();
             }
         };
-        let mut converted = Vec::with_capacity(claimed.len());
+        let mut drained = Vec::with_capacity(claimed.len());
         for message in claimed {
             match steer_from_runtime_mailbox(message) {
-                Ok(steer) => converted.push(steer),
+                Ok(steer) => drained.push(steer),
                 Err(error) => {
                     tracing::warn!(%agent_id, %error, "mailbox payload is invalid");
                     return Vec::new();
                 }
             }
-        }
-        let mut nodes = self.lock();
-        let Some(node) = nodes.get_mut(agent_id) else {
-            return converted;
-        };
-        let mut existing = node.mailbox.drain();
-        let mut drained = Vec::with_capacity(converted.len());
-        for steer in converted {
-            if let Some(index) = existing
-                .iter()
-                .position(|candidate| candidate.id == steer.id)
-            {
-                drained.push(existing.remove(index));
-            } else {
-                drained.push(steer);
-            }
-        }
-        for steer in existing {
-            node.mailbox.push(steer);
         }
         drained
     }
@@ -1003,6 +1138,26 @@ impl AgentExecutionRegistry {
     }
 
     pub(crate) fn drain_notifications(&self, agent_id: &str) -> Vec<AgentSteer> {
+        if let Some(runtime) = &self.runtime {
+            let claimed = match runtime.claim_mailbox_blocking(agent_id.to_string()) {
+                Ok(claimed) => claimed,
+                Err(error) => {
+                    tracing::warn!(%agent_id, %error, "notification claim failed");
+                    return Vec::new();
+                }
+            };
+            let mut notifications = Vec::new();
+            for message in claimed {
+                if message.kind == super::runtime::MailboxMessageKind::Notification {
+                    if let Ok(steer) = steer_from_runtime_mailbox(message) {
+                        notifications.push(steer);
+                    }
+                } else {
+                    let _ = runtime.requeue_mailbox_blocking(message.message_id);
+                }
+            }
+            return notifications;
+        }
         self.lock()
             .get_mut(agent_id)
             .map(|node| node.mailbox.drain_notifications())
@@ -1037,7 +1192,6 @@ impl AgentExecutionRegistry {
                 .into_iter()
                 .filter(|message| message.state != super::runtime::MailboxDeliveryState::Consumed)
                 .collect::<Vec<_>>();
-            let mut restorable = Vec::with_capacity(pending.len());
             for message in pending {
                 if let Some(notification_id) = &message.notification_id
                     && let Some(store) = &self.store
@@ -1051,16 +1205,6 @@ impl AgentExecutionRegistry {
                         .map_err(|error| pig_protocol::CoreError::TaskStore {
                             detail: error.to_string(),
                         })?;
-                    continue;
-                }
-                restorable.push(message);
-            }
-            let mut nodes = self.lock();
-            for message in restorable {
-                let steer = steer_from_runtime_mailbox(message.clone())
-                    .map_err(|detail| pig_protocol::CoreError::TaskStore { detail })?;
-                if let Some(node) = nodes.get_mut(&message.target_agent_id) {
-                    node.mailbox.restore(steer);
                 }
             }
             return Ok(());
@@ -1069,12 +1213,32 @@ impl AgentExecutionRegistry {
     }
 
     pub(crate) fn retain_mailbox(&self, agent_id: &str, keep: impl FnMut(&AgentSteer) -> bool) {
+        if self.runtime.is_some() {
+            // Authoritative mailbox filtering happens via AgentRuntime consume/requeue.
+            return;
+        }
         if let Some(node) = self.lock().get_mut(agent_id) {
             node.mailbox.retain(keep);
         }
     }
 
     pub(crate) fn record_partial(&self, agent_id: &str, run_id: &str, text: String) -> bool {
+        if self.runtime.is_some() {
+            if self.active_runtime_run_id(agent_id).as_deref() != Some(run_id) {
+                return false;
+            }
+            self.partials
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(
+                    agent_id.to_string(),
+                    AgentPartial {
+                        run_id: run_id.to_string(),
+                        text,
+                    },
+                );
+            return true;
+        }
         let mut nodes = self.lock();
         let Some(node) = nodes.get_mut(agent_id) else {
             return false;
@@ -1094,12 +1258,23 @@ impl AgentExecutionRegistry {
     }
 
     pub(crate) fn partial(&self, agent_id: &str) -> Option<AgentPartial> {
+        if self.runtime.is_some() {
+            return self
+                .partials
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get(agent_id)
+                .cloned();
+        }
         self.lock()
             .get(agent_id)
             .and_then(|node| node.partial.clone())
     }
 
     pub(crate) fn snapshot(&self) -> Vec<AgentNode> {
+        if let Some(snapshot) = self.runtime_snapshot() {
+            return self.project_runtime_nodes(snapshot);
+        }
         self.lock().values().cloned().collect()
     }
 }

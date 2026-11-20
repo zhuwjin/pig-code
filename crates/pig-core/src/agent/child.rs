@@ -449,6 +449,131 @@ fn prepare_child_cwd(ctx: &ChildPrepCtx<'_>, agent_id: &str) -> Result<PathBuf, 
     Ok(canonical)
 }
 
+/// Resolve the parent repository's common `.git` directory from a worktree's `.git` pointer file.
+fn worktree_common_git_dir(worktree_path: &Path) -> Option<PathBuf> {
+    let dot_git = worktree_path.join(".git");
+    if !dot_git.is_file() {
+        return None;
+    }
+    let text = std::fs::read_to_string(&dot_git).ok()?;
+    let raw_gitdir = text
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("gitdir:"))?
+        .trim();
+    if raw_gitdir.is_empty() {
+        return None;
+    }
+    let gitdir = {
+        let candidate = PathBuf::from(raw_gitdir);
+        if candidate.is_absolute() {
+            candidate
+        } else {
+            worktree_path.join(candidate)
+        }
+    };
+    // Typical layout: `<repo>/.git/worktrees/<name>` -> common dir is `<repo>/.git`.
+    let worktrees_dir = gitdir.parent()?;
+    if worktrees_dir.file_name().and_then(|n| n.to_str()) == Some("worktrees") {
+        let common = worktrees_dir.parent()?;
+        if common.is_dir() {
+            return Some(common.to_path_buf());
+        }
+    }
+    let commondir_file = gitdir.join("commondir");
+    if commondir_file.is_file()
+        && let Ok(rel) = std::fs::read_to_string(&commondir_file)
+    {
+        let rel = rel.trim();
+        if !rel.is_empty() {
+            let common = gitdir.join(rel);
+            if common.is_dir() {
+                return Some(common);
+            }
+        }
+    }
+    None
+}
+
+/// Properly unregister and delete a single git worktree (`git worktree remove --force`
+/// followed by `git worktree prune`), avoiding orphaned `.git/worktrees/*` admin entries.
+pub(crate) fn remove_worktree(worktree_path: &Path) -> Result<(), String> {
+    if !worktree_path.exists() {
+        return Ok(());
+    }
+    let common_git_dir = worktree_common_git_dir(worktree_path);
+    if let Some(git_dir) = &common_git_dir {
+        let mut remove = std::process::Command::new("git");
+        remove
+            .arg("--git-dir")
+            .arg(git_dir)
+            .args(["worktree", "remove", "--force"])
+            .arg(worktree_path);
+        crate::NoConsoleExt::no_console(&mut remove);
+        let _ = remove.output();
+    }
+    if worktree_path.exists() {
+        if let Err(error) = std::fs::remove_dir_all(worktree_path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(format!(
+                "Failed to remove worktree {}: {error}",
+                worktree_path.display()
+            ));
+        }
+    }
+    if let Some(git_dir) = &common_git_dir {
+        let mut prune = std::process::Command::new("git");
+        prune
+            .arg("--git-dir")
+            .arg(git_dir)
+            .args(["worktree", "prune"]);
+        crate::NoConsoleExt::no_console(&mut prune);
+        let _ = prune.output();
+    }
+    Ok(())
+}
+
+/// Clean up all child worktrees under `{data_dir}/worktrees/{session_id}` using git
+/// worktree removal + prune before deleting the session worktree directory.
+pub(crate) fn remove_session_worktrees(session_worktrees_dir: &Path) -> Result<(), String> {
+    if !session_worktrees_dir.exists() {
+        return Ok(());
+    }
+    let mut failures = Vec::new();
+    match std::fs::read_dir(session_worktrees_dir) {
+        Ok(entries) => {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir()
+                    && let Err(error) = remove_worktree(&path)
+                {
+                    failures.push(error);
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            failures.push(format!(
+                "Failed to read worktrees directory {}: {error}",
+                session_worktrees_dir.display()
+            ));
+        }
+    }
+    if let Err(error) = std::fs::remove_dir_all(session_worktrees_dir)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        failures.push(format!(
+            "Failed to remove {}: {error}",
+            session_worktrees_dir.display()
+        ));
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
+}
+
 fn persist_history(prep: &mut ChildPrep) -> Result<(), String> {
     let mut calls = std::collections::HashMap::new();
     for (message_index, message) in prep.history.iter_mut().enumerate() {

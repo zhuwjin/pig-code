@@ -82,6 +82,13 @@
       "show_fps": {
         "label": "Show performance HUD",
         "description": "Overlay this process' CPU and memory use in the corner of the window."
+      },
+      "sandbox": {
+        "label": "Enable OS sandbox",
+        "description": "Isolate model shell commands with the host OS sandbox. If enabled on an unsupported host, sandboxed commands fail closed instead of running unrestricted.",
+        "status_ready": "Supported ({backend})",
+        "status_unsupported": "Unsupported on this host ({backend}) — commands will be blocked while enabled.",
+        "status_disabled": "OS sandbox disabled — shell commands run without OS-level confinement."
       }
     },
     "appearance": {
@@ -586,6 +593,10 @@
       "dd_block": "May overwrite a disk or block device directly",
       "shutdown": "May shut down or restart the computer",
       "chmod_root": "May change system directory permissions",
+      "chmod_world_writable": "May recursively make files world-writable (chmod 777)",
+      "pipe_to_shell": "May execute remote or decoded content directly in a shell",
+      "git_force_push": "May force-push and overwrite remote Git history",
+      "dynamic_command": "Uses a dynamic shell command name that cannot be verified as safe",
       "prefix": "Dangerous command: {reason}"
     },
     "plan_prompt": "Start implementing this plan?",

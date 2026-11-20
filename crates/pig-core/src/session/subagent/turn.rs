@@ -718,7 +718,7 @@ impl Session {
                 &rules,
                 &self.state,
                 &self.agent.cwd,
-                self.hooks.is_active(),
+                &self.hooks,
             )
         };
         let mut call_ix = 0usize;

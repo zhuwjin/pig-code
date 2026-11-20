@@ -544,8 +544,14 @@ mod agents_config_tests {
 /// are not built in: a fresh install seeds them into the user's own
 /// `config.toml` as `[[sandbox.deny]]` entries, so every one of them is
 /// ordinary configuration that can be edited or deleted.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxConfig {
+    /// Master switch for OS-level command sandboxing across Windows, macOS, and Linux.
+    /// Defaults to `true` (fail-closed when enabled on an unsupported host). Set to
+    /// `false` in user/system config to explicitly opt out of OS sandboxing; project
+    /// configs can never disable it.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
     /// Extra read-deny rules: a literal path or a glob (`**/*.pem`,
     /// `secrets/**`). Relative rules anchor at the workspace; `~` expands to
     /// the home directory.
@@ -602,6 +608,18 @@ pub struct SandboxConfig {
     /// credential stores stay protected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_dirs: Option<Vec<String>>,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            deny_read: Vec::new(),
+            deny: None,
+            filesystem: std::collections::BTreeMap::new(),
+            credential_dirs: None,
+        }
+    }
 }
 
 /// One `[[sandbox.deny]]` group: the globs that deny, plus the globs that lift

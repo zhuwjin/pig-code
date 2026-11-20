@@ -1,7 +1,94 @@
+use std::sync::OnceLock;
+
 use super::*;
 
 const MAX_FETCH_BODY: usize = 2 * 1024 * 1024;
 const MAX_FETCH_OUTPUT: usize = 50000;
+
+/// Cloud instance metadata / link-local IP check. Even when local/LAN fetches are
+/// permitted for developer workflows, cloud metadata services are never legitimate
+/// coding-agent targets and must be blocked to prevent SSRF credential theft.
+pub fn is_metadata_ip(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let b = v4.octets();
+            v4.is_link_local() // 169.254.0.0/16 (AWS/GCP/Azure IMDS, ECS 169.254.170.2)
+                || b == [100, 100, 100, 200] // Alibaba Cloud metadata
+        }
+        std::net::IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_metadata_ip(&std::net::IpAddr::V4(v4));
+            }
+            let b = v6.octets();
+            // fe80::/10 link-local or fd00:ec2::254 (AWS IPv6 IMDS)
+            (b[0] == 0xfe && (b[1] & 0xc0) == 0x80)
+                || v6.segments() == [0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254]
+        }
+    }
+}
+
+/// Static host check for cloud metadata endpoints.
+pub fn is_metadata_host(host: &str) -> bool {
+    let host = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return is_metadata_ip(&ip);
+    }
+    matches!(
+        host.as_str(),
+        "metadata.google.internal"
+            | "metadata.goog"
+            | "metadata.azure.internal"
+            | "metadata.tencentyun.com"
+            | "instance-data"
+            | "instance-data.ec2.internal"
+    )
+}
+
+fn fetch_client() -> Result<reqwest::Client, String> {
+    static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .pool_idle_timeout(std::time::Duration::from_secs(60))
+                .user_agent("pig-code FetchURL/0.1 (coding agent)")
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .map_err(|e| e.to_string())
+        })
+        .clone()
+}
+
+async fn check_resolved_metadata(url: &reqwest::Url) -> Result<(), String> {
+    let Some(host) = url.host_str() else {
+        return Err("URL is missing a host".to_string());
+    };
+    let port = url.port_or_known_default().unwrap_or(80);
+    let clean_host = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = clean_host.parse::<std::net::IpAddr>() {
+        if is_metadata_ip(&ip) {
+            return Err(format!(
+                "Blocked SSRF target: {ip} is a link-local or cloud metadata address"
+            ));
+        }
+        return Ok(());
+    }
+    if let Ok(addrs) = tokio::net::lookup_host((clean_host, port)).await {
+        for addr in addrs {
+            if is_metadata_ip(&addr.ip()) {
+                return Err(format!(
+                    "Blocked SSRF target: {clean_host} resolved to link-local or cloud metadata address {}",
+                    addr.ip()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
 
 /// Numeric IP check: unspecified/loopback/private/link-local/documentation/CGNAT/benchmark/multicast.
 /// Shared by FetchURL's literal host and DNS resolution results.
@@ -189,22 +276,26 @@ impl Tool for FetchUrl {
     fn execute<'a>(
         &'a self,
         args: serde_json::Value,
-        _ctx: ToolContext<'a>,
+        ctx: ToolContext<'a>,
     ) -> Pin<Box<dyn Future<Output = Result<ToolEffect, String>> + Send + 'a>> {
         Box::pin(async move {
+            if ctx.sandbox_profile != crate::task::SandboxProfile::Unrestricted
+                && crate::task::network_blocked_for(ctx.state)
+            {
+                return Err(
+                    "Network access is blocked by the sandbox policy; FetchURL cannot make outbound requests."
+                        .to_string(),
+                );
+            }
             let url = args["url"]
                 .as_str()
                 .ok_or("Missing required parameter: url")?;
             let mut current = reqwest::Url::parse(url).map_err(|e| format!("Invalid URL: {e}"))?;
             check_fetch_url(&current)?;
-            // A local tool allows private-network access (localhost/LAN http is a hard requirement); only the scheme allowlist
-            // and credential rejection remain; redirects are followed manually, re-checking credentials at every hop
-            let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .user_agent("pig-code FetchURL/0.1 (coding agent)")
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .map_err(|e| e.to_string())?;
+            check_resolved_metadata(&current).await?;
+            // A local desktop tool allows localhost/LAN http, while blocking link-local / cloud
+            // metadata targets, non-http schemes, and embedded credentials across every redirect hop.
+            let client = fetch_client()?;
             let mut hops = 0;
             let mut response = loop {
                 let response = client
@@ -230,6 +321,7 @@ impl Tool for FetchUrl {
                     .join(location)
                     .map_err(|e| format!("Invalid redirect URL: {e}"))?;
                 check_fetch_url(&current)?;
+                check_resolved_metadata(&current).await?;
             };
             let status = response.status();
             if !status.is_success() {
@@ -306,7 +398,12 @@ pub fn check_fetch_url(url: &reqwest::Url) -> Result<(), String> {
     if !url.username().is_empty() || url.password().is_some() {
         return Err("URLs must not embed credentials".to_string());
     }
-    let _ = url.host_str().ok_or("URL is missing a host")?;
+    let host = url.host_str().ok_or("URL is missing a host")?;
+    if is_metadata_host(host) {
+        return Err(format!(
+            "Blocked SSRF target: {host} is a link-local or cloud metadata address"
+        ));
+    }
     Ok(())
 }
 
@@ -346,4 +443,58 @@ fn sniff_html_charset(body: &[u8]) -> Option<String> {
         .unwrap_or(rest.len());
     let label = &rest[..end];
     (!label.is_empty()).then(|| label.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn check_fetch_url_blocks_cloud_metadata_and_link_local() {
+        for blocked in [
+            "http://169.254.169.254/latest/meta-data/",
+            "http://169.254.170.2/v2/credentials",
+            "http://100.100.100.200/latest/meta-data/",
+            "http://[fe80::1]/",
+            "http://[fd00:ec2::254]/latest/meta-data/",
+            "http://[::ffff:169.254.169.254]/",
+            "http://metadata.google.internal/computeMetadata/v1/",
+            "http://metadata.goog/",
+        ] {
+            let url = reqwest::Url::parse(blocked).expect("valid url");
+            let err = check_fetch_url(&url).expect_err(&format!("{blocked} must be blocked"));
+            assert!(err.contains("SSRF"), "unexpected error for {blocked}: {err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_url_respects_sandbox_network_block() {
+        let dir = std::env::temp_dir();
+        let mut tracker = ChangeTracker::default();
+        let state = SessionToolState::for_test();
+        state
+            .sandbox_project
+            .write()
+            .unwrap()
+            .network_block = Some(true);
+        let tool = FetchUrl;
+        let result = tool
+            .execute(
+                serde_json::json!({ "url": "http://127.0.0.1:9/" }),
+                ToolContext {
+                    cwd: &dir,
+                    tracker: &mut tracker,
+                    state: &state,
+                    fs_grant: None,
+                    sandbox_override: Default::default(),
+                    sandbox_profile: crate::task::SandboxProfile::ReadOnly,
+                    additional_permissions: Default::default(),
+                },
+            )
+            .await;
+        let Err(err) = result else {
+            panic!("FetchURL must fail when sandbox network is blocked");
+        };
+        assert!(err.contains("Network access is blocked"), "{err}");
+    }
 }

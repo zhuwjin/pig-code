@@ -1,7 +1,9 @@
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use pig_protocol::{AgentRunEnvelope, Event, EventEnvelope};
+use tokio::sync::Notify;
 
 const JOURNAL_HISTORY: usize = 1024;
 
@@ -66,12 +68,15 @@ pub struct JournalSnapshot {
 struct JournalState {
     history: VecDeque<EventEnvelope>,
     latest: u64,
+    read_cursor: u64,
+    closed: bool,
 }
 
 #[derive(Clone)]
 pub struct EventJournal {
-    events: async_channel::Receiver<EventEnvelope>,
     state: Arc<Mutex<JournalState>>,
+    notify: Arc<Notify>,
+    active_reader: Arc<AtomicBool>,
     epoch: String,
 }
 
@@ -84,30 +89,84 @@ impl EventJournal {
     ) {
         let (input, input_events) = async_channel::bounded(JOURNAL_HISTORY);
         let (raw_events, raw) = async_channel::bounded(JOURNAL_HISTORY);
-        let (journal_events, events) = async_channel::bounded(JOURNAL_HISTORY);
         let journal = Self {
-            events,
             state: Arc::new(Mutex::new(JournalState {
                 history: VecDeque::with_capacity(JOURNAL_HISTORY),
                 latest: 0,
+                read_cursor: 0,
+                closed: false,
             })),
+            notify: Arc::new(Notify::new()),
+            active_reader: Arc::new(AtomicBool::new(false)),
             epoch: crate::agent::runtime::new_runtime_id("journal"),
         };
         let publisher = EventPublisher {
             input: input_events,
             raw: raw_events,
-            journal_events,
             journal: journal.clone(),
         };
         (input, raw, journal, publisher)
     }
 
+    pub fn capacity(&self) -> usize {
+        JOURNAL_HISTORY
+    }
+
+    fn has_active_reader(&self) -> bool {
+        self.active_reader.load(Ordering::Acquire)
+    }
+
+    fn take_next_locked(state: &mut JournalState) -> Result<Option<EventEnvelope>, ()> {
+        let next = state
+            .history
+            .iter()
+            .find(|event| event.sequence > state.read_cursor)
+            .cloned();
+        if let Some(envelope) = next {
+            state.read_cursor = envelope.sequence;
+            return Ok(Some(envelope));
+        }
+        if state.closed {
+            return Err(());
+        }
+        Ok(None)
+    }
+
     pub async fn recv(&self) -> Result<EventEnvelope, async_channel::RecvError> {
-        self.events.recv().await
+        self.active_reader.store(true, Ordering::Release);
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            {
+                let mut state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                match Self::take_next_locked(&mut state) {
+                    Ok(Some(envelope)) => return Ok(envelope),
+                    Ok(None) => {
+                        // Register the waiter before releasing the lock so a concurrent append
+                        // or close cannot miss this notification.
+                        notified.as_mut().enable();
+                    }
+                    Err(()) => return Err(async_channel::RecvError),
+                }
+            }
+            notified.await;
+        }
     }
 
     pub fn try_recv(&self) -> Result<EventEnvelope, async_channel::TryRecvError> {
-        self.events.try_recv()
+        self.active_reader.store(true, Ordering::Release);
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match Self::take_next_locked(&mut state) {
+            Ok(Some(envelope)) => Ok(envelope),
+            Ok(None) => Err(async_channel::TryRecvError::Empty),
+            Err(()) => Err(async_channel::TryRecvError::Closed),
+        }
     }
 
     pub fn epoch(&self) -> &str {
@@ -206,14 +265,29 @@ impl EventJournal {
         if state.history.len() > JOURNAL_HISTORY {
             state.history.pop_front();
         }
+        drop(state);
+        self.notify.notify_waiters();
         envelope
+    }
+
+    fn close(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.closed = true;
+        drop(state);
+        self.notify.notify_waiters();
+    }
+
+    fn has_external_handles(&self) -> bool {
+        Arc::strong_count(&self.state) > 1
     }
 }
 
 pub(crate) struct EventPublisher {
     input: async_channel::Receiver<Event>,
     raw: async_channel::Sender<Event>,
-    journal_events: async_channel::Sender<EventEnvelope>,
     journal: EventJournal,
 }
 
@@ -221,12 +295,23 @@ impl EventPublisher {
     pub(crate) async fn run(self) {
         while let Ok(event) = self.input.recv().await {
             let envelope = self.journal.append(event);
-            let raw_open = self.raw.send(envelope.event.clone()).await.is_ok();
-            let journal_open = self.journal_events.send(envelope).await.is_ok();
-            if !raw_open && !journal_open {
+            let raw_open = if self.raw.is_closed() {
+                false
+            } else if self.journal.has_active_reader() {
+                // When a journal consumer is active, an unread raw receiver must never
+                // backpressure or deadlock event publication.
+                !matches!(
+                    self.raw.try_send(envelope.event),
+                    Err(async_channel::TrySendError::Closed(_))
+                )
+            } else {
+                self.raw.send(envelope.event).await.is_ok()
+            };
+            if !raw_open && !self.journal.has_external_handles() {
                 break;
             }
         }
+        self.journal.close();
     }
 }
 
@@ -440,6 +525,71 @@ mod capacity_tests {
         let (input, raw, journal, _publisher) = EventJournal::channel();
         assert_eq!(input.capacity(), Some(JOURNAL_HISTORY));
         assert_eq!(raw.capacity(), Some(JOURNAL_HISTORY));
-        assert_eq!(journal.events.capacity(), Some(JOURNAL_HISTORY));
+        assert_eq!(journal.capacity(), JOURNAL_HISTORY);
+    }
+
+    #[tokio::test]
+    async fn journal_consumer_does_not_deadlock_when_raw_channel_is_unread() {
+        let (input, _unread_raw, journal, publisher) = EventJournal::channel();
+        let publish = tokio::spawn(publisher.run());
+        let consumer = journal.clone();
+        let drain = tokio::spawn(async move {
+            let mut count = 0usize;
+            while consumer.recv().await.is_ok() {
+                count += 1;
+            }
+            count
+        });
+        for _ in 0..(JOURNAL_HISTORY + 500) {
+            input
+                .send(Event::SessionList {
+                    sessions: Vec::new(),
+                })
+                .await
+                .expect("publish event without deadlock");
+        }
+        drop(input);
+        tokio::time::timeout(std::time::Duration::from_secs(5), publish)
+            .await
+            .expect("publisher must not deadlock on unread raw channel")
+            .expect("publisher task");
+        let received = tokio::time::timeout(std::time::Duration::from_secs(5), drain)
+            .await
+            .expect("journal consumer must finish")
+            .expect("journal consumer task");
+        assert!(received > 0);
+        assert_eq!(journal.snapshot().cursor, (JOURNAL_HISTORY + 500) as u64);
+    }
+
+    #[tokio::test]
+    async fn raw_consumer_does_not_deadlock_when_journal_is_unread() {
+        let (input, raw, journal, publisher) = EventJournal::channel();
+        let publish = tokio::spawn(publisher.run());
+        let drain = tokio::spawn(async move {
+            let mut count = 0usize;
+            while raw.recv().await.is_ok() {
+                count += 1;
+            }
+            count
+        });
+        for _ in 0..(JOURNAL_HISTORY + 500) {
+            input
+                .send(Event::SessionList {
+                    sessions: Vec::new(),
+                })
+                .await
+                .expect("publish event without deadlock");
+        }
+        drop(input);
+        tokio::time::timeout(std::time::Duration::from_secs(5), publish)
+            .await
+            .expect("publisher must not deadlock on unread journal")
+            .expect("publisher task");
+        let received = tokio::time::timeout(std::time::Duration::from_secs(5), drain)
+            .await
+            .expect("raw consumer must finish")
+            .expect("raw consumer task");
+        assert_eq!(received, JOURNAL_HISTORY + 500);
+        assert_eq!(journal.snapshot().cursor, (JOURNAL_HISTORY + 500) as u64);
     }
 }

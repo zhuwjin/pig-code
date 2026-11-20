@@ -30,6 +30,8 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 sha2 = "0.10"
 tracing = "0.1"
 keyring = { version = "4.2", default-features = false, features = ["v1"] }
+tree-sitter = "0.25"
+tree-sitter-bash = "0.25"
 
 # macOS: the real Finder icon via NSWorkspace
 [target.'cfg(target_os = "macos")'.dependencies]

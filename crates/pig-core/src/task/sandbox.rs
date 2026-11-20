@@ -6,6 +6,8 @@ use super::SessionToolState;
 mod config_entries;
 mod credential;
 mod deny_rules;
+#[cfg(any(target_os = "linux", test))]
+mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 mod model;
@@ -180,26 +182,110 @@ pub(crate) fn network_blocked_for(state: &SessionToolState) -> bool {
     NetworkPolicy::configured_for(project) == NetworkPolicy::Block
 }
 
-/// `[windows] sandbox_network = "block"` as installed by the agent.
-#[cfg(target_os = "windows")]
-static WINDOWS_SANDBOX_NETWORK_BLOCK: std::sync::atomic::AtomicBool =
+/// Configured sandbox network block flag installed at startup and on config save.
+static SANDBOX_NETWORK_BLOCK: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-#[cfg(target_os = "windows")]
 fn windows_network_block() -> bool {
-    WINDOWS_SANDBOX_NETWORK_BLOCK.load(std::sync::atomic::Ordering::Relaxed)
+    SANDBOX_NETWORK_BLOCK.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-#[cfg(not(target_os = "windows"))]
-fn windows_network_block() -> bool {
-    false
+/// Install sandbox network blocking across all platforms (startup and config save).
+pub fn init_sandbox_network(block: bool) {
+    SANDBOX_NETWORK_BLOCK.store(block, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Install `[windows] sandbox_network` at agent startup and after a config save
-/// (the same lifecycle as `init_sandbox_settings`).
+/// Legacy Windows alias for `init_sandbox_network`.
 #[cfg(target_os = "windows")]
 pub fn init_windows_sandbox_network(block: bool) {
-    WINDOWS_SANDBOX_NETWORK_BLOCK.store(block, std::sync::atomic::Ordering::Relaxed);
+    init_sandbox_network(block);
+}
+
+/// Cross-platform read-only sandbox availability & configuration snapshot.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PlatformSandboxStatus {
+    /// Whether `[sandbox] enabled` is currently true in user/system config.
+    pub enabled: bool,
+    /// Whether this host supports enforcing the OS sandbox backend.
+    pub supported: bool,
+    /// Active platform backend label (`windows-psec`, `macos-seatbelt`, `linux-bwrap`, `unsupported`).
+    pub backend: String,
+    /// Actionable diagnostic when `supported` is false.
+    pub detail: Option<String>,
+}
+
+/// Inspect current OS sandbox enablement and host support without mutating state.
+pub fn platform_sandbox_status() -> PlatformSandboxStatus {
+    let enabled = windows_sandbox_settings().enabled;
+    #[cfg(target_os = "windows")]
+    {
+        let readiness = windows::sandbox_readiness();
+        let supported = readiness.usable();
+        let detail = if supported {
+            None
+        } else {
+            Some(
+                "Windows process security environment (PSEC) is unavailable on this host. \
+                 Set `[sandbox] enabled = false` to explicitly opt out of OS sandboxing."
+                    .to_string(),
+            )
+        };
+        PlatformSandboxStatus {
+            enabled,
+            supported,
+            backend: "windows-psec".to_string(),
+            detail,
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let supported = macos::is_available();
+        let detail = if supported {
+            None
+        } else {
+            Some(
+                "/usr/bin/sandbox-exec is unavailable on this host. Set `[sandbox] enabled = false` \
+                 to explicitly opt out of OS sandboxing."
+                    .to_string(),
+            )
+        };
+        PlatformSandboxStatus {
+            enabled,
+            supported,
+            backend: "macos-seatbelt".to_string(),
+            detail,
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        match linux::probe() {
+            Ok(_) => PlatformSandboxStatus {
+                enabled,
+                supported: true,
+                backend: "linux-bwrap".to_string(),
+                detail: None,
+            },
+            Err(detail) => PlatformSandboxStatus {
+                enabled,
+                supported: false,
+                backend: "linux-bwrap".to_string(),
+                detail: Some(detail),
+            },
+        }
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        PlatformSandboxStatus {
+            enabled,
+            supported: false,
+            backend: "unsupported".to_string(),
+            detail: Some(
+                "This platform does not have a supported OS sandbox backend. Set \
+                 `[sandbox] enabled = false` to explicitly opt out of OS sandboxing."
+                    .to_string(),
+            ),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -225,8 +311,10 @@ static SANDBOX_DENY_SETTINGS: std::sync::RwLock<Option<SandboxSettings>> =
 
 /// The sandbox rules in force for one command: the user-level settings, with
 /// the workspace's own layer already applied.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SandboxSettings {
+    /// `[sandbox] enabled`: master toggle for OS command sandboxing across all platforms.
+    pub(crate) enabled: bool,
     /// `[sandbox] deny_read`: simple rules (a literal path or a glob).
     pub(crate) deny_read: Vec<String>,
     /// `[[sandbox.deny]]`: structured groups with their own exceptions. A
@@ -239,12 +327,29 @@ pub struct SandboxSettings {
     pub(crate) credential_dirs: Option<Vec<String>>,
 }
 
+impl Default for SandboxSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            deny_read: Vec::new(),
+            deny: Vec::new(),
+            filesystem: std::collections::BTreeMap::new(),
+            credential_dirs: None,
+        }
+    }
+}
+
 impl SandboxSettings {
     pub fn new(deny_read: Vec<String>) -> Self {
         Self {
             deny_read,
             ..Default::default()
         }
+    }
+
+    pub fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
     }
 
     /// The structured deny groups (`[[sandbox.deny]]`).
@@ -256,6 +361,7 @@ impl SandboxSettings {
     /// The user-level settings a config file asks for.
     pub fn from_config(config: &pig_protocol::AppConfig) -> Self {
         Self {
+            enabled: config.sandbox.enabled,
             deny_read: config.effective_deny_read(),
             deny: config
                 .sandbox
@@ -629,8 +735,9 @@ pub(crate) fn prepare_command(
             "sandbox command program cannot be empty",
         ));
     }
-    // Full mode spawns directly; there is no policy to prepare or enforce.
-    if profile == SandboxProfile::Unrestricted {
+    // Full mode or an explicit user/system `[sandbox] enabled = false` opt-out
+    // spawns directly without OS sandbox wrapping.
+    if profile == SandboxProfile::Unrestricted || !windows_sandbox_settings().enabled {
         return Ok(command);
     }
     let mut overlay = additional.clone();
@@ -650,6 +757,13 @@ pub(crate) fn prepare_command(
         })?;
         macos::prepare_command(command, &resolved)
     }
+    #[cfg(target_os = "linux")]
+    {
+        let resolved = resolve(&policy, &overlay, cwd).map_err(|error| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string())
+        })?;
+        linux::prepare_command(command, &resolved, cwd)
+    }
     #[cfg(target_os = "windows")]
     {
         // `EscalatedWithRestrictions` is Codex's approved command profile: the
@@ -660,12 +774,24 @@ pub(crate) fn prepare_command(
         policy.validate().map_err(|error| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string())
         })?;
+        if !windows::sandbox_readiness().usable() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "command cannot be sandboxed: Windows process security environment (PSEC) is \
+                 unavailable on this host. Set `[sandbox] enabled = false` in user config to \
+                 explicitly run without an OS sandbox.",
+            ));
+        }
         windows::prepare_command(&policy, &overlay, cwd, command)
     }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         let _ = (&policy, &overlay);
-        Ok(command)
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "command cannot be sandboxed: this platform has no supported OS sandbox backend. \
+             Set `[sandbox] enabled = false` in user config to explicitly run without an OS sandbox.",
+        ))
     }
 }
 
@@ -929,6 +1055,47 @@ mod tests {
         // No helper, no policy materialization: the command is spawned as-is.
         assert_eq!(prepared.program, std::ffi::OsString::from("cmd.exe"));
         assert!(prepared.env.is_empty());
+    }
+
+    #[test]
+    fn explicit_sandbox_disabled_skips_os_sandbox_and_enabled_fails_closed_when_unsupported() {
+        let _guard = sandbox_settings_test_lock();
+        let cwd = temp_dir("disabled-toggle");
+        let state = state(Vec::new(), Vec::new());
+        let command = SandboxCommand::new("echo".into(), vec!["hi".into()]);
+
+        init_sandbox_settings(SandboxSettings::default().with_enabled(false));
+        let prepared = prepare_command(
+            &state,
+            &cwd,
+            None,
+            command.clone(),
+            SandboxOverride::NoOverride,
+            SandboxProfile::WorkspaceWrite,
+            &AdditionalPermissions::default(),
+        )
+        .expect("explicitly disabled sandbox must bypass OS wrapper");
+        assert_eq!(prepared.program, std::ffi::OsString::from("echo"));
+        assert!(prepared.env.is_empty());
+        assert!(!platform_sandbox_status().enabled);
+
+        init_sandbox_settings(SandboxSettings::default().with_enabled(true));
+        let status = platform_sandbox_status();
+        assert!(status.enabled);
+        if !status.supported {
+            let err = prepare_command(
+                &state,
+                &cwd,
+                None,
+                command,
+                SandboxOverride::NoOverride,
+                SandboxProfile::WorkspaceWrite,
+                &AdditionalPermissions::default(),
+            )
+            .expect_err("enabled sandbox on unsupported host must fail closed");
+            assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+            assert!(err.to_string().contains("cannot be sandboxed"), "{err}");
+        }
     }
 
     /// An approved request is an overlay on the read-only base: exactly the

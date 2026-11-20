@@ -388,6 +388,19 @@ impl Session {
                     std::time::Duration::from_secs(30),
                 ))
             }
+            pig_protocol::ApprovalsReviewer::Agent => {
+                let user = Arc::new(UserApprovalReviewer::new(self.pending.clone()));
+                let runtime = self.runtime.clone();
+                let selection = self.model_override.clone();
+                let resolver = Arc::new(move || {
+                    resolve_runtime_model(runtime.as_deref(), selection.as_ref(), None).ok()
+                });
+                Arc::new(FallbackApprovalReviewer::new(
+                    Arc::new(AgentApprovalReviewer::new(resolver)),
+                    user,
+                    std::time::Duration::from_secs(30),
+                ))
+            }
         };
     }
 

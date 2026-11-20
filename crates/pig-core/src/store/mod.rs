@@ -21,22 +21,48 @@ mod runtime;
 mod tasks;
 pub use tasks::BackgroundTask;
 
-pub struct Store {
-    conn: Connection,
+/// Current SQLite schema version tracked via `PRAGMA user_version`.
+/// Bump this and append a transactional step to `MIGRATIONS` whenever tables
+/// or columns evolve.
+pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+
+type MigrationFn = fn(&rusqlite::Transaction<'_>) -> Result<(), String>;
+
+const MIGRATIONS: &[(u32, MigrationFn)] = &[(1, migrate_v1_baseline)];
+
+fn migrate_v1_baseline(tx: &rusqlite::Transaction<'_>) -> Result<(), String> {
+    tx.execute_batch(BASELINE_SCHEMA)
+        .map_err(|e| format!("store.sqlite v1 baseline schema failed: {e}"))?;
+    runtime::create_schema(tx)?;
+    Ok(())
 }
 
-impl Store {
-    pub fn open(data_dir: &Path) -> Result<Self, String> {
-        std::fs::create_dir_all(data_dir)
-            .map_err(|e| format!("Failed to create data directory: {e}"))?;
-        let path = data_dir.join("store.sqlite");
-        let conn = Connection::open(&path)
-            .map_err(|e| format!("Failed to open store.sqlite {}: {e}", path.display()))?;
-        conn.pragma_update(None, "journal_mode", "WAL")
-            .and_then(|_| conn.pragma_update(None, "busy_timeout", 5000u64))
-            .map_err(|e| format!("store.sqlite pragma failed: {e}"))?;
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS sessions (
+fn apply_migrations(conn: &mut Connection) -> Result<(), String> {
+    let current: u32 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(|e| format!("store.sqlite read user_version failed: {e}"))?;
+    if current > CURRENT_SCHEMA_VERSION {
+        return Err(format!(
+            "store.sqlite schema version {current} is newer than supported version {CURRENT_SCHEMA_VERSION}"
+        ));
+    }
+    for &(target_version, migrate) in MIGRATIONS {
+        if current >= target_version {
+            continue;
+        }
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| format!("store.sqlite begin migration v{target_version} failed: {e}"))?;
+        migrate(&tx)?;
+        tx.pragma_update(None, "user_version", target_version)
+            .map_err(|e| format!("store.sqlite set user_version={target_version} failed: {e}"))?;
+        tx.commit()
+            .map_err(|e| format!("store.sqlite commit migration v{target_version} failed: {e}"))?;
+    }
+    Ok(())
+}
+
+const BASELINE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS sessions (
                 id TEXT PRIMARY KEY,
                 title TEXT NOT NULL,
                 title_custom INTEGER NOT NULL DEFAULT 0,
@@ -192,11 +218,34 @@ impl Store {
                 path TEXT NOT NULL,
                 content TEXT,
                 PRIMARY KEY (session_id, path)
-            );",
-        )
-        .map_err(|e| format!("store.sqlite create-table failed: {e}"))?;
+            );";
+
+pub struct Store {
+    conn: Connection,
+}
+
+impl Store {
+    pub fn open(data_dir: &Path) -> Result<Self, String> {
+        std::fs::create_dir_all(data_dir)
+            .map_err(|e| format!("Failed to create data directory: {e}"))?;
+        let path = data_dir.join("store.sqlite");
+        let mut conn = Connection::open(&path)
+            .map_err(|e| format!("Failed to open store.sqlite {}: {e}", path.display()))?;
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .and_then(|_| conn.pragma_update(None, "busy_timeout", 5000u64))
+            .map_err(|e| format!("store.sqlite pragma failed: {e}"))?;
+        apply_migrations(&mut conn)?;
+        // Self-heal any missing baseline tables/indexes after migrations succeed.
+        conn.execute_batch(BASELINE_SCHEMA)
+            .map_err(|e| format!("store.sqlite ensure baseline schema failed: {e}"))?;
         runtime::create_schema(&conn)?;
         Ok(Self { conn })
+    }
+
+    pub fn schema_version(&self) -> Result<u32, String> {
+        self.conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .map_err(|e| format!("store.sqlite read user_version failed: {e}"))
     }
 
     // ---- Session index ----
@@ -1093,5 +1142,45 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM api_usage", [], |row| row.get(0))
             .unwrap();
         assert_eq!(remaining, 0);
+    }
+
+    #[test]
+    fn sqlite_migrations_set_user_version_upgrade_legacy_v0_and_reject_future_versions() {
+        let dir = std::env::temp_dir().join(format!(
+            "pig-store-migrate-{}-{}",
+            std::process::id(),
+            crate::model_io::now_ms()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+
+        // Fresh database stamps CURRENT_SCHEMA_VERSION and reopens idempotently.
+        let store = Store::open(&dir).expect("open fresh store");
+        assert_eq!(store.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
+        drop(store);
+        let reopened = Store::open(&dir).expect("reopen store");
+        assert_eq!(reopened.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
+        drop(reopened);
+
+        // Legacy v0 database (user_version == 0 with existing tables) upgrades cleanly.
+        {
+            let conn = Connection::open(dir.join("store.sqlite")).expect("raw conn");
+            conn.pragma_update(None, "user_version", 0u32).expect("reset v0");
+        }
+        let upgraded = Store::open(&dir).expect("upgrade legacy v0 store");
+        assert_eq!(upgraded.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
+        drop(upgraded);
+
+        // Future schema version fails closed instead of corrupting unknown tables.
+        {
+            let conn = Connection::open(dir.join("store.sqlite")).expect("raw conn");
+            conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION + 1)
+                .expect("bump future version");
+        }
+        let err = Store::open(&dir)
+            .err()
+            .expect("future schema version must be rejected");
+        assert!(err.contains("newer than supported version"), "{err}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

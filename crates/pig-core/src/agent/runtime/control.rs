@@ -1,10 +1,26 @@
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use super::model::*;
 use crate::store::Store;
+
+/// Process-wide Tokio runtime shared by all `AgentRuntime` command loops.
+/// Avoids spawning a dedicated OS thread + Tokio runtime per open session
+/// while keeping `dispatch_blocking` deadlock-free even when invoked from a
+/// single-threaded test runtime.
+fn shared_control_runtime() -> &'static tokio::runtime::Runtime {
+    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .thread_name("pig-agent-control")
+            .enable_all()
+            .build()
+            .expect("shared agent runtime control pool")
+    })
+}
 
 #[derive(Clone, Debug)]
 pub struct StartRun {
@@ -62,7 +78,7 @@ impl AgentRuntime {
         Self::spawn_with_backends(
             session_id,
             store,
-            Arc::new(super::super::AgentBackendRegistry::with_local()),
+            Arc::new(super::super::AgentBackendRegistry::with_default()),
         )
     }
 
@@ -111,13 +127,7 @@ impl AgentRuntime {
         state.recover_interrupted_local_runs()?;
         let projection_seed = state.view();
         state.projections = super::RuntimeProjectionRegistry::new(&projection_seed);
-        std::thread::spawn(move || {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("agent runtime command runtime")
-                .block_on(run_commands(state, receiver));
-        });
+        shared_control_runtime().spawn(run_commands(state, receiver));
         Ok(Self {
             session_id,
             commands,
@@ -131,7 +141,7 @@ impl AgentRuntime {
         Self::spawn_root_with_backends(
             session_id,
             store,
-            Arc::new(super::super::AgentBackendRegistry::with_local()),
+            Arc::new(super::super::AgentBackendRegistry::with_default()),
         )
     }
 
@@ -221,6 +231,10 @@ impl AgentRuntime {
         agent: RuntimeAgent,
     ) -> Result<RuntimeAgent, RuntimeError> {
         self.dispatch_blocking(move |state| state.register_agent(agent))
+    }
+
+    pub fn close_agent_blocking(&self, agent_id: String) -> Result<RuntimeAgent, RuntimeError> {
+        self.dispatch_blocking(move |state| state.close_agent(&agent_id))
     }
 
     pub fn start_run_blocking(
@@ -1186,6 +1200,38 @@ impl RuntimeState {
         self.agents.insert(agent.agent_id.clone(), agent.clone());
         self.publish(event);
         Ok(agent)
+    }
+
+    fn close_agent(&mut self, agent_id: &str) -> Result<RuntimeAgent, RuntimeError> {
+        let Some(existing) = self.agents.get(agent_id) else {
+            return Err(RuntimeError::NotFound(format!(
+                "Agent {agent_id} is not registered"
+            )));
+        };
+        if existing.closed_at_ms.is_some() {
+            return Ok(existing.clone());
+        }
+        let mut closed = existing.clone();
+        closed.closed_at_ms = Some(crate::model_io::now_ms());
+        let event = self.event(
+            RuntimeEventKind::AgentRegistered,
+            Some(closed.agent_id.clone()),
+            None,
+            None,
+            serde_json::json!({
+                "parent_agent_id": closed.parent_agent_id,
+                "depth": closed.depth,
+                "profile": closed.profile,
+                "closed": true,
+            }),
+        );
+        self.store
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .commit_runtime_agent(&closed, &event)?;
+        self.agents.insert(closed.agent_id.clone(), closed.clone());
+        self.publish(event);
+        Ok(closed)
     }
 
     fn start_run(

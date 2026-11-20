@@ -352,7 +352,7 @@ export type MessageDelivery = "queue" | "steer";
 export interface PermissionSettings {
   sandbox: { mode: SandboxMode };
   approval: ApprovalPolicy;
-  reviewer: "user" | "policy";
+  reviewer: "user" | "policy" | "agent";
 }
 
 export interface SessionConfiguration {
@@ -576,6 +576,18 @@ export interface DeveloperConfig {
   show_fps?: boolean;
 }
 
+export interface SandboxConfig {
+  enabled?: boolean;
+  [key: string]: unknown;
+}
+
+export interface PlatformSandboxStatus {
+  enabled: boolean;
+  supported: boolean;
+  backend: string;
+  detail?: string | null;
+}
+
 export interface ProcessSample {
   cpu?: number | null;
   memory?: number | null;
@@ -597,6 +609,7 @@ export interface AppConfig {
   language?: "system" | "zh-CN" | "en" | null;
   theme?: string | null;
   theme_mode?: "system" | "light" | "dark" | null;
+  sandbox?: SandboxConfig;
   developer?: DeveloperConfig;
   [key: string]: unknown;
 }

@@ -13,6 +13,10 @@ function dangerText(key?: string | null): string | null {
     dd_block: "approval.danger.dd_block",
     shutdown: "approval.danger.shutdown",
     chmod_root: "approval.danger.chmod_root",
+    chmod_world_writable: "approval.danger.chmod_world_writable",
+    pipe_to_shell: "approval.danger.pipe_to_shell",
+    git_force_push: "approval.danger.git_force_push",
+    dynamic_command: "approval.danger.dynamic_command",
   };
   return key && reasons[key] ? t("approval.danger.prefix", { reason: t(reasons[key]) }) : null;
 }
