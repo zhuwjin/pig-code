@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -10,12 +11,37 @@ use pig_protocol::TaskStatus;
 /// persist cap is independent of this).
 const MAX_TASK_OUTPUT_TOTAL: usize = 16 * 1024 * 1024;
 
+/// Cap on live incremental output streamed to the UI for a single tool call
+/// (the full output still goes to the command sink and spill file).
+const MAX_LIVE_STREAM_BYTES: usize = 64 * 1024;
+
+/// Incremental live output callback for an active tool execution.
+pub type OutputDeltaSink = Arc<dyn Fn(&str) + Send + Sync>;
+
+tokio::task_local! {
+    static TOOL_OUTPUT_STREAM: OutputDeltaSink;
+}
+
+/// Bind a live output delta sink for the duration of a single tool invocation.
+pub(crate) async fn with_tool_output_stream<F: Future>(
+    sink: OutputDeltaSink,
+    fut: F,
+) -> F::Output {
+    TOOL_OUTPUT_STREAM.scope(sink, fut).await
+}
+
+/// Read the active tool invocation's live output sink, if any.
+pub(crate) fn current_output_stream() -> Option<OutputDeltaSink> {
+    TOOL_OUTPUT_STREAM.try_with(Arc::clone).ok()
+}
+
 use super::registry::{TaskRegistry, append_output};
 
 /// Accumulated task output metering (shared by the two stdout/stderr readers): crossing the total cap triggers a force stop only once.
 #[derive(Default)]
 pub(super) struct OutputMeter {
     total: AtomicUsize,
+    streamed: AtomicUsize,
     pub(super) capped: AtomicBool,
 }
 
@@ -24,6 +50,11 @@ impl OutputMeter {
     fn add(&self, n: usize) -> bool {
         let prev = self.total.fetch_add(n, Ordering::Relaxed);
         prev + n > MAX_TASK_OUTPUT_TOTAL && !self.capped.swap(true, Ordering::Relaxed)
+    }
+
+    fn take_live_budget(&self, len: usize) -> usize {
+        let prev = self.streamed.fetch_add(len, Ordering::Relaxed);
+        MAX_LIVE_STREAM_BYTES.saturating_sub(prev).min(len)
     }
 }
 
@@ -64,6 +95,30 @@ fn cap_kill(registry: &TaskRegistry, task_id: &str) {
     }
 }
 
+pub(super) fn emit_live_chunk(
+    live_stream: &Option<OutputDeltaSink>,
+    meter: &OutputMeter,
+    text: &str,
+) {
+    let Some(stream) = live_stream else {
+        return;
+    };
+    if text.is_empty() {
+        return;
+    }
+    let allowed = meter.take_live_budget(text.len());
+    if allowed == 0 {
+        return;
+    }
+    let mut end = allowed.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    if end > 0 {
+        stream(&text[..end]);
+    }
+}
+
 /// Pipe reader: chunk → decode (StreamDecoder: UTF-8 first / Windows GBK
 /// fallback / cross-chunk suspension) → registry rolling output + spill persist
 /// (raw bytes); when the sink is non-empty, also keep a full copy there
@@ -76,6 +131,7 @@ pub(super) async fn read_into<R: tokio::io::AsyncRead + Unpin>(
     task_id: String,
     sink: Option<Arc<Mutex<String>>>,
     meter: Arc<OutputMeter>,
+    live_stream: Option<OutputDeltaSink>,
 ) {
     let mut decoder = pig_utils::text::StreamDecoder::new();
     let mut buf = [0u8; 4096];
@@ -88,6 +144,7 @@ pub(super) async fn read_into<R: tokio::io::AsyncRead + Unpin>(
                 if let Some(sink) = &sink {
                     sink.lock().expect("stream sink lock").push_str(&text);
                 }
+                emit_live_chunk(&live_stream, &meter, &text);
                 if meter.add(n) {
                     cap_kill(&registry, &task_id);
                     break;
@@ -99,5 +156,9 @@ pub(super) async fn read_into<R: tokio::io::AsyncRead + Unpin>(
     let tail = decoder.finish();
     if !tail.is_empty() {
         append_output(&registry, &task_id, b"", &tail);
+        if let Some(sink) = &sink {
+            sink.lock().expect("stream sink lock").push_str(&tail);
+        }
+        emit_live_chunk(&live_stream, &meter, &tail);
     }
 }

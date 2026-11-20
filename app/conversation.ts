@@ -39,7 +39,7 @@ function activityCategory(item: ChatItem): ActivityCategory | null {
   if (item.kind !== "tool") return null;
   if (item.tool === "Grep") return "grep";
   if (item.tool === "Glob") return "glob";
-  if (isExecTool(item.tool)) return "command";
+  if (isExecTool(item.tool) || item.tool === "WriteStdin") return "command";
   if (item.tool === "WebSearch") return "web_search";
   return "tools";
 }
@@ -309,7 +309,7 @@ export function isExecTool(tool: string): boolean {
 }
 
 export function toolIcon(tool: string): IconName {
-  if (isExecTool(tool)) return "square-terminal";
+  if (isExecTool(tool) || tool === "WriteStdin") return "square-terminal";
   switch (tool) {
     case "Read": return "eye";
     case "Write": return "file-plus";
@@ -328,6 +328,7 @@ export function toolIcon(tool: string): IconName {
 export function toolLabel(tool: string, running: boolean): string {
   if (isExecTool(tool)) return running ? t("tools.running") : t("tools.terminal");
   switch (tool) {
+    case "WriteStdin": return running ? t("tools.writing_stdin") : t("tools.write_stdin");
     case "Read": return t("tools.read");
     case "Write": return running ? t("tools.writing") : t("tools.write");
     case "Edit": return running ? t("tools.editing") : t("tools.edit");

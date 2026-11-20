@@ -559,8 +559,13 @@ fn tool_summaries() -> &'static [(&'static str, &'static str)] {
         (
             "ExecCommand",
             "run a shell command: shell picks bash/zsh/sh or powershell/cmd, workdir sets \
-             the directory, login loads the Unix profile; timeout auto-backgrounds, long \
-             output spills to disk",
+             the directory, login loads the Unix profile, tty=true attaches an interactive PTY; \
+             timeout auto-backgrounds, long output spills to disk",
+        ),
+        (
+            "WriteStdin",
+            "write input characters to or poll output from a running interactive PTY session \
+             started with ExecCommand(tty=true)",
         ),
         (
             "TodoList",

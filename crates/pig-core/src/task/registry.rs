@@ -467,6 +467,12 @@ pub struct SessionToolState {
     /// copied, so a trust decision made mid-session reaches every clone of the
     /// state (the tool path holds its own).
     pub sandbox_project: Arc<std::sync::RwLock<crate::config::ProjectSandboxLayer>>,
+    /// Execution environment boundary (`ExecutorFileSystem` + `ProcessService`),
+    /// defaulting to the local host and replaceable for remote or mock execution.
+    pub env: super::env::ExecutionEnvironment,
+    /// Session-scoped persistent PTY manager for interactive `ExecCommand(tty=true)`
+    /// / `WriteStdin` sessions.
+    pub pty: Arc<super::pty::PtySessionManager>,
 }
 
 impl Clone for SessionToolState {
@@ -490,6 +496,8 @@ impl Clone for SessionToolState {
             extra_read_roots: self.extra_read_roots.clone(),
             extra_rw_roots: self.extra_rw_roots.clone(),
             sandbox_project: self.sandbox_project.clone(),
+            env: self.env.clone(),
+            pty: self.pty.clone(),
         }
     }
 }
@@ -535,7 +543,16 @@ impl SessionToolState {
             extra_read_roots: canon(extra_read_roots),
             extra_rw_roots: canon(extra_rw_roots),
             sandbox_project: Arc::new(std::sync::RwLock::new(Default::default())),
+            env: super::env::ExecutionEnvironment::local(),
+            pty: Arc::new(super::pty::PtySessionManager::new()),
         }
+    }
+
+    /// Replace the execution environment (e.g. a remote SSH/Docker executor or
+    /// an in-memory test double).
+    pub fn with_environment(mut self, env: super::env::ExecutionEnvironment) -> Self {
+        self.env = env;
+        self
     }
 
     pub fn with_notification_store(

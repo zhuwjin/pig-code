@@ -63,9 +63,12 @@ impl ChangeTracker {
     }
 }
 
-/// Read a file's raw bytes (None = file does not exist)
-fn read_original_bytes(path: &Path) -> Result<Option<Vec<u8>>, String> {
-    match std::fs::read(path) {
+/// Read a file's raw bytes through an `ExecutorFileSystem` (None = file does not exist).
+fn read_original_bytes_with_fs(
+    fs: &dyn crate::task::ExecutorFileSystem,
+    path: &Path,
+) -> Result<Option<Vec<u8>>, String> {
+    match fs.read_all(path) {
         Ok(bytes) => Ok(Some(bytes)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(format!("Failed to read {}: {e}", path.display())),
@@ -131,13 +134,22 @@ impl ChangeTracker {
     /// is never re-read afterwards; the turn scope records the pre-write state
     /// only for its first writer.
     pub fn snapshot(&mut self, path: &Path) -> Result<(), String> {
+        self.snapshot_with_fs(&crate::task::LocalFileSystem, path)
+    }
+
+    /// Snapshot raw bytes before modification through an [`ExecutorFileSystem`].
+    pub fn snapshot_with_fs(
+        &mut self,
+        fs: &dyn crate::task::ExecutorFileSystem,
+        path: &Path,
+    ) -> Result<(), String> {
         let path_buf = path.to_path_buf();
         let inserted = {
             let mut originals = lock(&self.originals);
             match originals.entry(path_buf.clone()) {
                 std::collections::hash_map::Entry::Occupied(_) => false,
                 std::collections::hash_map::Entry::Vacant(entry) => {
-                    entry.insert(read_original_bytes(path)?);
+                    entry.insert(read_original_bytes_with_fs(fs, path)?);
                     true
                 }
             }
@@ -152,7 +164,7 @@ impl ChangeTracker {
         if let Some(turn_scope) = &self.turn_originals {
             let mut turn = lock(turn_scope);
             if let std::collections::hash_map::Entry::Vacant(entry) = turn.entry(path_buf) {
-                entry.insert(read_original_bytes(path)?);
+                entry.insert(read_original_bytes_with_fs(fs, path)?);
             }
         }
         Ok(())
@@ -184,6 +196,16 @@ impl ChangeTracker {
 
     /// Produce the "original → current" unified diff and added/removed line counts (both sides decoded to the LF view first).
     pub fn diff(&mut self, cwd: &Path, path: &Path) -> Result<FileChange, String> {
+        self.diff_with_fs(&crate::task::LocalFileSystem, cwd, path)
+    }
+
+    /// Produce the "original → current" unified diff through an [`ExecutorFileSystem`].
+    pub fn diff_with_fs(
+        &mut self,
+        fs: &dyn crate::task::ExecutorFileSystem,
+        cwd: &Path,
+        path: &Path,
+    ) -> Result<FileChange, String> {
         let original_bytes = lock(&self.originals)
             .get(path)
             .ok_or_else(|| "file not tracked".to_string())?
@@ -191,7 +213,7 @@ impl ChangeTracker {
             .unwrap_or_default();
         let original = decoded_view(&original_bytes);
         let current_bytes =
-            std::fs::read(path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+            fs.read_all(path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
         let current = decoded_view(&current_bytes);
         let diff = similar::TextDiff::from_lines(&original, &current);
         let mut additions = 0;
@@ -203,7 +225,7 @@ impl ChangeTracker {
                 _ => {}
             }
         }
-        let cwd_canonical = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+        let cwd_canonical = fs.canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
         let relative = path
             .strip_prefix(&cwd_canonical)
             .or_else(|_| path.strip_prefix(cwd))

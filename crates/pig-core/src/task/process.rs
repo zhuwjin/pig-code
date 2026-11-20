@@ -179,6 +179,7 @@ pub(crate) fn spawn_background_with_profile(
         task_id.clone(),
         None,
         meter.clone(),
+        None,
     ));
     let read_err = tokio::spawn(read_into(
         stderr,
@@ -186,6 +187,7 @@ pub(crate) fn spawn_background_with_profile(
         task_id.clone(),
         None,
         meter,
+        None,
     ));
     spawn_watcher(
         state.tasks.clone(),
@@ -458,12 +460,14 @@ pub(crate) async fn run_foreground_with_profile(
     let stdout_sink = Arc::new(Mutex::new(String::new()));
     let stderr_sink = Arc::new(Mutex::new(String::new()));
     let meter = Arc::new(OutputMeter::default());
+    let live_stream = super::output::current_output_stream();
     let read_out = tokio::spawn(read_into(
         stdout,
         state.tasks.clone(),
         task_id.clone(),
         Some(stdout_sink.clone()),
         meter.clone(),
+        live_stream.clone(),
     ));
     let read_err = tokio::spawn(read_into(
         stderr,
@@ -471,6 +475,7 @@ pub(crate) async fn run_foreground_with_profile(
         task_id.clone(),
         Some(stderr_sink.clone()),
         meter.clone(),
+        live_stream,
     ));
     cancel_guard.read_out = Some(read_out);
     cancel_guard.read_err = Some(read_err);

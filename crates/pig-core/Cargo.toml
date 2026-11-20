@@ -32,6 +32,7 @@ tracing = "0.1"
 keyring = { version = "4.2", default-features = false, features = ["v1"] }
 tree-sitter = "0.25"
 tree-sitter-bash = "0.25"
+portable-pty = "0.9"
 
 # macOS: the real Finder icon via NSWorkspace
 [target.'cfg(target_os = "macos")'.dependencies]

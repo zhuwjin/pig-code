@@ -919,10 +919,40 @@ The sandbox stays on: ordinary paths become writable, but protected files, deny 
             sandbox_profile,
             additional_permissions,
         };
+        // Stream live incremental output chunks (stdout/stderr/PTY) to the UI
+        // while this tool invocation is active. The active flag flips false as
+        // soon as the tool returns or cancels so late background-task chunks
+        // never leak onto a settled tool card.
+        let stream_active = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        struct StreamActiveGuard(Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for StreamActiveGuard {
+            fn drop(&mut self) {
+                self.0.store(false, std::sync::atomic::Ordering::Release);
+            }
+        }
+        let _stream_guard = StreamActiveGuard(Arc::clone(&stream_active));
+        let stream_tx = tx.clone();
+        let stream_session_id = ctx.session_id.to_string();
+        let stream_item_id = item_id.to_string();
+        let output_sink: crate::task::OutputDeltaSink = Arc::new(move |chunk: &str| {
+            if chunk.is_empty()
+                || !stream_active.load(std::sync::atomic::Ordering::Acquire)
+            {
+                return;
+            }
+            let _ = stream_tx.try_send(Event::ToolOutputDelta {
+                session_id: stream_session_id.clone(),
+                item_id: stream_item_id.clone(),
+                delta: chunk.to_string(),
+            });
+        });
         tokio::select! {
             biased;
             _ = cancel.cancelled() => None,
-            result = tool::execute_with_extra(call, tool_ctx, ctx.extra_tools) => Some(result),
+            result = crate::task::with_tool_output_stream(
+                output_sink,
+                tool::execute_with_extra(call, tool_ctx, ctx.extra_tools),
+            ) => Some(result),
         }
     };
     let Some((mut output, is_error, file_change, edit, mut media)) = result else {

@@ -634,6 +634,38 @@ fn apply_runtime_env(command: &mut tokio::process::Command, cwd: &Path) {
     command.process_group(0);
 }
 
+/// Build a sandboxed (or unrestricted) model shell command without spawning it.
+/// Shared by piped process execution (`spawn_shell_with_profile`) and
+/// persistent interactive PTY sessions (`task::pty`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_model_command(
+    state: &SessionToolState,
+    workspace: &Path,
+    workdir: &Path,
+    command: &str,
+    shell: &ModelShell,
+    sandbox_override: sandbox::SandboxOverride,
+    profile: crate::task::SandboxProfile,
+    additional: &crate::task::AdditionalPermissions,
+) -> std::io::Result<sandbox::SandboxCommand> {
+    if profile == crate::task::SandboxProfile::Unrestricted && sandbox::network_blocked_for(state) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "Full mode runs without a sandbox and cannot enforce the configured network block; \
+             switch to Auto or ReadOnly, or set `sandbox_network = \"allow\"`",
+        ));
+    }
+    sandbox::prepare_command(
+        state,
+        workspace,
+        Some(workdir),
+        sandbox_shell_command(workdir, command, shell),
+        sandbox_override,
+        profile,
+        additional,
+    )
+}
+
 /// Model shell spawn: stdin null, stdout/stderr piped, under an explicit
 /// filesystem profile. `ReadOnly` is for plan mode; `Unrestricted` (Full mode)
 /// skips the OS sandbox entirely and therefore cannot honor a network block.
@@ -652,24 +684,17 @@ pub(crate) fn spawn_shell_with_profile(
     profile: crate::task::SandboxProfile,
     additional: &crate::task::AdditionalPermissions,
 ) -> std::io::Result<super::process::ManagedChild> {
-    if profile == crate::task::SandboxProfile::Unrestricted && sandbox::network_blocked_for(state) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "Full mode runs without a sandbox and cannot enforce the configured network block; \
-             switch to Auto or ReadOnly, or set `sandbox_network = \"allow\"`",
-        ));
-    }
-    let command = sandbox::prepare_command(
+    let command = prepare_model_command(
         state,
         workspace,
-        Some(workdir),
-        sandbox_shell_command(workdir, command, shell),
+        workdir,
+        command,
+        shell,
         sandbox_override,
         profile,
         additional,
     )?;
     let mut process = prepare_process(workdir, &command);
-    let _ = state;
     process
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())

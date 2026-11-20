@@ -548,6 +548,14 @@ pub enum Event {
         session_id: String,
         item_id: String,
     },
+    /// Live-only (never persisted, replay never emits it): incremental stdout/stderr
+    /// or PTY output delta streamed while a running tool (e.g. ExecCommand / WriteStdin)
+    /// is still executing; the final authoritative output replaces it on ToolCallEnd.
+    ToolOutputDelta {
+        session_id: String,
+        item_id: String,
+        delta: String,
+    },
     /// Subagent live progress (live-only, not persisted to rollout):
     /// item_id = the parent session's Agent tool card
     SubagentProgress {
@@ -938,6 +946,7 @@ impl Event {
             | Self::ToolInputStart { session_id, .. }
             | Self::ToolInputDelta { session_id, .. }
             | Self::ToolInputDiscard { session_id, .. }
+            | Self::ToolOutputDelta { session_id, .. }
             | Self::SubagentProgress { session_id, .. }
             | Self::SubagentCard { session_id, .. }
             | Self::ContextUsage { session_id, .. }

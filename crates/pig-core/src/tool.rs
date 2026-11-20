@@ -14,6 +14,8 @@ const MAX_READ_LINES: usize = 2000;
 /// (`Read`, `TodoList`, `AgentSwarm`, …); one tool serves every platform and
 /// dialect, with the shell as a per-call parameter.
 pub const EXEC_COMMAND_TOOL: &str = "ExecCommand";
+/// Model-facing name of the interactive PTY stdin/polling companion tool.
+pub const WRITE_STDIN_TOOL: &str = "WriteStdin";
 
 pub fn is_exec_command(name: &str) -> bool {
     name == EXEC_COMMAND_TOOL
@@ -453,6 +455,7 @@ pub fn all() -> Vec<Box<dyn Tool>> {
         Box::new(Glob),
         Box::new(Grep),
         Box::new(ExecCommand),
+        Box::new(exec_command::WriteStdin),
         Box::new(TodoListTool),
         Box::new(FetchUrl),
         Box::new(TaskList),
@@ -626,6 +629,16 @@ pub fn summarize(call: &ToolCall) -> String {
             args["path"].as_str().unwrap_or("?").to_string()
         }
         name if is_exec_command(name) => args["command"].as_str().unwrap_or("?").to_string(),
+        WRITE_STDIN_TOOL => {
+            let sid = args["session_id"].as_str().unwrap_or("?");
+            match args["chars"].as_str().filter(|s| !s.is_empty()) {
+                Some(chars) => {
+                    let preview = chars.replace('\r', "\\r").replace('\n', "\\n");
+                    format!("{sid} ← {preview}")
+                }
+                None => format!("{sid} (poll)"),
+            }
+        }
         "Glob" => args["pattern"].as_str().unwrap_or("?").to_string(),
         "Grep" => args["pattern"].as_str().unwrap_or("?").to_string(),
         "TodoList" => args["todos"]
@@ -802,6 +815,7 @@ pub fn approval_subject(call: &ToolCall) -> String {
             .and_then(|command| command.split_whitespace().next())
             .unwrap_or("")
             .to_string(),
+        WRITE_STDIN_TOOL => args["session_id"].as_str().unwrap_or("").to_string(),
         "Write" | "Edit" => args["path"].as_str().unwrap_or("").to_string(),
         _ => String::new(),
     }

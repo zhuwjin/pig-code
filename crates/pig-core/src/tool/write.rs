@@ -96,9 +96,10 @@ impl Tool for WriteFile {
             }
             // Existing files are written back with their encoding/BOM/line ending preserved; unrecognized ones (binary/unknown encoding) are overwritten as UTF-8/LF;
             // new files are always UTF-8/LF. Existing files over the Read cap may not be overwritten wholesale (same memory-guard policy)
-            if let Some(err) = std::fs::metadata(&full).ok().and_then(|m| {
+            let fs = ctx.state.env.fs.as_ref();
+            if let Some(err) = fs.metadata(&full).ok().and_then(|m| {
                 file_size_error(
-                    m.len(),
+                    m.len,
                     MAX_READ_FILE_BYTES,
                     "target file too large; use Edit for localized changes instead",
                 )
@@ -120,7 +121,7 @@ impl Tool for WriteFile {
             let existing = if credential_write {
                 None
             } else {
-                std::fs::read(&full).ok()
+                fs.read_all(&full).ok()
             };
             if !credential_write {
                 // A credential file has no readable state, so the freshness
@@ -162,16 +163,17 @@ impl Tool for WriteFile {
             let before = existing.as_deref().map(decoded_view).unwrap_or_default();
             let after = content.replace("\r\n", "\n");
             if !credential_write {
-                ctx.tracker.snapshot(&full)?;
+                ctx.tracker.snapshot_with_fs(fs, &full)?;
             }
             let bytes = pig_utils::text::encode(content, encoding, bom, line_ending)?;
-            atomic_write(&full, &bytes)?;
+            fs.write_atomic(&full, &bytes)
+                .map_err(|e| format!("Failed to write {}: {e}", full.display()))?;
             // Refresh freshness after the write: immediately editing the file just written must be legal
             record_read_state(ctx.state, &full, &bytes, false, None);
             let file_change = if credential_write {
                 None
             } else {
-                ctx.tracker.diff(ctx.cwd, &full).ok()
+                ctx.tracker.diff_with_fs(fs, ctx.cwd, &full).ok()
             };
             let edit_diff = Some(per_edit_diff(ctx.cwd, &full, &before, &after));
             Ok(ToolEffect {

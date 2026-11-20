@@ -2,25 +2,34 @@ use super::*;
 
 /// Core of resolve_checked: pure path resolution + boundary/symlink checks, returning the out-of-bounds shape in a structured form.
 fn resolve_core(cwd: &Path, path: &str, create_parents: bool) -> Result<PathBuf, BoundFailure> {
+    resolve_core_with_fs(&crate::task::LocalFileSystem, cwd, path, create_parents)
+}
+
+fn resolve_core_with_fs(
+    fs: &dyn crate::task::ExecutorFileSystem,
+    cwd: &Path,
+    path: &str,
+    create_parents: bool,
+) -> Result<PathBuf, BoundFailure> {
     let raw = Path::new(path);
     let full = if raw.is_absolute() {
         raw.to_path_buf()
     } else {
         cwd.join(raw)
     };
-    let cwd_canonical = cwd.canonicalize().map_err(|e| {
+    let cwd_canonical = fs.canonicalize(cwd).map_err(|e| {
         BoundFailure::Other(format!("Invalid working directory {}: {e}", cwd.display()))
     })?;
     let parent = full.parent().unwrap_or(cwd);
     if create_parents {
-        std::fs::create_dir_all(parent).map_err(|e| {
+        fs.create_dir_all(parent).map_err(|e| {
             BoundFailure::Other(format!(
                 "Failed to create directory {}: {e}",
                 parent.display()
             ))
         })?;
     }
-    let parent_canonical = parent.canonicalize().map_err(|e| {
+    let parent_canonical = fs.canonicalize(parent).map_err(|e| {
         BoundFailure::Other(format!(
             "Directory does not exist {}: {e}",
             parent.display()
@@ -38,11 +47,12 @@ fn resolve_core(cwd: &Path, path: &str, create_parents: bool) -> Result<PathBuf,
         .file_name()
         .ok_or_else(|| BoundFailure::Other(format!("Invalid path: {path}")))?;
     let resolved = parent_canonical.join(file_name);
-    let is_symlink = std::fs::symlink_metadata(&resolved)
-        .map(|m| m.file_type().is_symlink())
+    let is_symlink = fs
+        .symlink_metadata(&resolved)
+        .map(|m| m.is_symlink)
         .unwrap_or(false);
-    if is_symlink || resolved.exists() {
-        match resolved.canonicalize() {
+    if is_symlink || fs.exists(&resolved) {
+        match fs.canonicalize(&resolved) {
             Ok(full_canonical) => {
                 if !full_canonical.starts_with(&cwd_canonical) {
                     return Err(BoundFailure::TargetOutside { resolved });
@@ -67,15 +77,20 @@ fn resolve_core(cwd: &Path, path: &str, create_parents: bool) -> Result<PathBuf,
 /// that: the sensitive-name, deny-rule and credential checks have to look at
 /// the object actually opened, otherwise a link called `notes` could carry
 /// `.env` or a credential file past every veto, and an approval granted for a
-/// link name would not describe the target. `std::fs::canonicalize` resolves a
+/// link name would not describe the target. `fs.canonicalize` resolves a
 /// final symlink; a missing non-link path is returned as-is so the caller can
 /// report "File not found" exactly as before.
-fn canonical_read_target(resolved: PathBuf, raw_path: &str) -> Result<PathBuf, String> {
-    match std::fs::canonicalize(&resolved) {
+fn canonical_read_target_with_fs(
+    fs: &dyn crate::task::ExecutorFileSystem,
+    resolved: PathBuf,
+    raw_path: &str,
+) -> Result<PathBuf, String> {
+    match fs.canonicalize(&resolved) {
         Ok(target) => Ok(target),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let is_link = std::fs::symlink_metadata(&resolved)
-                .map(|meta| meta.file_type().is_symlink())
+            let is_link = fs
+                .symlink_metadata(&resolved)
+                .map(|meta| meta.is_symlink)
                 .unwrap_or(false);
             if is_link {
                 Err(format!(
@@ -102,7 +117,7 @@ fn canonical_read_target(resolved: PathBuf, raw_path: &str) -> Result<PathBuf, S
 /// target hidden behind it (the dedicated single-file credential approval is
 /// handled by the credential checks before this point and never reads content).
 pub(crate) fn read_through_rejection(ctx: &ToolContext<'_>, full: &Path) -> Option<String> {
-    let target = std::fs::canonicalize(full).ok()?;
+    let target = ctx.state.env.fs.canonicalize(full).ok()?;
     if target == *full {
         return None;
     }
@@ -121,8 +136,12 @@ pub(crate) fn read_through_rejection(ctx: &ToolContext<'_>, full: &Path) -> Opti
 /// parent resolves to the real directory. Used to key the freshness state of a
 /// read that opened the canonical target, so reading a symlinked file and then
 /// editing that same spelling keeps working.
-pub(crate) fn write_spelling(cwd: &Path, path: &str) -> Option<PathBuf> {
-    resolve_core(cwd, path, false).ok()
+pub(crate) fn write_spelling(
+    fs: &dyn crate::task::ExecutorFileSystem,
+    cwd: &Path,
+    path: &str,
+) -> Option<PathBuf> {
+    resolve_core_with_fs(fs, cwd, path, false).ok()
 }
 
 /// The object a read-tool path names, for the approval gate's credential
@@ -377,7 +396,8 @@ pub fn resolve_with_access(
     access: FsAccess,
 ) -> Result<PathBuf, String> {
     let (cwd, state) = (ctx.cwd, ctx.state);
-    let resolved = match resolve_core(cwd, path, create_parents) {
+    let fs = state.env.fs.as_ref();
+    let resolved = match resolve_core_with_fs(fs, cwd, path, create_parents) {
         Ok(resolved) => resolved,
         Err(BoundFailure::Other(message)) => return Err(message),
         Err(BoundFailure::DanglingSymlink) => {
@@ -390,9 +410,9 @@ pub fn resolve_with_access(
         ) => {
             if access == FsAccess::Read {
                 // Full-disk read: outside the workspace is not a boundary.
-                return canonical_read_target(resolved, path);
+                return canonical_read_target_with_fs(fs, resolved, path);
             }
-            if is_tmp_absolute_path(path) {
+            if state.env.is_local() && is_tmp_absolute_path(path) {
                 return Ok(resolved);
             }
             // Extra read-only roots (data_dir/sessions: subagent result.md/context records) are always readable —
@@ -408,7 +428,7 @@ pub fn resolve_with_access(
                     .iter()
                     .any(|root| resolved.starts_with(root))
             {
-                return canonical_read_target(resolved, path);
+                return canonical_read_target_with_fs(fs, resolved, path);
             }
             // Read-write roots (the workspace memory directory while memory
             // is on): the model manages its memory files with the plain
@@ -435,7 +455,7 @@ pub fn resolve_with_access(
     if access == FsAccess::Read {
         // The checks that follow (sensitive name, deny rules, credential veto,
         // one-call approval) must name the object that is actually opened.
-        canonical_read_target(resolved, path)
+        canonical_read_target_with_fs(fs, resolved, path)
     } else {
         Ok(resolved)
     }
@@ -472,7 +492,8 @@ pub fn fs_outside_intent(
         .get("path")?
         .as_str()?
         .to_string();
-    let blocked = match resolve_core(cwd, &path, false) {
+    let fs = state.env.fs.as_ref();
+    let blocked = match resolve_core_with_fs(fs, cwd, &path, false) {
         Ok(_) => None,
         Err(
             BoundFailure::ParentOutside { resolved } | BoundFailure::TargetOutside { resolved },
@@ -485,7 +506,7 @@ pub fn fs_outside_intent(
             if !message.starts_with("Directory does not exist") {
                 return None;
             }
-            let cwd_can = cwd.canonicalize().ok()?;
+            let cwd_can = fs.canonicalize(cwd).ok()?;
             let raw = Path::new(&path);
             let full = if raw.is_absolute() {
                 raw.to_path_buf()
@@ -496,7 +517,7 @@ pub fn fs_outside_intent(
             (!full.starts_with(&cwd_can)).then_some(full)
         }
     }?;
-    if is_tmp_absolute_path(&path) {
+    if state.env.is_local() && is_tmp_absolute_path(&path) {
         return None;
     }
     // Read-write roots (workspace memory): no approval request either — the

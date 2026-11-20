@@ -279,6 +279,7 @@ pub(super) async fn stop_session_tasks(entry: &SessionEntry) -> Result<(), Strin
         .filter(|task| task.needs_stop())
         .map(|task| task.id.clone())
         .collect();
+    entry.state.pty.close_all();
     let mut stops = FuturesUnordered::new();
     for id in running {
         stops.push(async move {

@@ -1,5 +1,4 @@
 use super::*;
-use std::io::Read as _;
 
 /// Record the read state under the opened canonical target **and** under the
 /// spelling a later Write/Edit will act on. For a final symlink these differ:
@@ -15,7 +14,7 @@ fn record_read_state_for_spelling(
     view: Option<(usize, usize, usize)>,
 ) {
     record_read_state(ctx.state, full, bytes, partial, view);
-    if let Some(spelling) = super::paths::write_spelling(ctx.cwd, raw_path)
+    if let Some(spelling) = super::paths::write_spelling(ctx.state.env.fs.as_ref(), ctx.cwd, raw_path)
         && spelling != *full
     {
         record_read_state(ctx.state, &spelling, bytes, partial, view);
@@ -75,15 +74,16 @@ impl Tool for ReadFile {
             // bytes actually read (MAX + 1) so a file that grows between stat
             // and read cannot slip an unbounded read through.
             const SIZE_HINT: &str = "use Grep to locate the key content, or page through it with ExecCommand (head/tail/grep)";
-            let meta = std::fs::metadata(&full).map_err(|e| read_io_error(path, &full, e))?;
-            if let Some(err) = file_size_error(meta.len(), MAX_READ_FILE_BYTES, SIZE_HINT) {
+            let fs = ctx.state.env.fs.as_ref();
+            let meta = fs
+                .metadata(&full)
+                .map_err(|e| read_io_error_with_fs(fs, path, &full, e))?;
+            if let Some(err) = file_size_error(meta.len, MAX_READ_FILE_BYTES, SIZE_HINT) {
                 return Err(err);
             }
-            let file = std::fs::File::open(&full).map_err(|e| read_io_error(path, &full, e))?;
-            let mut bytes = Vec::new();
-            file.take(MAX_READ_FILE_BYTES + 1)
-                .read_to_end(&mut bytes)
-                .map_err(|e| read_io_error(path, &full, e))?;
+            let bytes = fs
+                .read_bytes_bounded(&full, MAX_READ_FILE_BYTES)
+                .map_err(|e| read_io_error_with_fs(fs, path, &full, e))?;
             if let Some(err) = file_size_error(bytes.len() as u64, MAX_READ_FILE_BYTES, SIZE_HINT) {
                 return Err(err);
             }
@@ -230,15 +230,21 @@ impl Tool for ReadFile {
 
 /// Disk-read error shared by Read/Edit: on file-not-found, append up to 20 file names from the parent directory to guide the model to correct the path
 pub(crate) fn read_io_error(path: &str, full: &Path, error: std::io::Error) -> String {
+    read_io_error_with_fs(&crate::task::LocalFileSystem, path, full, error)
+}
+
+pub(crate) fn read_io_error_with_fs(
+    fs: &dyn crate::task::ExecutorFileSystem,
+    path: &str,
+    full: &Path,
+    error: std::io::Error,
+) -> String {
     if error.kind() == std::io::ErrorKind::NotFound {
         let mut message = format!("File not found: {path}");
         if let Some(parent) = full.parent()
-            && let Ok(entries) = std::fs::read_dir(parent)
+            && let Ok(entries) = fs.read_dir(parent)
         {
-            let mut names: Vec<String> = entries
-                .flatten()
-                .map(|entry| entry.file_name().to_string_lossy().to_string())
-                .collect();
+            let mut names: Vec<String> = entries.into_iter().map(|entry| entry.name).collect();
             names.sort();
             names.truncate(20);
             if !names.is_empty() {
@@ -272,7 +278,7 @@ pub(crate) fn record_read_state(
     partial: bool,
     view: Option<(usize, usize, usize)>,
 ) {
-    let mtime = std::fs::metadata(full).ok().and_then(|m| m.modified().ok());
+    let mtime = state.env.fs.metadata(full).ok().and_then(|m| m.modified);
     let entry = crate::task::ReadState {
         mtime,
         size: bytes.len() as u64,
@@ -312,13 +318,19 @@ pub(crate) fn check_fresh(
                 .to_string(),
         );
     }
-    let meta =
-        std::fs::metadata(full).map_err(|e| format!("Failed to stat {}: {e}", full.display()))?;
-    if meta.modified().ok() == read_mtime && meta.len() == read_size {
+    let meta = state
+        .env
+        .fs
+        .metadata(full)
+        .map_err(|e| format!("Failed to stat {}: {e}", full.display()))?;
+    if meta.modified == read_mtime && meta.len == read_size {
         return Ok(());
     }
-    let bytes =
-        std::fs::read(full).map_err(|e| format!("Failed to read {}: {e}", full.display()))?;
+    let bytes = state
+        .env
+        .fs
+        .read_all(full)
+        .map_err(|e| format!("Failed to read {}: {e}", full.display()))?;
     if hash_bytes(&bytes) == read_hash {
         record_read_state(state, full, &bytes, false, None);
         return Ok(());

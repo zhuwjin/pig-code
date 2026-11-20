@@ -12,9 +12,11 @@ use crate::NoConsoleExt as _;
 use std::path::{Path, PathBuf};
 
 mod access;
+mod env;
 pub mod notification;
 mod output;
 mod process;
+mod pty;
 mod registry;
 mod sandbox;
 mod shell;
@@ -26,8 +28,19 @@ pub use access::{
     CredentialGrant, SandboxDenialView, credential_grant, credential_write_is_high_risk,
     metadata_carve_outs, sandbox_read_denial,
 };
+pub use env::{
+    EnvironmentKind, ExecutionEnvironment, ExecutorFileSystem, FsDirEntry, FsMetadata,
+    LocalFileSystem, LocalProcessService, ProcessBackgroundRequest, ProcessRunRequest,
+    ProcessService,
+};
 pub use notification::TaskChange;
+pub use output::OutputDeltaSink;
+pub(crate) use output::with_tool_output_stream;
 pub use process::{ForegroundOutcome, run_foreground, spawn_background, stop_task};
+pub use pty::{
+    DEFAULT_PTY_START_YIELD_MS, DEFAULT_PTY_WRITE_YIELD_MS, MAX_PTY_SESSIONS, PtyOutcome,
+    PtySessionManager, PtyStartRequest,
+};
 pub(crate) use process::{
     ManagedChild, ProcessTask, request_task_stop_with_agents, spawn as spawn_managed,
     stop_task_with_agents,
@@ -38,7 +51,6 @@ pub use registry::{
     register_agent_task_queued, snapshot, tail_chars,
 };
 
-pub(crate) use process::{run_foreground_with_profile, spawn_background_with_profile};
 pub(crate) use registry::{
     TaskWaitInterest, mark_agent_notification_delivered, release_agent_mailbox,
     task_wait_is_pending, task_wait_pending,

@@ -385,6 +385,40 @@ impl ConversationProjection {
                 events.push(update(session_id, None, state, item));
                 Projected::only(events)
             }
+            Event::ToolOutputDelta {
+                session_id,
+                item_id,
+                delta,
+            } => {
+                const MAX_LIVE_TOOL_OUTPUT: usize = 64 * 1024;
+                if delta.is_empty() {
+                    return Projected::only(Vec::new());
+                }
+                let state = self.state(session_id);
+                let Some(existing) = state.items.iter_mut().find(|item| item.id() == item_id)
+                else {
+                    return Projected::only(Vec::new());
+                };
+                let mut updated = false;
+                if let ConversationItem::Tool { output, status, .. } = existing
+                    && *status == ConversationToolStatus::Running
+                {
+                    output.push_str(delta);
+                    if output.len() > MAX_LIVE_TOOL_OUTPUT {
+                        let mut start = output.len() - MAX_LIVE_TOOL_OUTPUT;
+                        while start < output.len() && !output.is_char_boundary(start) {
+                            start += 1;
+                        }
+                        output.drain(..start);
+                    }
+                    updated = true;
+                }
+                if !updated {
+                    return Projected::only(Vec::new());
+                }
+                let item = existing.clone();
+                Projected::only(vec![update(session_id, None, state, item)])
+            }
             Event::ToolCallEnd {
                 session_id,
                 item_id,
@@ -1377,5 +1411,67 @@ mod tests {
             Event::ConversationSnapshot { items, running: false, .. }
                 if items.len() == 1
         ));
+    }
+
+    #[test]
+    fn tool_output_deltas_stream_while_running_and_settle_on_end() {
+        let mut projection = ConversationProjection::new();
+        projection.project(&Event::ToolCallBegin {
+            session_id: "s1".into(),
+            item_id: "t1".into(),
+            tool: "ExecCommand".into(),
+            input_summary: "echo hi".into(),
+            detail: r#"{"command":"echo hi"}"#.into(),
+        });
+        let first = projection.project(&Event::ToolOutputDelta {
+            session_id: "s1".into(),
+            item_id: "t1".into(),
+            delta: "line 1\n".into(),
+        });
+        assert_eq!(first.events.len(), 1);
+        assert!(matches!(
+            &first.events[0],
+            Event::ConversationUpdate {
+                item: ConversationItem::Tool { output, status: ConversationToolStatus::Running, .. },
+                ..
+            } if output == "line 1\n"
+        ));
+
+        let second = projection.project(&Event::ToolOutputDelta {
+            session_id: "s1".into(),
+            item_id: "t1".into(),
+            delta: "line 2\n".into(),
+        });
+        assert!(matches!(
+            &second.events[0],
+            Event::ConversationUpdate {
+                item: ConversationItem::Tool { output, status: ConversationToolStatus::Running, .. },
+                ..
+            } if output == "line 1\nline 2\n"
+        ));
+
+        let done = projection.project(&Event::ToolCallEnd {
+            session_id: "s1".into(),
+            item_id: "t1".into(),
+            output: "line 1\nline 2\n[exit code: 0]".into(),
+            is_error: false,
+            stopped: false,
+            edit: None,
+        });
+        assert!(matches!(
+            &done.events[0],
+            Event::ConversationUpdate {
+                item: ConversationItem::Tool { output, status: ConversationToolStatus::Done, .. },
+                ..
+            } if output == "line 1\nline 2\n[exit code: 0]"
+        ));
+
+        // Late deltas after completion are ignored.
+        let late = projection.project(&Event::ToolOutputDelta {
+            session_id: "s1".into(),
+            item_id: "t1".into(),
+            delta: "late".into(),
+        });
+        assert!(late.events.is_empty());
     }
 }

@@ -122,7 +122,13 @@ function BashBody(props: UiContext & { item: Accessor<ToolItem> }) {
         {...props}
         id={`${props.item().id}-output`}
         title={t("tools.output")}
-        code={() => props.item().output || (props.item().status === "stopped" ? t("tools.stopped") : t("tools.no_output"))}
+        code={() => props.item().output || (
+          props.item().status === "stopped"
+            ? t("tools.stopped")
+            : props.item().status === "running"
+              ? t("tools.running")
+              : t("tools.no_output")
+        )}
         language="text"
         maxHeight={320}
         error={props.item().status === "error"}
@@ -257,7 +263,7 @@ function ToolBody(props: UiContext & { item: Accessor<ToolItem> }) {
       <If when={!item().edit && item().tool === "Read" && (item().status === "done" || item().status === "error")}>
         <ReadBody {...props} />
       </If>
-      <If when={!item().edit && isExecTool(item().tool) && item().status !== "input" && item().status !== "running"}>
+      <If when={!item().edit && isExecTool(item().tool) && item().status !== "input"}>
         <BashBody {...props} />
       </If>
       <If when={!item().edit && (item().tool === "Glob" || item().tool === "Grep") && item().status === "done"}>
@@ -266,7 +272,7 @@ function ToolBody(props: UiContext & { item: Accessor<ToolItem> }) {
       <If when={
         !item().edit &&
         !(item().tool === "Read" && (item().status === "done" || item().status === "error")) &&
-        !(isExecTool(item().tool) && item().status !== "input" && item().status !== "running") &&
+        !(isExecTool(item().tool) && item().status !== "input") &&
         !((item().tool === "Glob" || item().tool === "Grep") && item().status === "done")
       }>
         <GenericBody {...props} />

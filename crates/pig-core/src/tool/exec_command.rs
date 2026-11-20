@@ -19,6 +19,7 @@ windows only for interactive tools the user needs to see or control.";
 /// Canonicalize through `dunce` on Windows (it strips the `\\?\` verbatim
 /// prefix `std::fs` leaves behind) and `std::fs` elsewhere — `dunce` is a
 /// Windows-only dependency.
+#[cfg(test)]
 fn canonicalize(path: &Path) -> std::io::Result<PathBuf> {
     #[cfg(windows)]
     {
@@ -56,6 +57,8 @@ fn shell_choices() -> (&'static [&'static str], &'static str) {
 /// a dead SMB share, and `canonicalize` may sit in an OS timeout for seconds;
 /// that must not stall the core's async runtime.
 async fn resolve_workdir(
+    fs: std::sync::Arc<dyn crate::task::ExecutorFileSystem>,
+    is_local: bool,
     workspace: &Path,
     raw: Option<&str>,
 ) -> Result<std::path::PathBuf, String> {
@@ -69,18 +72,71 @@ async fn resolve_workdir(
         workspace.join(candidate)
     };
     tokio::task::spawn_blocking(move || {
-        let canonical = canonicalize(&joined)
+        let canonical = fs
+            .canonicalize(&joined)
             .map_err(|error| format!("workdir `{}` cannot be opened: {error}", joined.display()))?;
-        if !canonical.is_dir() {
+        let meta = fs.metadata(&canonical).map_err(|error| {
+            format!("workdir `{}` cannot be opened: {error}", joined.display())
+        })?;
+        if !meta.is_dir {
             return Err(format!(
                 "workdir `{}` is not a directory",
                 canonical.display()
             ));
         }
+        #[cfg(windows)]
+        let canonical = if is_local {
+            dunce::simplified(&canonical).to_path_buf()
+        } else {
+            canonical
+        };
+        #[cfg(not(windows))]
+        let _ = is_local;
         Ok(canonical)
     })
     .await
     .map_err(|error| format!("workdir resolution failed: {error}"))?
+}
+
+fn format_pty_outcome(outcome: crate::task::PtyOutcome) -> String {
+    match outcome {
+        crate::task::PtyOutcome::Completed { mut output, code } => {
+            if output.chars().count() > MAX_EXEC_OUTPUT {
+                let total = output.chars().count();
+                let head: String = output.chars().take(4096).collect();
+                let tail = crate::task::tail_chars(&output, 1024);
+                output = format!(
+                    "{head}\n\n[...middle omitted ({total} chars total)...]\n\n{tail}"
+                );
+            }
+            if !output.is_empty() && !output.ends_with('\n') {
+                output.push('\n');
+            }
+            output.push_str(&format!("[exit code: {code}]"));
+            output
+        }
+        crate::task::PtyOutcome::Running {
+            pty_session_id,
+            task_id,
+            mut output,
+        } => {
+            if output.chars().count() > MAX_EXEC_OUTPUT {
+                let total = output.chars().count();
+                let head: String = output.chars().take(4096).collect();
+                let tail = crate::task::tail_chars(&output, 1024);
+                output = format!(
+                    "{head}\n\n[...middle omitted ({total} chars total)...]\n\n{tail}"
+                );
+            }
+            if !output.is_empty() && !output.ends_with('\n') {
+                output.push('\n');
+            }
+            output.push_str(&format!(
+                "[PTY session still running: session_id={pty_session_id}, task_id={task_id}. Use WriteStdin with session_id=\"{pty_session_id}\" to send input or poll more output, or TaskStop with task_id=\"{task_id}\" to stop it.]"
+            ));
+            output
+        }
+    }
 }
 
 impl Tool for ExecCommand {
@@ -141,6 +197,8 @@ the background with run_in_background.",
                         },
                         "workdir": { "type": "string", "description": "Working directory for this command; relative paths are based on the workspace root. Defaults to the workspace root. Must be an existing directory." },
                         "login": { "type": "boolean", "description": "Unix only: true runs a login shell (-lc), loading the user's profile (PATH additions from nvm/pyenv/...). Default false (-c). Ignored on Windows, where PowerShell always runs with -NoProfile." },
+                        "tty": { "type": "boolean", "description": "true attaches a real interactive PTY (ConPTY on Windows, POSIX PTY on Unix) for REPLs, prompts, or interactive CLIs. If the process is still running after yield_time_ms, returns a session_id you can continue interacting with via WriteStdin." },
+                        "yield_time_ms": { "type": "integer", "description": "Only with tty=true: milliseconds to wait for exit or initial output before returning a live session_id (default 5000, range 50..30000)." },
                         "run_in_background": { "type": "boolean", "description": "true runs the command in the background and returns a task_id immediately (default false)" },
                         "timeout": { "type": "integer", "description": "Timeout in seconds; default 60, max 300. On timeout the command moves to a background task and keeps running without losing output" },
                         "sandbox_permissions": {
@@ -192,41 +250,92 @@ the background with run_in_background.",
             let shell =
                 crate::task::resolve_model_shell(args["shell"].as_str(), args["login"].as_bool())
                     .map_err(|error| format!("Invalid shell selection: {error}"))?;
-            let workdir = resolve_workdir(ctx.cwd, args["workdir"].as_str()).await?;
+            let workdir = resolve_workdir(
+                ctx.state.env.fs.clone(),
+                ctx.state.env.is_local(),
+                ctx.cwd,
+                args["workdir"].as_str(),
+            )
+            .await?;
+            let tty = args["tty"].as_bool().unwrap_or(false);
+            let run_in_background = args["run_in_background"].as_bool().unwrap_or(false);
+            if tty && run_in_background {
+                return Err(
+                    "Cannot combine `tty: true` with `run_in_background: true`; interactive PTY sessions stay alive automatically when still running after `yield_time_ms`."
+                        .to_string(),
+                );
+            }
+            if tty {
+                if !ctx.state.env.process.supports_pty() {
+                    return Err(
+                        "Interactive PTY sessions (`tty: true`) are not supported by the current execution environment."
+                            .to_string(),
+                    );
+                }
+                let yield_time_ms = args["yield_time_ms"]
+                    .as_u64()
+                    .unwrap_or(crate::task::DEFAULT_PTY_START_YIELD_MS);
+                let outcome = ctx
+                    .state
+                    .pty
+                    .start(
+                        ctx.state,
+                        crate::task::PtyStartRequest {
+                            workspace: ctx.cwd.to_path_buf(),
+                            workdir,
+                            command: command.to_string(),
+                            shell,
+                            yield_time_ms,
+                            sandbox_override: ctx.sandbox_override,
+                            sandbox_profile: ctx.sandbox_profile,
+                            additional_permissions: ctx.additional_permissions.clone(),
+                        },
+                    )
+                    .await?;
+                return Ok(ToolEffect::plain(format_pty_outcome(outcome)));
+            }
             // The classifier is enforced at the session layer: a hit either asks
             // for approval or is rejected outright, depending on the mode.
-            if args["run_in_background"].as_bool().unwrap_or(false) {
-                let task_id = crate::task::spawn_background_with_profile(
-                    ctx.state,
-                    ctx.cwd,
-                    &workdir,
-                    command,
-                    &shell,
-                    // The approved `require_escalated` profile is a property of
-                    // this command, not of foreground vs background. Dropping it
-                    // here silently downgraded an approved background escalation
-                    // to the ordinary workspace-write sandbox.
-                    ctx.sandbox_override,
-                    ctx.sandbox_profile,
-                    &ctx.additional_permissions,
+            if run_in_background {
+                let task_id = ctx.state.env.process.spawn_background(
+                    ctx.state.clone(),
+                    crate::task::ProcessBackgroundRequest {
+                        workspace: ctx.cwd.to_path_buf(),
+                        workdir,
+                        command: command.to_string(),
+                        shell,
+                        // The approved `require_escalated` profile is a property of
+                        // this command, not of foreground vs background. Dropping it
+                        // here silently downgraded an approved background escalation
+                        // to the ordinary workspace-write sandbox.
+                        sandbox_override: ctx.sandbox_override,
+                        sandbox_profile: ctx.sandbox_profile,
+                        additional_permissions: ctx.additional_permissions.clone(),
+                    },
                 );
                 return Ok(ToolEffect::plain(format!(
                     "Started in the background, task_id: {task_id}. Use TaskOutput to check its output and TaskStop to stop it."
                 )));
             }
             let secs = args["timeout"].as_u64().unwrap_or(60).clamp(1, 300);
-            match crate::task::run_foreground_with_profile(
-                ctx.state,
-                ctx.cwd,
-                &workdir,
-                command,
-                &shell,
-                std::time::Duration::from_secs(secs),
-                ctx.sandbox_override,
-                ctx.sandbox_profile,
-                &ctx.additional_permissions,
-            )
-            .await
+            match ctx
+                .state
+                .env
+                .process
+                .run_foreground(
+                    ctx.state.clone(),
+                    crate::task::ProcessRunRequest {
+                        workspace: ctx.cwd.to_path_buf(),
+                        workdir,
+                        command: command.to_string(),
+                        shell,
+                        timeout: std::time::Duration::from_secs(secs),
+                        sandbox_override: ctx.sandbox_override,
+                        sandbox_profile: ctx.sandbox_profile,
+                        additional_permissions: ctx.additional_permissions.clone(),
+                    },
+                )
+                .await
             {
                 crate::task::ForegroundOutcome::SpawnFailed { error } => {
                     Err(format!("Failed to start command: {error}"))
@@ -271,6 +380,70 @@ the background with run_in_background.",
     }
 }
 
+pub(crate) struct WriteStdin;
+
+impl Tool for WriteStdin {
+    fn name(&self) -> &'static str {
+        WRITE_STDIN_TOOL
+    }
+
+    fn is_shell(&self) -> bool {
+        true
+    }
+
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": WRITE_STDIN_TOOL,
+                "description": "Write characters to an active interactive PTY session started with `ExecCommand(tty: true)` and return newly produced output. Pass an empty `chars` (or omit it) to poll additional output without sending input. Include `\\n` (or `\\r`) to submit a line, or `\\u0003` (Ctrl+C) to interrupt.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "session_id": {
+                            "type": "string",
+                            "description": "PTY session identifier returned by ExecCommand(tty: true) (for example, `pty-1`)."
+                        },
+                        "chars": {
+                            "type": "string",
+                            "description": "Characters to write to the PTY's stdin. Omit or pass empty string to poll output without writing."
+                        },
+                        "yield_time_ms": {
+                            "type": "integer",
+                            "description": "Milliseconds to wait for output or process exit before returning (default 1000, range 50..30000)."
+                        }
+                    },
+                    "required": ["session_id"]
+                }
+            }
+        })
+    }
+
+    fn execute<'a>(
+        &'a self,
+        args: serde_json::Value,
+        ctx: ToolContext<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<ToolEffect, String>> + Send + 'a>> {
+        Box::pin(async move {
+            let session_id = args["session_id"]
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or("Missing required parameter: session_id")?;
+            let chars = args["chars"].as_str().unwrap_or("");
+            let yield_time_ms = args["yield_time_ms"]
+                .as_u64()
+                .unwrap_or(crate::task::DEFAULT_PTY_WRITE_YIELD_MS);
+            let outcome = ctx
+                .state
+                .pty
+                .write_stdin(ctx.state, session_id, chars, yield_time_ms)
+                .await?;
+            Ok(ToolEffect::plain(format_pty_outcome(outcome)))
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,17 +453,24 @@ mod tests {
         // Sessions hand the tool a canonical workspace; macOS's `temp_dir()`
         // sits behind the `/var` → `/private/var` symlink, so canonicalize the
         // fixture instead of assuming the raw path already matches.
+        let fs: std::sync::Arc<dyn crate::task::ExecutorFileSystem> =
+            std::sync::Arc::new(crate::task::LocalFileSystem);
         let workspace = canonicalize(&std::env::temp_dir()).unwrap();
-        assert_eq!(resolve_workdir(&workspace, None).await.unwrap(), workspace);
+        assert_eq!(
+            resolve_workdir(fs.clone(), true, &workspace, None)
+                .await
+                .unwrap(),
+            workspace
+        );
         let nested = workspace.join("pig-workdir-test");
         std::fs::create_dir_all(&nested).unwrap();
         assert_eq!(
-            resolve_workdir(&workspace, Some("pig-workdir-test"))
+            resolve_workdir(fs.clone(), true, &workspace, Some("pig-workdir-test"))
                 .await
                 .unwrap(),
             canonicalize(&nested).unwrap()
         );
-        let error = resolve_workdir(&workspace, Some("pig-missing-workdir"))
+        let error = resolve_workdir(fs, true, &workspace, Some("pig-missing-workdir"))
             .await
             .unwrap_err();
         assert!(error.contains("cannot be opened"), "{error}");

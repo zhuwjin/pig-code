@@ -80,17 +80,20 @@ impl Tool for EditFile {
                 return Err(message);
             }
             // The size guard runs before the freshness check: oversized files are rejected outright, never entering whole-read/whole-write
-            if let Some(err) = std::fs::metadata(&full).ok().and_then(|m| {
+            let fs = ctx.state.env.fs.as_ref();
+            if let Some(err) = fs.metadata(&full).ok().and_then(|m| {
                 file_size_error(
-                    m.len(),
+                    m.len,
                     MAX_EDIT_FILE_BYTES,
                     "not suitable for whole-file editing; use ExecCommand (sed/awk) for localized changes, or split the file first",
                 )
             }) {
                 return Err(err);
             }
-            check_fresh(ctx.state, &full, full.exists(), "editing")?;
-            let bytes = std::fs::read(&full).map_err(|e| read_io_error(path, &full, e))?;
+            check_fresh(ctx.state, &full, fs.exists(&full), "editing")?;
+            let bytes = fs
+                .read_all(&full)
+                .map_err(|e| read_io_error_with_fs(fs, path, &full, e))?;
             let doc = pig_utils::text::decode(&bytes)?;
             let content = doc.text;
             // The match + replacement computation lives in compute_edit (shared with the approval preview; what the preview shows is what gets applied)
@@ -127,14 +130,15 @@ impl Tool for EditFile {
                     ));
                 }
             };
-            ctx.tracker.snapshot(&full)?;
+            ctx.tracker.snapshot_with_fs(fs, &full)?;
             // Matching and replacement both happen on the LF view (already normalized by decoding); the original encoding/line ending is restored on write-back
             let after = outcome.after;
             let encoded = pig_utils::text::encode(&after, doc.encoding, doc.bom, doc.line_ending)?;
-            atomic_write(&full, &encoded)?;
+            fs.write_atomic(&full, &encoded)
+                .map_err(|e| format!("Failed to write {}: {e}", full.display()))?;
             // Refresh freshness after the write: immediately editing the file just written must be legal
             record_read_state(ctx.state, &full, &encoded, false, None);
-            let file_change = ctx.tracker.diff(ctx.cwd, &full).ok();
+            let file_change = ctx.tracker.diff_with_fs(fs, ctx.cwd, &full).ok();
             let edit_diff = Some(per_edit_diff(ctx.cwd, &full, &content, &after));
             let output = if replace_all {
                 format!("Edited {path} (replaced {} occurrences)", outcome.replaced)

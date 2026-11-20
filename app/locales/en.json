@@ -448,6 +448,8 @@
   "tools": {
     "running": "Running",
     "terminal": "Terminal",
+    "writing_stdin": "Sending input",
+    "write_stdin": "Terminal input",
     "read": "Read",
     "writing": "Writing",
     "write": "Write",

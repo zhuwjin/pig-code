@@ -448,6 +448,8 @@
   "tools": {
     "running": "运行中",
     "terminal": "终端",
+    "writing_stdin": "发送输入中",
+    "write_stdin": "终端输入",
     "read": "读取",
     "writing": "写入中",
     "write": "写入",
