@@ -802,7 +802,7 @@ impl HookShell {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HookSource {
-    /// ~/.pigcodets/config.toml
+    /// ~/.pigcode/config.toml
     User,
     /// .pigcode/hooks.toml (gated by the workspace trust dialog)
     Project,
@@ -812,7 +812,7 @@ pub enum HookSource {
 }
 
 /// Lifecycle hooks configuration (Claude Code-compatible stdin/exit-code
-/// contract). User level lives under `[hooks]` in ~/.pigcodets/config.toml; the
+/// contract). User level lives under `[hooks]` in ~/.pigcode/config.toml; the
 /// project file `.pigcode/hooks.toml` uses the same `[hooks]` root shape and
 /// is merged per event (user entries first, project entries after). Global
 /// knobs (enabled/timeout_ms/max_output_bytes) come from the user level only.

@@ -1,6 +1,6 @@
 //! A standalone mock provider for GUI manual self-testing:
 //! `cargo run -p pig-provider --example mock_provider`
-//! then point ~/.pigcodets/config.toml at the printed base_url.
+//! then point ~/.pigcode/config.toml at the printed base_url.
 
 fn main() {
     let port = pig_provider::mock::start_mock_server();

@@ -9,7 +9,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
-/// Data directory: the PIG_DATA_DIR environment variable first (self-test isolation); default ~/.pigcodets.
+/// Data directory: the PIG_DATA_DIR environment variable first (self-test isolation); default ~/.pigcode.
 pub fn data_dir() -> PathBuf {
     std::env::var_os("PIG_DATA_DIR")
         .map(PathBuf::from)
@@ -19,7 +19,7 @@ pub fn data_dir() -> PathBuf {
 fn default_data_dir() -> PathBuf {
     home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".pigcodets")
+        .join(".pigcode")
 }
 
 /// Session attachment media layout: `{sessions_dir}/{session_id}.media/` (the
@@ -140,10 +140,10 @@ mod tests {
     }
 
     #[test]
-    fn default_data_directory_is_pigcodets() {
+    fn default_data_directory_is_pigcode() {
         assert_eq!(
             default_data_dir(),
-            home_dir().unwrap_or_default().join(".pigcodets")
+            home_dir().unwrap_or_default().join(".pigcode")
         );
     }
 }

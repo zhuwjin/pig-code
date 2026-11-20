@@ -9,7 +9,7 @@ use pig_protocol::{
 use sha2::{Digest as _, Sha256};
 
 pub const DEFAULT_MARKETPLACE_INDEX_URL: &str =
-    "https://raw.githubusercontent.com/zhuwjin/pig-code-ts-plugins/main/index.json";
+    "https://raw.githubusercontent.com/zhuwjin/pig-code-plugins/main/index.json";
 
 const MAX_CATALOG_BYTES: usize = 1024 * 1024;
 const MAX_PACKAGE_BYTES: u64 = 16 * 1024 * 1024;

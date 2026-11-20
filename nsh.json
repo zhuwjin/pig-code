@@ -1,6 +1,6 @@
 {
-  "name": "pig-code-ts",
-  "id": "com.example.pigcodets",
+  "name": "pig-code",
+  "id": "com.example.pigcode",
   "version": "1.0.0",
   "build": 1,
   "rust": ".",

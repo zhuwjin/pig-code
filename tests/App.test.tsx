@@ -37,8 +37,8 @@ async function installMoon(app: Awaited<ReturnType<typeof openApp>>) {
   expect(app.value("id:plugin-root-path")).toBe("target/test-tmp/moon-plugin/root.pub");
   expect(app.enabled("id:plugin-install")).toBe(true);
   await app.press("id:plugin-install");
-  await app.waitFor("text:/com.pigcodets.plugins.moon/", { timeout: 10000 });
-  await app.press("id:theme-package-com.pigcodets.plugins.moon");
+  await app.waitFor("text:/com.pigcode.plugins.moon/", { timeout: 10000 });
+  await app.press("id:theme-package-com.pigcode.plugins.moon");
   await app.press("id:settings-back");
 }
 
@@ -405,10 +405,10 @@ test("loads, applies, disables and restores plugin themes", async () => {
   expect(app.texts()).toContain("Moon Glass");
 
   await app.press("id:settings-plugins");
-  await app.press("id:theme-package-com.pigcodets.plugins.moon");
+  await app.press("id:theme-package-com.pigcode.plugins.moon");
   await app.waitFor("id:theme-option-moon", { state: "gone" });
   expect(app.spanStyle("id:title-bar >> text:Pig Code v0.1.0").color).toBe("#d4d4d4ff");
-  await app.press("id:theme-package-com.pigcodets.plugins.moon");
+  await app.press("id:theme-package-com.pigcode.plugins.moon");
   await app.press("id:settings-appearance");
   await app.waitFor("id:theme-option-moon");
 });
@@ -418,10 +418,10 @@ test("saves numeric enum plugin configuration without changing its JSON type", a
   await installMoon(app);
   await app.press("id:title-theme-settings");
   await app.press("id:settings-plugins");
-  await app.press("id:plugin-config-com.pigcodets.plugins.moon");
-  await app.press("id:plugin-config-select-com.pigcodets.plugins.moon-max_results");
-  await app.press("id:plugin-config-option-com.pigcodets.plugins.moon-max_results-2");
-  await app.press("id:plugin-config-save-com.pigcodets.plugins.moon");
+  await app.press("id:plugin-config-com.pigcode.plugins.moon");
+  await app.press("id:plugin-config-select-com.pigcode.plugins.moon-max_results");
+  await app.press("id:plugin-config-option-com.pigcode.plugins.moon-max_results-2");
+  await app.press("id:plugin-config-save-com.pigcode.plugins.moon");
   await app.waitFor("text:已保存", { timeout: 10000 });
 });
 

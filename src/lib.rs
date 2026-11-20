@@ -8,8 +8,8 @@ mod theme;
 
 use nsh_core::prelude::*;
 
-/// Native exports available to TSX through `pig-code-ts/native`.
-#[native_module("pig-code-ts/native")]
+/// Native exports available to TSX through `pig-code/native`.
+#[native_module("pig-code/native")]
 fn native(registry: &mut Registry) {
     registry.class::<agent::Agent>();
     registry.class::<code_highlight::CodeHighlighter>();

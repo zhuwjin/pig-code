@@ -158,7 +158,7 @@ mod tests {
         let certificate = nsh_engine::package::certify(
             &root,
             &release.public(),
-            &["com.pigcodets.plugins.*".into()],
+            &["com.pigcode.plugins.*".into()],
             now.saturating_sub(60),
             now + 3600,
         );
@@ -227,7 +227,7 @@ mod tests {
         std::fs::write(&root_path, root.public().to_base64()).expect("write root public key");
         let loaded = load_verified(&package_path, &root_path, &directory.join("data"))
             .expect("load signed moon package");
-        assert_eq!(loaded.manifest.id, "com.pigcodets.plugins.moon");
+        assert_eq!(loaded.manifest.id, "com.pigcode.plugins.moon");
         assert_eq!(loaded.manifest.contributions.tools.len(), 1);
         assert!(loaded.backend.is_some());
         let mut registry = pig_core::plugins::PluginRegistry::new(directory.join("registry"));

@@ -1,9 +1,9 @@
-# pig-code-ts
+# pig-code
 
 Pig Code's NSH + TSX desktop app. `App.tsx` is the entry point; `app/view.tsx` composes the interface from the
 region components in `app/components/`. Shared state lives in `app/store.ts` and `app/theme.ts`. Tests and their
 fixture entries live in `tests/`; standalone reproduction entries live in `examples/repros/`. The directory is
-also a crate (`Cargo.toml`, `src/lib.rs`; `nsh.json` `"rust": "."`) whose `#[native_module("pig-code-ts/native")]`
+also a crate (`Cargo.toml`, `src/lib.rs`; `nsh.json` `"rust": "."`) whose `#[native_module("pig-code/native")]`
 exports the native `Agent` connection. The existing agent engine lives in `crates/pig-core`, with `pig-protocol`,
 `pig-provider` and `pig-utils` alongside it. TSX sends commands and receives ordered event batches through this
 connection. `app/components/icon.tsx` uses the gallery's Canvas drawing pattern with original
@@ -31,7 +31,7 @@ demonstrates a backend tool, a command, a local model provider, themes, a Skill 
 
 `nsh` describes the crate's exports with a small program of the crate and builds the app's hosts with it linked in.
 TSX edits are hot updates; Rust edits rebuild and restart the app. The first build writes the crate's TypeScript declarations into
-`.nsh/types/pig-code-ts/native.d.ts`, doc comments included.
+`.nsh/types/pig-code/native.d.ts`, doc comments included.
 
 Native methods run according to their Rust signatures: synchronous commands such as `Agent.newSession` return directly
 (or throw), while `Agent.listen` returns a Promise and delivers ordered event batches as an NSH task. Add further native

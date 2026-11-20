@@ -362,10 +362,10 @@
       "nsh check && nsh test": "exit 0"
     },
     "ci": {
-      "macos": "https://github.com/zhuwjin/pig-code-ts/actions/runs/44605971419/job/135849631019",
-      "windows": "https://github.com/zhuwjin/pig-code-ts/actions/runs/44605971419/job/135849632214",
-      "linux": "https://github.com/zhuwjin/pig-code-ts/actions/runs/44605971419/job/135849632290"
+      "macos": "https://github.com/zhuwjin/pig-code/actions/runs/44605971419/job/135849631019",
+      "windows": "https://github.com/zhuwjin/pig-code/actions/runs/44605971419/job/135849632214",
+      "linux": "https://github.com/zhuwjin/pig-code/actions/runs/44605971419/job/135849632290"
     },
-    "issue": "https://github.com/zhuwjin/pig-code-ts/issues/9"
+    "issue": "https://github.com/zhuwjin/pig-code/issues/9"
   }
 }

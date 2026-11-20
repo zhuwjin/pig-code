@@ -1,5 +1,5 @@
 import { batch, signal } from "nsh";
-import { Agent } from "pig-code-ts/native";
+import { Agent } from "pig-code/native";
 import { t } from "./i18n";
 import {
   AppConfig,

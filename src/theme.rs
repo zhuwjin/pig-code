@@ -43,7 +43,7 @@ mod tests {
     #[test]
     fn example_package_loads_a_selectable_theme_and_style_pack() {
         let root = std::env::temp_dir().join(format!(
-            "pig-code-ts-theme-test-{}-{}",
+            "pig-code-theme-test-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

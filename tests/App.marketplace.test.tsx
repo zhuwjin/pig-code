@@ -55,7 +55,7 @@ test("loads the built-in official marketplace without network in selftest", asyn
   await app.waitFor("id:marketplace-no-packages", { timeout: 10000 });
   expect(app.count("id:marketplace-source-official")).toBe(1);
   expect(app.count("id:marketplace-remove-official")).toBe(0);
-  expect(app.texts()).toContain("pig-code-ts-plugins");
+  expect(app.texts()).toContain("pig-code-plugins");
   expect(app.texts()).toContain("sha256:488ba14b57449a35989a3a1d27a8fdf7d9596d6e9c427b46c9669639104df9c3");
   expect(app.count("id:marketplace-url-input")).toBe(1);
   expect(app.count("id:plugin-package-path")).toBe(0);

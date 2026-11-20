@@ -2454,7 +2454,7 @@ mod tests {
         let certificate = certify(
             &root,
             &release.public(),
-            &["com.pigcodets.plugins.*".into()],
+            &["com.pigcode.plugins.*".into()],
             now.saturating_sub(60),
             now + 3600,
         );

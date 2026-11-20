@@ -361,8 +361,8 @@ Use focused, serial checks while changing the runtime:
 
 ```sh
 cargo check -p pig-protocol
-cargo test -p nsh-app-pig-code-ts signed_moon_package_loads_and_wrong_root_is_refused -- --test-threads=1
-cargo test -p nsh-app-pig-code-ts a_signed_sdk_package_activates_and_answers_tool_calls -- --test-threads=1
+cargo test -p nsh-app-pig-code signed_moon_package_loads_and_wrong_root_is_refused -- --test-threads=1
+cargo test -p nsh-app-pig-code a_signed_sdk_package_activates_and_answers_tool_calls -- --test-threads=1
 cargo test -p pig-core --lib plugins:: -- --test-threads=1
 cargo test -p pig-core --test plugin_sessions -- --test-threads=1
 nsh check

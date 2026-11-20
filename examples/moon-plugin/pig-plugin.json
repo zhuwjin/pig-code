@@ -1,6 +1,6 @@
 {
   "apiVersion": 1,
-  "id": "com.pigcodets.plugins.moon",
+  "id": "com.pigcode.plugins.moon",
   "name": {
     "zh-CN": "月亮 Agent",
     "en": "Moon Agent"

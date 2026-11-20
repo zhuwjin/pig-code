@@ -149,7 +149,7 @@ impl Drop for AgentHandle {
     }
 }
 
-/// Start the agent thread. `config_path` None reads the default ~/.pigcodets/config.toml.
+/// Start the agent thread. `config_path` None reads the default ~/.pigcode/config.toml.
 pub fn spawn_agent(config_path: Option<PathBuf>, cwd: PathBuf) -> AgentHandle {
     let data_dir = pig_utils::data_dir();
     let credentials = if std::env::var_os("PIG_SELFTEST").is_some() {

@@ -10,7 +10,7 @@ import {
   View,
   type ScrollRef,
 } from "nsh";
-import { CodeHighlighter } from "pig-code-ts/native";
+import { CodeHighlighter } from "pig-code/native";
 import { Scrollbar, type EditorToken } from "nsh/base";
 
 export type CodeViewLine = { number?: number; text: string };

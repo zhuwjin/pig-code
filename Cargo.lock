@@ -3314,7 +3314,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "nsh-app-pig-code-ts"
+name = "nsh-app-pig-code"
 version = "0.1.0"
 dependencies = [
  "async-channel",

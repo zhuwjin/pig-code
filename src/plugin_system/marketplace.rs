@@ -33,7 +33,7 @@ pub struct MarketplacePreview {
 fn official_source() -> MarketplaceSource {
     MarketplaceSource {
         id: "official".into(),
-        name: "pig-code-ts-plugins".into(),
+        name: "pig-code-plugins".into(),
         index_url: DEFAULT_MARKETPLACE_INDEX_URL.into(),
         official: true,
         fingerprint: OFFICIAL_MARKETPLACE_FINGERPRINT.into(),

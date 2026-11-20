@@ -37,8 +37,8 @@ impl Agent {
             .unwrap_or_else(|| PathBuf::from("."));
         let (handle, selftest_dir, data_dir) = if selftest == Some(true) {
             let id = SELFTEST_ID.fetch_add(1, Ordering::Relaxed);
-            let root = std::env::temp_dir()
-                .join(format!("pig-code-ts-selftest-{}-{id}", std::process::id()));
+            let root =
+                std::env::temp_dir().join(format!("pig-code-selftest-{}-{id}", std::process::id()));
             let workspace = root.join("workspace");
             let data_dir = root.join("data");
             std::fs::create_dir_all(&workspace).expect("create selftest workspace");

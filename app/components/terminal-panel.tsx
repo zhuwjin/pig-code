@@ -1,7 +1,7 @@
 import { Animated, Easing, effect, reduceMotion, signal, Text, untracked, View, createAnimatedValue } from "nsh";
 import type { Signal } from "nsh";
 import { Button, Terminal, type TerminalRef } from "nsh/base";
-import { Terminal as NativeTerminal } from "pig-code-ts/native";
+import { Terminal as NativeTerminal } from "pig-code/native";
 import { t } from "../i18n";
 import type { UiContext } from "../ui-context";
 import { Icon } from "./icon";
