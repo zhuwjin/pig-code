@@ -78,6 +78,7 @@ impl Session {
             });
             self.agent.history.push(ChatMsg::user(history_text.clone()));
             self.user_ixs.push(Some(self.agent.history.len() - 1));
+            self.tracker.begin_turn_checkpoint();
             self.emit(
                 |session_id| Event::UserMessage {
                     session_id,
@@ -504,6 +505,7 @@ impl Session {
             }
             self.agent.history.push(user_msg);
             self.user_ixs.push(Some(self.agent.history.len() - 1));
+            self.tracker.begin_turn_checkpoint();
             if first_message {
                 spawn_title_generation(&self.store, &self.agent.id, &content, config, tx);
             }
@@ -3145,6 +3147,152 @@ mod tests {
                 &read_call, &tools, perms, false, media, &deny_rules, &state, &dir, &hooks,
             ),
             scheduler::ToolAccessPlan::Exclusive
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn read_injects_subdir_agents_md_once_and_recall_restores_turn_files() {
+        let dir = std::env::temp_dir().join(format!(
+            "pig-subdir-undo-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let data_dir = dir.join("data");
+        let sessions_dir = data_dir.join("sessions");
+        let sub_dir = dir.join("pkg/sub");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        std::fs::create_dir_all(&sub_dir).unwrap();
+        std::fs::write(sub_dir.join("AGENTS.md"), "Always keep sub tidy.").unwrap();
+        std::fs::write(sub_dir.join("code.rs"), "pub fn v0() {}\n").unwrap();
+
+        let store = Arc::new(Mutex::new(
+            crate::store::Store::open(&data_dir).expect("store"),
+        ));
+        let (task_tx, _) = async_channel::bounded(128);
+        let registry = crate::plugins::PluginRegistry::new(data_dir.clone());
+        let meta = SessionMeta {
+            id: "s-sub-undo".into(),
+            title: String::new(),
+            title_custom: false,
+            cwd: dir.clone(),
+            created_at: 1,
+            updated_at: 1,
+            pinned: false,
+            archived: false,
+            provider_id: None,
+            model_id: None,
+            reasoning_level: None,
+            permissions: ExecMode::Auto.permissions(),
+            plan_enabled: false,
+        };
+        let mut session = Session::create(
+            meta,
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(HashMap::new())),
+            store.clone(),
+            &sessions_dir,
+            data_dir.clone(),
+            task_tx,
+            &registry.into_shared(),
+            None,
+        )
+        .expect("session");
+        session.set_permissions(ExecMode::Auto.permissions());
+
+        // Simulate Turn 1 accepted user message + Read + Write inside pkg/sub.
+        session.agent.history.push(ChatMsg::system("sys".into()));
+        session.agent.history.push(ChatMsg::user("update sub".into()));
+        session.user_ixs.push(Some(1));
+        session.tracker.begin_turn_checkpoint();
+
+        let (tx, rx) = async_channel::unbounded();
+        let cancel = CancellationToken::new();
+        let read_calls = vec![ToolCall {
+            id: "r1".into(),
+            name: "Read".into(),
+            arguments: r#"{"path":"pkg/sub/code.rs"}"#.into(),
+        }];
+        let read_items = vec!["item-r1".into()];
+        assert!(
+            session
+                .run_parallel_group(&read_calls, &read_items, 0, 1, "turn-1", 128_000, &tx, &cancel)
+                .await
+        );
+        let mut read_out_1 = String::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let Event::ToolCallEnd { output, .. } = ev {
+                read_out_1 = output;
+            }
+        }
+        assert!(
+            read_out_1.contains("Always keep sub tidy."),
+            "first Read in pkg/sub must inject nested AGENTS.md: {read_out_1}"
+        );
+
+        // Second Read in the same directory must not repeat the reminder.
+        let read_items_2 = vec!["item-r2".into()];
+        assert!(
+            session
+                .run_parallel_group(&read_calls, &read_items_2, 0, 1, "turn-1", 128_000, &tx, &cancel)
+                .await
+        );
+        let mut read_out_2 = String::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let Event::ToolCallEnd { output, .. } = ev {
+                read_out_2 = output;
+            }
+        }
+        assert!(
+            !read_out_2.contains("Always keep sub tidy."),
+            "second Read must deduplicate nested AGENTS.md: {read_out_2}"
+        );
+
+        // Write a modification to pkg/sub/code.rs during Turn 1, then flush & recall.
+        let write_calls = vec![ToolCall {
+            id: "w1".into(),
+            name: "Write".into(),
+            arguments: r#"{"path":"pkg/sub/code.rs","content":"pub fn v1() {}\n"}"#.into(),
+        }];
+        let write_items = vec!["item-w1".into()];
+        assert!(
+            session
+                .run_parallel_group(&write_calls, &write_items, 0, 1, "turn-1", 128_000, &tx, &cancel)
+                .await
+        );
+        session.flush_turn_changes(&tx);
+        assert_eq!(
+            std::fs::read_to_string(sub_dir.join("code.rs")).unwrap(),
+            "pub fn v1() {}\n"
+        );
+        while rx.try_recv().is_ok() {}
+
+        session.recall_last_message(&tx).expect("recall turn 1");
+        assert_eq!(
+            std::fs::read_to_string(sub_dir.join("code.rs")).unwrap(),
+            "pub fn v0() {}\n",
+            "recall must restore Turn 1 file modifications"
+        );
+        let mut saw_reverted = false;
+        let mut saw_recalled = false;
+        while let Ok(ev) = rx.try_recv() {
+            match ev {
+                Event::FileReverted { path, .. } if path == "pkg/sub/code.rs" => {
+                    saw_reverted = true;
+                }
+                Event::MessageRecalled { .. } => saw_recalled = true,
+                _ => {}
+            }
+        }
+        assert!(saw_reverted, "recall must emit FileReverted for restored file");
+        assert!(saw_recalled, "recall must emit MessageRecalled");
+        assert!(
+            store.lock().unwrap().file_changes("s-sub-undo").is_empty(),
+            "SQLite file_changes cleared after restoring to baseline"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

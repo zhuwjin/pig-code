@@ -1059,6 +1059,56 @@ The sandbox stays on: ordinary paths become writable, but protected files, deny 
     for context in pre_contexts {
         output.push_str(&format!("\n\n[hook context]\n{context}"));
     }
+    // Lazy subdirectory AGENTS.md discovery (Kimi/DeepSeek pattern): when a
+    // successful file/search/shell tool accesses a subdirectory inside the
+    // workspace, inject any previously unseen nested AGENTS.md files as a
+    // `<system-reminder>` on the tool result without mutating the frozen
+    // system prompt (zero prefix-cache invalidation).
+    if !is_error {
+        let mut accessed = tool::file_tool_targets(ctx.cwd, call);
+        if tool::is_exec_command(&call.name)
+            && let Some(workdir) = serde_json::from_str::<serde_json::Value>(&call.arguments)
+                .ok()
+                .and_then(|args| args["workdir"].as_str().map(str::to_string))
+                .filter(|w| !w.trim().is_empty())
+        {
+            let raw = Path::new(&workdir);
+            accessed.push(if raw.is_absolute() {
+                raw.to_path_buf()
+            } else {
+                ctx.cwd.join(raw)
+            });
+        }
+        if !accessed.is_empty() {
+            let discovered = {
+                let mut known = ctx
+                    .state
+                    .known_agents_md
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                // If the model explicitly Read an AGENTS.md file itself, mark
+                // it known first so we never echo back a file it just read.
+                if call.name == "Read" {
+                    for path in &accessed {
+                        if path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .is_some_and(|n| n.eq_ignore_ascii_case("AGENTS.md"))
+                        {
+                            known.insert(path.canonicalize().unwrap_or_else(|_| path.clone()));
+                        }
+                    }
+                }
+                prompt::discover_subdir_agents_md(ctx.cwd, &accessed, &mut known)
+            };
+            if let Some(reminder) = prompt::format_subdir_agents_md_reminder(ctx.cwd, &discovered) {
+                if !output.is_empty() {
+                    output.push_str("\n\n");
+                }
+                output.push_str(&reminder);
+            }
+        }
+    }
     // Media enters the model context via history; callers persist its
     // references alongside the ToolCall's output text, never base64 in rollout.
     // An unsupported input kind is degraded to deterministic text here, before

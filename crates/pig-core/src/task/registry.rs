@@ -476,6 +476,10 @@ pub struct SessionToolState {
     /// Session-scoped deferred runtime tool catalog and append-only activation
     /// set (model-agnostic `ToolSearch`).
     pub deferred_tools: Arc<Mutex<crate::tool::DeferredToolRegistry>>,
+    /// Canonical paths of `AGENTS.md` files already visible to the model
+    /// (baseline global/ancestor files seeded at session start, plus any
+    /// subdirectory `AGENTS.md` lazily discovered or read directly).
+    pub known_agents_md: Arc<Mutex<HashSet<PathBuf>>>,
 }
 
 impl Clone for SessionToolState {
@@ -502,6 +506,7 @@ impl Clone for SessionToolState {
             env: self.env.clone(),
             pty: self.pty.clone(),
             deferred_tools: self.deferred_tools.clone(),
+            known_agents_md: self.known_agents_md.clone(),
         }
     }
 }
@@ -550,6 +555,7 @@ impl SessionToolState {
             env: super::env::ExecutionEnvironment::local(),
             pty: Arc::new(super::pty::PtySessionManager::new()),
             deferred_tools: Arc::new(Mutex::new(crate::tool::DeferredToolRegistry::default())),
+            known_agents_md: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 

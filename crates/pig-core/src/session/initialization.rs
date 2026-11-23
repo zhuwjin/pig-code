@@ -112,6 +112,15 @@ fn assemble_session(parts: SessionParts, frozen: SessionFrozen) -> Session {
     )
     .with_notification_store(parts.store.clone(), HashMap::new())
     .with_data_dir(parts.data_dir.clone());
+    {
+        let mut known = state
+            .known_agents_md
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for path in prompt::baseline_agents_md_paths(&parts.data_dir, &parts.cwd) {
+            known.insert(path);
+        }
+    }
     let session = Session {
         delivery_receipts: state.delivery_receipts.clone(),
         state,
@@ -322,6 +331,7 @@ impl Session {
             .collect();
         let mut tracker = ChangeTracker::default();
         tracker.restore(originals);
+        tracker.seed_empty_turn_checkpoints(user_ixs.len());
         // After resume, take over the same JSONL and keep appending; failure
         // must be loud (setting None would silently drop all subsequent
         // records). The handle was opened above before tool recovery.

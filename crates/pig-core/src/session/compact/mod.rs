@@ -62,6 +62,77 @@ pub(crate) fn compact_trigger(config: &ResolvedModel) -> u64 {
         .saturating_sub(config.max_output_tokens + COMPACT_CONTEXT_BUFFER)
 }
 
+/// Scan the durable session JSONL rollout on disk and partition its lines
+/// (1-based, inclusive) into compaction windows separated by existing
+/// `"type":"compact"` records. Returns `None` when the file is unreadable or
+/// has no conversation lines beyond line 1 (`meta`).
+pub(crate) fn rollout_compaction_windows(path: &Path) -> Option<Vec<(usize, usize)>> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let mut windows: Vec<(usize, usize)> = Vec::new();
+    let mut window_start: usize = 2; // line 1 is `meta`
+    let mut total_lines: usize = 0;
+    for (idx, line) in content.lines().enumerate() {
+        let line_no = idx + 1;
+        total_lines = line_no;
+        if line_no == 1 {
+            continue;
+        }
+        let is_compact = serde_json::from_str::<serde_json::Value>(line)
+            .ok()
+            .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(str::to_string))
+            .is_some_and(|t| t == "compact");
+        if is_compact {
+            let end = line_no.saturating_sub(1);
+            if end >= window_start {
+                windows.push((window_start, end));
+            }
+            window_start = line_no + 1;
+        }
+    }
+    if total_lines >= window_start {
+        windows.push((window_start, total_lines));
+    }
+    (!windows.is_empty()).then_some(windows)
+}
+
+/// Build a Kimi-style `## Context Recovery` footer pointing the model at the
+/// session's append-only JSONL transcript and exact 1-based line ranges of
+/// compacted windows, so it can `Grep` and `Read` earlier details on demand
+/// without guessing.
+pub(crate) fn context_recovery_footer(path: &Path, windows: &[(usize, usize)]) -> Option<String> {
+    if windows.is_empty() {
+        return None;
+    }
+    let last_ix = windows.len() - 1;
+    let mut window_lines = Vec::with_capacity(windows.len() + 1);
+    for (ix, (start, end)) in windows.iter().enumerate() {
+        let label = format!("  window {}: lines {start}-{end}", ix + 1);
+        if ix == last_ix {
+            window_lines.push(format!(
+                "{label}  <- the conversation this note summarizes"
+            ));
+        } else {
+            window_lines.push(label);
+        }
+    }
+    let next_start = windows[last_ix].1 + 1;
+    window_lines.push(format!(
+        "  window {} (current) starts at line {next_start} with this compact record — already in your context; no need to read it.",
+        windows.len() + 1
+    ));
+    Some(format!(
+        "## Context Recovery\n\
+         Everything before this note remains on disk in this session's append-only JSONL rollout (read-only):\n\
+           {}\n\
+         {}\n\
+         If you need exact earlier command output, error text, file snippets, or user wording, look it up there instead of guessing:\n\
+         - One JSON object per line (`type`: `user`, `assistant`, `tool_call`, `compact`, `recall`; skip bookkeeping records like `step_usage`, `turn_stats`, `prompt_snapshot`).\n\
+         - Lines can be long: use Grep on the file for a keyword to locate exact line numbers, then Read only those lines with `offset` and `limit`.",
+        path.display(),
+        window_lines.join("\n"),
+    ))
+}
+
 /// Changed-file sentence in the compact note, capped by count and characters
 /// with an explicit remainder. Paths are untrusted user data; the note is not a
 /// place for an unbounded dirty-tree dump.
@@ -189,8 +260,19 @@ impl Session {
             .map_or(0, |schemas| estimate_schemas_tokens(schemas));
         let changed_note = changed_files_note(&self.tracker.tracked_paths());
         let active_reminder = crate::task::notification::active_task_reminder(&self.state.tasks);
+        let recovery_footer = self.rollout.as_ref().and_then(|rollout| {
+            let path = rollout.path();
+            let windows = rollout_compaction_windows(path)?;
+            context_recovery_footer(path, &windows)
+        });
+        let combined_suffix = match (active_reminder.as_deref(), recovery_footer.as_deref()) {
+            (Some(a), Some(b)) => Some(format!("{a}\n\n{b}")),
+            (Some(a), None) => Some(a.to_string()),
+            (None, Some(b)) => Some(b.to_string()),
+            (None, None) => None,
+        };
         let note_reserve = compaction_note_reserve(automatic, Some(&changed_note))
-            + active_reminder
+            + combined_suffix
                 .as_deref()
                 .map(estimate_system_tokens)
                 .unwrap_or(0);
@@ -336,7 +418,7 @@ impl Session {
             automatic,
             summary.as_deref(),
             Some(&changed_note),
-            active_reminder.as_deref(),
+            combined_suffix.as_deref(),
             tools_tokens,
         ) {
             Ok(installed) => installed,
@@ -418,6 +500,8 @@ impl Session {
         self.sync_rollout();
         self.report_rollout_failure(tx);
         self.agent.history = next_history;
+        let keep_checkpoints: Vec<bool> = next_user_ixs.iter().map(Option::is_some).collect();
+        self.tracker.clear_compacted_checkpoints(&keep_checkpoints);
         self.user_ixs = next_user_ixs;
         // Reset the usage watermark to an estimate of the compacted history
         // (corrected by the next real sample): without the reset the watermark

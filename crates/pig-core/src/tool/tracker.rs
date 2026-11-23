@@ -23,6 +23,23 @@ pub struct ChangeTracker {
     originals: Arc<Mutex<BaselineMap>>,
     dirty: Arc<Mutex<HashSet<PathBuf>>>,
     turn_originals: Option<Arc<Mutex<BaselineMap>>>,
+    /// Per-turn pre-write snapshot stack aligned 1:1 with the root session's
+    /// recallable `user_ixs` stack. Enables coordinated conversation + file
+    /// undo on `recall_last_message` (Kimi-style turn checkpoints).
+    turn_checkpoints: Vec<BaselineMap>,
+}
+
+/// Outcome for one file restored by [`ChangeTracker::pop_and_restore_last_turn`].
+#[derive(Debug, Clone)]
+pub enum TurnRevertOutcome {
+    /// File returned to its pre-session baseline (or deleted when originally absent).
+    RevertedToBaseline {
+        full_path: PathBuf,
+        rel_path: String,
+    },
+    /// File returned to an earlier turn's state, which still differs from the
+    /// session baseline.
+    UpdatedDiff(FileChange),
 }
 
 impl Default for ChangeTracker {
@@ -31,6 +48,7 @@ impl Default for ChangeTracker {
             originals: Arc::default(),
             dirty: Arc::default(),
             turn_originals: Some(Arc::default()),
+            turn_checkpoints: Vec::new(),
         }
     }
 }
@@ -49,6 +67,7 @@ impl ChangeTracker {
             originals: Arc::clone(&self.originals),
             dirty: Arc::clone(&self.dirty),
             turn_originals: self.turn_originals.clone(),
+            turn_checkpoints: Vec::new(),
         }
     }
 
@@ -59,6 +78,7 @@ impl ChangeTracker {
             originals: Arc::clone(&self.originals),
             dirty: Arc::clone(&self.dirty),
             turn_originals: None,
+            turn_checkpoints: Vec::new(),
         }
     }
 }
@@ -248,16 +268,54 @@ impl ChangeTracker {
         })
     }
 
-    /// Compute and clear "this turn's changes": per file, the net diff of "before the first write of this turn → current disk" (LF view).
-    /// A zero net delta (reverted to the original within the turn) produces nothing; deleted files produce nothing for now.
-    pub fn take_turn_changes(&mut self, cwd: &Path) -> Vec<FileChange> {
+    /// Seed empty checkpoint slots to align with a restored `user_ixs` stack
+    /// after session load (pre-restart turns have no per-turn undo snapshots).
+    pub fn seed_empty_turn_checkpoints(&mut self, count: usize) {
+        self.turn_checkpoints.clear();
+        self.turn_checkpoints
+            .resize_with(count, HashMap::new);
+    }
+
+    /// Open a new turn checkpoint slot aligned with a newly accepted recallable
+    /// user message. Flushes any leftover `turn_originals` into the previous
+    /// slot first so no pre-write baseline is silently dropped.
+    pub fn begin_turn_checkpoint(&mut self) {
+        self.drain_turn_originals_into_top();
+        self.turn_checkpoints.push(HashMap::new());
+    }
+
+    /// Clear per-turn file snapshots for recall entries that compaction turned
+    /// into non-recallable tombstones (Kimi's compaction-boundary stop).
+    pub fn clear_compacted_checkpoints(&mut self, keep_mask: &[bool]) {
+        self.drain_turn_originals_into_top();
+        for (slot, &keep) in self.turn_checkpoints.iter_mut().zip(keep_mask.iter()) {
+            if !keep {
+                slot.clear();
+            }
+        }
+    }
+
+    fn drain_turn_originals_into_top(&mut self) -> BaselineMap {
         let Some(turn_scope) = &self.turn_originals else {
-            return Vec::new();
+            return HashMap::new();
         };
         let entries = {
             let mut turn = lock(turn_scope);
             std::mem::take(&mut *turn)
         };
+        if let Some(top) = self.turn_checkpoints.last_mut() {
+            for (path, before) in &entries {
+                top.entry(path.clone()).or_insert_with(|| before.clone());
+            }
+        }
+        entries
+    }
+
+    /// Compute and clear "this turn's changes": per file, the net diff of "before the first write of this turn → current disk" (LF view).
+    /// Also records the drained pre-turn baselines into the active turn checkpoint for coordinated undo.
+    /// A zero net delta (reverted to the original within the turn) produces nothing; deleted files produce nothing for now.
+    pub fn take_turn_changes(&mut self, cwd: &Path) -> Vec<FileChange> {
+        let entries = self.drain_turn_originals_into_top();
         let mut changes = Vec::new();
         for (path, before) in entries {
             let before = decoded_view(&before.unwrap_or_default());
@@ -273,6 +331,88 @@ impl ChangeTracker {
         }
         changes.sort_by(|a, b| a.path.cmp(&b.path));
         changes
+    }
+
+    /// Pop the latest turn checkpoint and restore every file modified during
+    /// that turn back to its pre-turn bytes (deleting files created in that
+    /// turn). Reconciles `originals` against disk so callers can emit exact
+    /// `FileReverted` or updated `FileChanged` events.
+    pub fn pop_and_restore_last_turn(
+        &mut self,
+        cwd: &Path,
+    ) -> Vec<Result<TurnRevertOutcome, CoreError>> {
+        self.drain_turn_originals_into_top();
+        let Some(snapshot) = self.turn_checkpoints.pop() else {
+            return Vec::new();
+        };
+        let cwd_canonical = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+        let mut paths: Vec<(PathBuf, Option<Vec<u8>>)> = snapshot.into_iter().collect();
+        paths.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let mut outcomes = Vec::with_capacity(paths.len());
+        for (path, before_turn) in paths {
+            let write_result = match &before_turn {
+                Some(bytes) => {
+                    if let Some(parent) = path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    std::fs::write(&path, bytes).map_err(|e| CoreError::RevertWrite {
+                        path: path.display().to_string(),
+                        detail: e.to_string(),
+                    })
+                }
+                None => match std::fs::remove_file(&path) {
+                    Ok(()) => Ok(()),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                    Err(e) => Err(CoreError::RevertDelete {
+                        path: path.display().to_string(),
+                        detail: e.to_string(),
+                    }),
+                },
+            };
+            if let Err(error) = write_result {
+                outcomes.push(Err(error));
+                continue;
+            }
+            let rel_path = path
+                .strip_prefix(&cwd_canonical)
+                .or_else(|_| path.strip_prefix(cwd))
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_else(|_| path.to_string_lossy().replace('\\', "/"));
+            let returned_to_baseline = {
+                let originals = lock(&self.originals);
+                match originals.get(&path) {
+                    Some(session_baseline) => session_baseline == &before_turn,
+                    None => true,
+                }
+            };
+            if returned_to_baseline {
+                lock(&self.originals).remove(&path);
+                outcomes.push(Ok(TurnRevertOutcome::RevertedToBaseline {
+                    full_path: path,
+                    rel_path,
+                }));
+            } else {
+                match self.diff(cwd, &path) {
+                    Ok(change) if change.additions == 0 && change.deletions == 0 => {
+                        lock(&self.originals).remove(&path);
+                        outcomes.push(Ok(TurnRevertOutcome::RevertedToBaseline {
+                            full_path: path,
+                            rel_path,
+                        }));
+                    }
+                    Ok(change) => outcomes.push(Ok(TurnRevertOutcome::UpdatedDiff(change))),
+                    Err(_) => {
+                        lock(&self.originals).remove(&path);
+                        outcomes.push(Ok(TurnRevertOutcome::RevertedToBaseline {
+                            full_path: path,
+                            rel_path,
+                        }));
+                    }
+                }
+            }
+        }
+        outcomes
     }
 
     /// Revert: write the original bytes back verbatim (byte-exact for GBK/UTF-16/CRLF); newly created files are deleted.
@@ -335,5 +475,62 @@ mod tests {
             detached.take_turn_changes(Path::new("/tmp")).is_empty(),
             "a detached child has no current-turn summary"
         );
+    }
+
+    #[test]
+    fn multi_turn_checkpoints_restore_step_by_step_and_delete_created_files() {
+        let dir = std::env::temp_dir().join(format!(
+            "pig-turn-undo-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let existing = dir.join("app.txt");
+        let created = dir.join("new.txt");
+        std::fs::write(&existing, "v0\n").unwrap();
+
+        let mut tracker = ChangeTracker::default();
+
+        // Turn 1: modify existing v0 -> v1
+        tracker.begin_turn_checkpoint();
+        tracker.snapshot(&existing).unwrap();
+        std::fs::write(&existing, "v1\n").unwrap();
+        let t1_changes = tracker.take_turn_changes(&dir);
+        assert_eq!(t1_changes.len(), 1);
+
+        // Turn 2: modify existing v1 -> v2, and create new.txt
+        tracker.begin_turn_checkpoint();
+        tracker.snapshot(&existing).unwrap();
+        std::fs::write(&existing, "v2\n").unwrap();
+        tracker.snapshot(&created).unwrap();
+        std::fs::write(&created, "hello\n").unwrap();
+        let t2_changes = tracker.take_turn_changes(&dir);
+        assert_eq!(t2_changes.len(), 2);
+
+        // Undo Turn 2: existing returns to v1 (UpdatedDiff), created is deleted (RevertedToBaseline)
+        let undo2 = tracker.pop_and_restore_last_turn(&dir);
+        assert_eq!(std::fs::read_to_string(&existing).unwrap(), "v1\n");
+        assert!(!created.exists());
+        assert!(undo2.iter().any(|r| matches!(
+            r,
+            Ok(TurnRevertOutcome::RevertedToBaseline { rel_path, .. }) if rel_path == "new.txt"
+        )));
+        assert!(undo2.iter().any(|r| matches!(
+            r,
+            Ok(TurnRevertOutcome::UpdatedDiff(change)) if change.path == "app.txt"
+        )));
+
+        // Undo Turn 1: existing returns to v0 (RevertedToBaseline)
+        let undo1 = tracker.pop_and_restore_last_turn(&dir);
+        assert_eq!(std::fs::read_to_string(&existing).unwrap(), "v0\n");
+        assert!(undo1.iter().any(|r| matches!(
+            r,
+            Ok(TurnRevertOutcome::RevertedToBaseline { rel_path, .. }) if rel_path == "app.txt"
+        )));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

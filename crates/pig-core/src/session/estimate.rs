@@ -1,24 +1,62 @@
-//! Fixed-density token estimates shared by the compaction budget, the
-//! post-compaction watermark and the context-composition panel. One density
-//! everywhere (4 characters per token) keeps the heuristic figures of one
-//! session mutually consistent; they are not provider counts.
+//! UTF-8 byte-density text and resolution-aware media token estimates shared by
+//! the compaction budget, the post-compaction watermark and the
+//! context-composition panel.
+//!
+//! Counting UTF-8 bytes (`4 bytes / token`, matching Codex) naturally prices
+//! ASCII at 4 chars/token, 3-byte CJK ideographs at ~1.33 chars/token, and
+//! 4-byte emoji at 1 char/token without a heavy local BPE dependency.
 
 use pig_protocol::ContextBreakdown;
-use pig_provider::ChatMsg;
+use pig_provider::{ChatImage, ChatMsg};
 
-/// Fixed text density: 4 characters per token.
-const CHARS_PER_TOKEN: u64 = 4;
+/// Fixed UTF-8 byte density: 4 bytes per token (4 ASCII chars or ~1.33 CJK chars).
+const BYTES_PER_TOKEN: u64 = 4;
 
 /// Per-message framing overhead (role fields and separators).
 const MESSAGE_OVERHEAD: u64 = 4;
 
-/// Extra characters charged per tool call on top of its argument JSON.
+/// Extra UTF-8 bytes charged per tool call on top of its argument JSON.
 const TOOL_CALL_OVERHEAD: usize = 20;
 
-/// Fixed token price of one image. Media is never estimated from its base64
-/// length (a compressed screenshot would look enormous); a conservative
-/// constant keeps the budget stable across encodings.
-const IMAGE_TOKENS: u64 = 1_000;
+/// Fallback token price of one image when dimensions cannot be probed from its
+/// header (e.g. test placeholders or opaque/corrupt bytes).
+const DEFAULT_IMAGE_TOKENS: u64 = 1_000;
+/// Maximum long edge used for vision token scaling (Anthropic/modern VLM cap).
+const IMAGE_MAX_LONG_EDGE: u64 = 1_568;
+/// Pixel area per vision token after long-edge scaling (`w * h / 750`).
+const IMAGE_PIXELS_PER_TOKEN: u64 = 750;
+/// Lower bound for tiny icons so framing/patch overhead is never undercounted.
+const MIN_IMAGE_TOKENS: u64 = 85;
+/// Upper bound per single image to guard pathological dimension headers.
+const MAX_IMAGE_TOKENS: u64 = 4_096;
+
+/// Estimate vision tokens from decoded image pixel dimensions.
+pub(crate) fn image_tokens_for_dimensions(width: u32, height: u32) -> u64 {
+    if width == 0 || height == 0 {
+        return DEFAULT_IMAGE_TOKENS;
+    }
+    let mut w = width as u64;
+    let mut h = height as u64;
+    let long_edge = w.max(h);
+    if long_edge > IMAGE_MAX_LONG_EDGE {
+        w = (w * IMAGE_MAX_LONG_EDGE).div_ceil(long_edge);
+        h = (h * IMAGE_MAX_LONG_EDGE).div_ceil(long_edge);
+    }
+    (w.saturating_mul(h) / IMAGE_PIXELS_PER_TOKEN).clamp(MIN_IMAGE_TOKENS, MAX_IMAGE_TOKENS)
+}
+
+/// Probe image dimensions from its encoded payload header to price vision
+/// tokens; falls back to [`DEFAULT_IMAGE_TOKENS`] when the payload is not a
+/// decodable image header. Never charges raw base64 length.
+fn estimate_image_tokens(image: &ChatImage) -> u64 {
+    let Ok(bytes) = pig_utils::image::base64_decode(&image.data_base64) else {
+        return DEFAULT_IMAGE_TOKENS;
+    };
+    match pig_utils::image::image_dimensions(&bytes) {
+        Some((width, height)) => image_tokens_for_dimensions(width, height),
+        None => DEFAULT_IMAGE_TOKENS,
+    }
+}
 
 /// Estimated tokens of one history entry: visible text (or the replacement
 /// sent for a stopped tool receipt), reasoning, tool-call arguments, native
@@ -27,24 +65,24 @@ const IMAGE_TOKENS: u64 = 1_000;
 /// cost cached when the document was loaded or persisted; estimation never
 /// decodes or scans the bytes.
 pub(crate) fn estimate_message_tokens(msg: &ChatMsg) -> u64 {
-    let mut chars = 0usize;
+    let mut bytes = 0usize;
     if msg.stopped {
-        chars += pig_provider::STOPPED_TOOL_OUTPUT.chars().count();
+        bytes += pig_provider::STOPPED_TOOL_OUTPUT.len();
     } else {
-        chars += msg.content.as_deref().unwrap_or("").chars().count();
+        bytes += msg.content.as_deref().unwrap_or("").len();
     }
-    chars += msg.reasoning.as_deref().unwrap_or("").chars().count();
+    bytes += msg.reasoning.as_deref().unwrap_or("").len();
     if let Some(calls) = &msg.tool_calls {
         for call in calls {
-            chars += call.function.arguments.chars().count() + TOOL_CALL_OVERHEAD;
+            bytes += call.function.arguments.len() + TOOL_CALL_OVERHEAD;
         }
     }
     if let Some(replay) = &msg.replay {
-        chars += replay_estimate_chars(msg, replay);
+        bytes += replay_estimate_bytes(msg, replay);
     }
-    chars as u64 / CHARS_PER_TOKEN
+    bytes as u64 / BYTES_PER_TOKEN
         + MESSAGE_OVERHEAD
-        + msg.images.len() as u64 * IMAGE_TOKENS
+        + msg.images.iter().map(estimate_image_tokens).sum::<u64>()
         + msg.documents.iter().map(document_tokens).sum::<u64>()
 }
 
@@ -60,22 +98,22 @@ fn document_tokens(document: &pig_provider::ChatDocument) -> u64 {
         .unwrap_or(0)
 }
 
-/// Chars contributed by native replay beyond the plaintext fields already
+/// UTF-8 bytes contributed by native replay beyond the plaintext fields already
 /// counted on the message. Text content and reasoning are counted once from
 /// `content`/`reasoning`; tool calls matched by id are counted once from
 /// `tool_calls`. Only opaque metadata (citations, encrypted/reasoning
 /// credentials, hosted-search items) is added here.
-fn replay_estimate_chars(msg: &ChatMsg, replay: &pig_provider::AssistantReplay) -> usize {
+fn replay_estimate_bytes(msg: &ChatMsg, replay: &pig_provider::AssistantReplay) -> usize {
     use pig_provider::AssistantReplayItem;
-    let mut chars = 0usize;
+    let mut bytes = 0usize;
     for item in &replay.items {
         match item {
             // Text is already counted from the message content; only citation
             // metadata (including encrypted indexes) adds to the budget.
             AssistantReplayItem::Text { citations, .. } => {
                 if !citations.is_empty() {
-                    chars += serde_json::to_string(citations)
-                        .map(|json| json.chars().count())
+                    bytes += serde_json::to_string(citations)
+                        .map(|json| json.len())
                         .unwrap_or(0);
                 }
             }
@@ -92,8 +130,8 @@ fn replay_estimate_chars(msg: &ChatMsg, replay: &pig_provider::AssistantReplay) 
                 encrypted_content,
                 id,
             } => {
-                let mut item_chars = serde_json::to_string(item)
-                    .map(|json| json.chars().count())
+                let mut item_bytes = serde_json::to_string(item)
+                    .map(|json| json.len())
                     .unwrap_or(0);
                 // The streamed reasoning text is recorded in `reasoning`; do not
                 // charge the same plaintext twice, but keep encrypted fields.
@@ -101,39 +139,36 @@ fn replay_estimate_chars(msg: &ChatMsg, replay: &pig_provider::AssistantReplay) 
                 let plaintext = summary
                     .iter()
                     .chain(content.iter())
-                    .map(|text| text.chars().count())
+                    .map(String::len)
                     .sum::<usize>();
                 if !reasoning.is_empty() && plaintext > 0 {
-                    let opaque = encrypted_content
-                        .as_ref()
-                        .map(|value| value.chars().count())
-                        .unwrap_or(0);
-                    item_chars = item_chars
-                        .saturating_sub(reasoning.chars().count().min(plaintext))
+                    let opaque = encrypted_content.as_ref().map(String::len).unwrap_or(0);
+                    item_bytes = item_bytes
+                        .saturating_sub(reasoning.len().min(plaintext))
                         .max(opaque);
                 }
                 let _ = id;
-                chars += item_chars;
+                bytes += item_bytes;
             }
             AssistantReplayItem::AnthropicThinking { thinking, .. } => {
-                let item_chars = serde_json::to_string(item)
-                    .map(|json| json.chars().count())
+                let item_bytes = serde_json::to_string(item)
+                    .map(|json| json.len())
                     .unwrap_or(0);
                 let already = if msg.reasoning.as_deref() == Some(thinking.as_str()) {
-                    thinking.chars().count()
+                    thinking.len()
                 } else {
                     0
                 };
-                chars += item_chars.saturating_sub(already);
+                bytes += item_bytes.saturating_sub(already);
             }
             other => {
-                chars += serde_json::to_string(other)
-                    .map(|json| json.chars().count())
+                bytes += serde_json::to_string(other)
+                    .map(|json| json.len())
                     .unwrap_or(0);
             }
         }
     }
-    chars
+    bytes
 }
 
 /// Estimated tokens of a whole history: text, reasoning and tool-call
@@ -153,7 +188,7 @@ pub(crate) fn estimate_leading_system_tokens(history: &[ChatMsg]) -> u64 {
 /// Estimated tokens of the system prompt: the same accounting
 /// [`estimate_history_tokens`] applies to a single system message.
 pub(crate) fn estimate_system_tokens(prompt: &str) -> u64 {
-    prompt.chars().count() as u64 / CHARS_PER_TOKEN + MESSAGE_OVERHEAD
+    prompt.len() as u64 / BYTES_PER_TOKEN + MESSAGE_OVERHEAD
 }
 
 /// Estimated tokens of the request's tool schemas (their JSON serialization).
@@ -161,10 +196,10 @@ pub(crate) fn estimate_schemas_tokens(schemas: &[serde_json::Value]) -> u64 {
     if schemas.is_empty() {
         return 0;
     }
-    let chars = serde_json::to_string(schemas)
-        .map(|json| json.chars().count())
+    let bytes = serde_json::to_string(schemas)
+        .map(|json| json.len())
         .unwrap_or(0);
-    chars as u64 / CHARS_PER_TOKEN + MESSAGE_OVERHEAD
+    bytes as u64 / BYTES_PER_TOKEN + MESSAGE_OVERHEAD
 }
 
 /// Composition of the current surface with a precomputed tool estimate.
@@ -431,5 +466,48 @@ mod tests {
             breakdown.system + breakdown.messages,
             estimate_history_tokens(&history)
         );
+    }
+
+    #[test]
+    fn cjk_text_is_priced_by_utf8_bytes_not_char_count() {
+        // 400 Chinese characters = 1,200 UTF-8 bytes -> 300 tokens + 4 framing
+        // (vs only 100 + 4 under naive chars/4).
+        let cjk = "中".repeat(400);
+        let msg = ChatMsg::user(cjk);
+        assert_eq!(estimate_message_tokens(&msg), 300 + 4);
+        assert_eq!(estimate_system_tokens(&"汉".repeat(40)), 30 + 4);
+    }
+
+    #[test]
+    fn decodable_images_are_priced_by_pixel_dimensions() {
+        fn valid_png_base64(width: u32, height: u32) -> String {
+            let mut cursor = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgb8(image::RgbImage::new(width, height))
+                .write_to(&mut cursor, image::ImageFormat::Png)
+                .expect("encode png");
+            pig_utils::image::base64_encode(&cursor.into_inner())
+        }
+
+        assert_eq!(image_tokens_for_dimensions(128, 128), MIN_IMAGE_TOKENS);
+        assert_eq!(image_tokens_for_dimensions(1000, 1000), 1_333);
+        let hd = image_tokens_for_dimensions(1920, 1080);
+        assert!(hd > 1_500 && hd < 2_200, "1920x1080 scaled tokens: {hd}");
+
+        let mut small = ChatMsg::tool_result("c1", "ok".into());
+        let plain = estimate_message_tokens(&small);
+        small.images = vec![ChatImage {
+            media_type: "image/png".into(),
+            data_base64: valid_png_base64(128, 128),
+            label: None,
+        }];
+        let mut large = ChatMsg::tool_result("c1", "ok".into());
+        large.images = vec![ChatImage {
+            media_type: "image/png".into(),
+            data_base64: valid_png_base64(1920, 1080),
+            label: None,
+        }];
+        assert_eq!(estimate_message_tokens(&small), plain + MIN_IMAGE_TOKENS);
+        assert_eq!(estimate_message_tokens(&large), plain + hd);
+        assert!(estimate_message_tokens(&large) > estimate_message_tokens(&small));
     }
 }

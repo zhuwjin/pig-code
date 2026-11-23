@@ -1399,3 +1399,44 @@ async fn marker_append_failure_keeps_the_live_history_and_reports() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn rollout_compaction_windows_and_context_recovery_footer_track_line_ranges() {
+    let dir = std::env::temp_dir().join(format!(
+        "pig-compact-recovery-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let rollout = dir.join("s-rec.jsonl");
+    std::fs::write(
+        &rollout,
+        concat!(
+            "{\"type\":\"meta\",\"id\":\"s-rec\"}\n",
+            "{\"type\":\"user\",\"text\":\"turn 1\"}\n",
+            "{\"type\":\"assistant\",\"text\":\"ans 1\"}\n",
+            "{\"type\":\"compact\",\"note\":\"c1\"}\n",
+            "{\"type\":\"user\",\"text\":\"turn 2\"}\n",
+            "{\"type\":\"tool_call\",\"tool\":\"Read\"}\n",
+            "{\"type\":\"assistant\",\"text\":\"ans 2\"}\n",
+        ),
+    )
+    .unwrap();
+
+    let windows = rollout_compaction_windows(&rollout).expect("two windows");
+    assert_eq!(windows, vec![(2, 3), (5, 7)]);
+    let footer = context_recovery_footer(&rollout, &windows).expect("footer");
+    assert!(footer.contains("## Context Recovery"), "{footer}");
+    assert!(footer.contains("s-rec.jsonl"), "{footer}");
+    assert!(footer.contains("window 1: lines 2-3"), "{footer}");
+    assert!(
+        footer.contains("window 2: lines 5-7  <- the conversation this note summarizes"),
+        "{footer}"
+    );
+    assert!(footer.contains("window 3 (current) starts at line 8"), "{footer}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -285,6 +285,72 @@ impl Session {
         self.date_reminded.clear();
         self.agents_reminded.clear();
         self.memory_reminded.clear();
+        {
+            let mut known = self
+                .state
+                .known_agents_md
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            known.clear();
+            for path in prompt::baseline_agents_md_paths(&self.data_dir, &self.agent.cwd) {
+                known.insert(path);
+            }
+        }
+        // Coordinated file undo: restore workspace files modified during the
+        // recalled turn back to their pre-turn snapshots and keep SQLite + UI
+        // file-change panels synchronized.
+        let revert_outcomes = self.tracker.pop_and_restore_last_turn(&self.agent.cwd);
+        for outcome in revert_outcomes {
+            match outcome {
+                Ok(tool::TurnRevertOutcome::RevertedToBaseline {
+                    full_path,
+                    rel_path,
+                }) => {
+                    {
+                        let store = self.store.lock().expect("store lock");
+                        store.delete_file_change(&self.agent.id, &rel_path);
+                        store.delete_file_original(&self.agent.id, &full_path.to_string_lossy());
+                    }
+                    self.emit(
+                        |session_id| Event::FileReverted {
+                            session_id,
+                            path: rel_path,
+                        },
+                        tx,
+                    );
+                }
+                Ok(tool::TurnRevertOutcome::UpdatedDiff(change)) => {
+                    {
+                        let store = self.store.lock().expect("store lock");
+                        store.upsert_file_change(
+                            &self.agent.id,
+                            &change.path,
+                            &change.unified_diff,
+                            change.additions,
+                            change.deletions,
+                        );
+                    }
+                    self.emit(
+                        |session_id| Event::FileChanged {
+                            session_id,
+                            path: change.path,
+                            unified_diff: change.unified_diff,
+                            additions: change.additions,
+                            deletions: change.deletions,
+                        },
+                        tx,
+                    );
+                }
+                Err(error) => self.emit(
+                    |session_id| Event::Error {
+                        session_id: Some(session_id),
+                        error,
+                        fatal: false,
+                    },
+                    tx,
+                ),
+            }
+        }
         self.notification_reconcile_required = true;
         self.record(&RolloutRecord::Recall);
         self.sync_rollout();
