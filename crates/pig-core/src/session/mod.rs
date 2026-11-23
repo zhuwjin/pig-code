@@ -45,6 +45,7 @@ mod replay;
 mod reviewer;
 mod run_state;
 mod runner;
+mod scheduler;
 mod subagent;
 pub use subagent::AgentRunSupervisor;
 pub(crate) use subagent::DelegatedAgentStarted;

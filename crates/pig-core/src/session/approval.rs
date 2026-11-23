@@ -321,6 +321,10 @@ pub fn approval_detail(call: &ToolCall, cwd: &std::path::Path) -> String {
         name if crate::tool::is_exec_command(name) => {
             args["command"].as_str().unwrap_or("?").to_string()
         }
+        tool::APPLY_PATCH_TOOL => {
+            let patch = args["patch"].as_str().unwrap_or("");
+            tool::preview_patch(cwd, patch)
+        }
         "Write" => {
             let path = args["path"].as_str().unwrap_or("?");
             let content = args["content"].as_str().unwrap_or("");

@@ -178,7 +178,7 @@ impl Tool for WriteFile {
             let edit_diff = Some(per_edit_diff(ctx.cwd, &full, &before, &after));
             Ok(ToolEffect {
                 output: format!("Wrote {} ({} bytes){note}", path, bytes.len()),
-                file_change,
+                file_changes: file_change.into_iter().collect(),
                 edit_diff,
                 images: vec![],
                 documents: vec![],

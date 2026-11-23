@@ -168,7 +168,7 @@ impl Tool for ReadMediaFile {
                         PDF_MEDIA_TYPE,
                         bytes.len() / 1024
                     ),
-                    file_change: None,
+                    file_changes: vec![],
                     edit_diff: None,
                     images: vec![],
                     documents: vec![ToolDocument {
@@ -287,7 +287,7 @@ impl Tool for ReadMediaFile {
                     "Read image {path} (original {orig_w}×{orig_h}{crop_note} -> output {w}×{h}, {}, {kb}KB)",
                     image.media_type
                 ),
-                file_change: None,
+                file_changes: vec![],
                 edit_diff: None,
                 images: vec![image],
                 documents: vec![],

@@ -212,8 +212,11 @@ impl ChangeTracker {
             .clone()
             .unwrap_or_default();
         let original = decoded_view(&original_bytes);
-        let current_bytes =
-            fs.read_all(path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+        let current_bytes = match fs.read_all(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(format!("failed to read {}: {error}", path.display())),
+        };
         let current = decoded_view(&current_bytes);
         let diff = similar::TextDiff::from_lines(&original, &current);
         let mut additions = 0;

@@ -360,7 +360,7 @@ pub enum FsAccess {
 /// Whether a path falls under the system tmp (macOS /tmp→/private/tmp; both sides canonicalized before comparing).
 /// Applies only to **absolute-path** requests (a relative ../ escape landing in tmp still counts as out-of-bounds, preventing
 /// directories next to a tempdir workspace from becoming a backdoor).
-fn is_tmp_absolute_path(raw: &str) -> bool {
+pub(super) fn is_tmp_absolute_path(raw: &str) -> bool {
     let raw_path = Path::new(raw);
     if !raw_path.is_absolute() {
         return false;
@@ -467,33 +467,18 @@ pub fn resolve_with_access(
 /// sandbox policy.
 pub fn fs_intent_of_tool(name: &str) -> Option<FsAccess> {
     match name {
-        "Write" | "Edit" => Some(FsAccess::Write),
+        "Write" | "Edit" | APPLY_PATCH_TOOL => Some(FsAccess::Write),
         _ => None,
     }
 }
 
-/// Gate-side out-of-workspace write pre-check (no side effects: parents are
-/// never created, nothing is touched): Some((access, path)) when a Write/Edit
-/// targets outside the workspace and is not exempt (tmp / extra roots) — the
-/// gate turns that into one approval request. Mirrors resolve_with_access's
-/// classification: resolve_core runs with create_parents=false, and its
-/// "directory does not exist" outcome falls back to a lexical check so a Write
-/// into a not-yet-existing outside directory also pops. Reads never reach this
-/// function: full-disk read is the sandbox policy, matching Codex.
-pub fn fs_outside_intent(
+fn check_single_path_outside(
     state: &SessionToolState,
     cwd: &Path,
-    tool: &str,
-    arguments: &str,
-) -> Option<(FsAccess, String)> {
-    let access = fs_intent_of_tool(tool)?;
-    let path = serde_json::from_str::<serde_json::Value>(arguments)
-        .ok()?
-        .get("path")?
-        .as_str()?
-        .to_string();
+    path: &str,
+) -> Option<String> {
     let fs = state.env.fs.as_ref();
-    let blocked = match resolve_core_with_fs(fs, cwd, &path, false) {
+    let blocked = match resolve_core_with_fs(fs, cwd, path, false) {
         Ok(_) => None,
         Err(
             BoundFailure::ParentOutside { resolved } | BoundFailure::TargetOutside { resolved },
@@ -507,7 +492,7 @@ pub fn fs_outside_intent(
                 return None;
             }
             let cwd_can = fs.canonicalize(cwd).ok()?;
-            let raw = Path::new(&path);
+            let raw = Path::new(path);
             let full = if raw.is_absolute() {
                 raw.to_path_buf()
             } else {
@@ -517,12 +502,12 @@ pub fn fs_outside_intent(
             (!full.starts_with(&cwd_can)).then_some(full)
         }
     }?;
-    if state.env.is_local() && is_tmp_absolute_path(&path) {
+    if state.env.is_local() && is_tmp_absolute_path(path) {
         return None;
     }
     // Read-write roots (workspace memory): no approval request either — the
     // resolve-side exemption lets the call through without a grant
-    if Path::new(&path).is_absolute()
+    if Path::new(path).is_absolute()
         && state
             .extra_rw_roots
             .iter()
@@ -530,11 +515,33 @@ pub fn fs_outside_intent(
     {
         return None;
     }
-    // Name the object the tool will act on, not only the model's spelling: a
-    // symlinked parent inside the workspace resolves outside it, and the dialog
-    // must describe that same target (the grant is for this call's arguments
-    // either way).
-    Some((access, blocked.display().to_string()))
+    Some(blocked.display().to_string())
+}
+
+/// Gate-side out-of-workspace write pre-check (no side effects: parents are
+/// never created, nothing is touched): Some((access, path)) when a Write/Edit/
+/// ApplyPatch targets outside the workspace and is not exempt (tmp / extra roots).
+pub fn fs_outside_intent(
+    state: &SessionToolState,
+    cwd: &Path,
+    tool: &str,
+    arguments: &str,
+) -> Option<(FsAccess, String)> {
+    let access = fs_intent_of_tool(tool)?;
+    if tool == APPLY_PATCH_TOOL {
+        for path in patch_target_paths(arguments) {
+            if let Some(outside) = check_single_path_outside(state, cwd, &path) {
+                return Some((access, outside));
+            }
+        }
+        return None;
+    }
+    let path = serde_json::from_str::<serde_json::Value>(arguments)
+        .ok()?
+        .get("path")?
+        .as_str()?
+        .to_string();
+    check_single_path_outside(state, cwd, &path).map(|outside| (access, outside))
 }
 
 /// Sensitive-file check (case-insensitive, file name only): .env family / SSH private keys / cloud credentials.

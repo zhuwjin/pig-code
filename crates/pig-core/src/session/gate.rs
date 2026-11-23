@@ -94,7 +94,7 @@ pub(crate) async fn exec_tool_gated_ctx(
             .any(|extra| extra.name() == call.name && extra.is_plugin());
     let perm_subject = match call.name.as_str() {
         name if crate::tool::is_exec_command(name) => bash_command.clone(),
-        "Write" | "Edit" | "FetchURL" => Some(tool::approval_subject(call)),
+        "Write" | "Edit" | tool::APPLY_PATCH_TOOL | "FetchURL" => Some(tool::approval_subject(call)),
         name if name.starts_with("mcp__") || plugin_tool => Some(call.name.clone()),
         _ => None,
     };
@@ -186,10 +186,11 @@ pub(crate) async fn exec_tool_gated_ctx(
     // user directly. Write/Edit ask to write, Read/ReadMediaFile ask to read a
     // file, Grep/Glob ask to list a directory (they never read one file's
     // content through this path — their per-file reads are filtered separately).
-    let file_tool_is_write = matches!(call.name.as_str(), "Write" | "Edit");
+    let file_tool_is_write = matches!(call.name.as_str(), "Write" | "Edit" | tool::APPLY_PATCH_TOOL);
     let file_tool_lists = matches!(call.name.as_str(), "Grep" | "Glob");
-    let file_target = tool::file_tool_target(ctx.cwd, call);
-    if let Some(target) = &file_target {
+    let file_targets = tool::file_tool_targets(ctx.cwd, call);
+    let file_target = file_targets.first().cloned();
+    for target in &file_targets {
         match crate::task::credential_grant(ctx.state, target) {
             crate::task::CredentialGrant::Directory => {
                 if file_tool_is_write || !file_tool_lists {
@@ -210,6 +211,14 @@ pub(crate) async fn exec_tool_gated_ctx(
                 file_tool_target = Some(target.clone());
             }
             crate::task::CredentialGrant::File => {
+                if call.name == tool::APPLY_PATCH_TOOL {
+                    return GatedToolOutcome::Rejected {
+                        note: format!(
+                            "`{}` sits inside a protected credential directory; ApplyPatch cannot modify credential files. Use Write for an explicit single-file replacement.",
+                            target.display()
+                        ),
+                    };
+                }
                 credential_file_grant = true;
                 credential_read_grant = !file_tool_is_write;
                 credential_high_risk =
@@ -955,9 +964,18 @@ The sandbox stays on: ordinary paths become writable, but protected files, deny 
             ) => Some(result),
         }
     };
-    let Some((mut output, is_error, file_change, edit, mut media)) = result else {
+    let Some((mut output, is_error, file_changes, edit, mut media)) = result else {
         return GatedToolOutcome::Cancelled;
     };
+    // Auto-activate any deferred runtime tool called directly by name so its
+    // full schema is loaded for subsequent steps.
+    if call.name.starts_with("mcp__") || plugin_tool {
+        ctx.state
+            .deferred_tools
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .activate(&call.name);
+    }
 
     // Codex's default approval policy (`OnRequest`) does not retry a failed
     // command automatically: the sandbox denial is returned to the model,
@@ -1039,7 +1057,7 @@ The sandbox stays on: ordinary paths become writable, but protected files, deny 
             items,
         });
     }
-    if let Some(change) = file_change {
+    for change in file_changes {
         // Current change state persists to the SQLite file_changes table
         // (upsert by path; rows deleted when the net delta reaches zero);
         // the JSONL keeps only the message/tool event stream

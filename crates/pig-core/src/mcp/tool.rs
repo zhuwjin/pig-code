@@ -109,7 +109,7 @@ impl Tool for McpTool {
             } else {
                 Ok(ToolEffect {
                     output: text,
-                    file_change: None,
+                    file_changes: vec![],
                     edit_diff: None,
                     images: vec![],
                     documents: vec![],

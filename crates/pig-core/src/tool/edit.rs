@@ -149,7 +149,7 @@ impl Tool for EditFile {
             };
             Ok(ToolEffect {
                 output,
-                file_change,
+                file_changes: file_change.into_iter().collect(),
                 edit_diff,
                 images: vec![],
                 documents: vec![],

@@ -28,7 +28,7 @@ async fn run_tool(
 ) -> (
     String,
     bool,
-    Option<tool::FileChange>,
+    Vec<tool::FileChange>,
     Option<pig_protocol::EditDiff>,
     tool::ToolOutputMedia,
 ) {

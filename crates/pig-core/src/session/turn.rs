@@ -827,37 +827,46 @@ impl Session {
             "every final call owns one internal item id"
         );
         let tools = self.root_tools();
-        // P0 grouped concurrency: consecutive "safe to run concurrently"
-        // read-only calls form a parallel group (JoinSet, cap 8); non-
-        // concurrentable calls are sync points — after the preceding group
-        // drains, they take the original serial path below (interception
-        // semantics unchanged)
-        let mask = {
+        // Path-aware concurrency scheduling (modeled on Kimi Code ToolAccesses):
+        // consecutive calls that are approval-free, hook-free, and operate on
+        // non-overlapping filesystem paths (including disjoint Write/Edit/
+        // ApplyPatch and Read/Grep/Glob) execute concurrently in waves; any
+        // conflicting path or exclusive tool creates a wave barrier.
+        let parallel_ranges: HashMap<usize, usize> = {
             let rules = self
                 .permission_rules
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            parallel_mask(
-                &tool_calls,
-                &tools,
-                self.permissions,
-                media,
-                &rules,
-                &self.state,
-                &self.agent.cwd,
-                &self.hooks,
-            )
+            let plans: Vec<scheduler::ToolAccessPlan> = tool_calls
+                .iter()
+                .map(|call| {
+                    scheduler::classify_tool_access(
+                        call,
+                        &tools,
+                        self.permissions,
+                        self.plan_enabled,
+                        media,
+                        &rules,
+                        &self.state,
+                        &self.agent.cwd,
+                        &self.hooks,
+                    )
+                })
+                .collect();
+            scheduler::plan_execution_waves(&plans)
+                .into_iter()
+                .filter_map(|wave| match wave {
+                    scheduler::ExecutionWave::Parallel(range) => Some((range.start, range.end)),
+                    scheduler::ExecutionWave::Serial(_) => None,
+                })
+                .collect()
         };
         let mut next_ix = 0usize;
         for (call_ix, call) in tool_calls.iter().enumerate() {
             if call_ix < next_ix {
                 continue; // already executed with an earlier parallel group
             }
-            if mask[call_ix] {
-                let mut group_end = call_ix + 1;
-                while group_end < tool_calls.len() && mask[group_end] {
-                    group_end += 1;
-                }
+            if let Some(&group_end) = parallel_ranges.get(&call_ix) {
                 next_ix = group_end;
                 if let Err(error) =
                     self.persist_root_tool_starts(tool_calls, item_ids, call_ix, group_end)
@@ -1747,18 +1756,14 @@ impl Session {
             });
         }
 
-        // Concurrent execution: read-only tools never touch the ChangeTracker
-        // (each task holds a one-shot instance, with a debug assertion as
-        // backstop); session-shared state (read_states/todos/tasks) is all
-        // Arc<Mutex>/atomic, designed for foreground/background sharing from the
-        // start, so concurrent reads are safe; write exclusion is guaranteed by
-        // grouping (write tools are sync points, executed only after the group
-        // drains). MCP tools: the mask already guarantees read-only +
-        // approval-free + no deny hit; the task clones Arc<McpManager> and
-        // fetches by name through the same gate as the serial path. Each task
-        // owns only its ChangeTracker; all permission and hook state is shared.
+        // Concurrent execution: path-conflict scheduling guarantees no two
+        // calls in this wave write overlapping paths or read a path written by
+        // a sibling; ChangeTracker::foreground_child() shares the session
+        // originals/dirty/turn_originals maps behind Arc<Mutex>, and
+        // gate.exec_tool_gated persists FileChanged and file_originals safely.
         self.plugin_tools.dispatcher().set_event_sender(tx.clone());
         let gate = self.gate_snapshot();
+        let shared_tracker = self.tracker.foreground_child();
         let tools = tool::all();
         let tools = &tools;
         let mut slots: Vec<Option<ParallelOutput>> = Vec::new();
@@ -1770,8 +1775,8 @@ impl Session {
                 let call = cards[index].call.clone();
                 let item_id = cards[index].item_id.clone();
                 let gate = gate.clone();
+                let mut tracker = shared_tracker.foreground_child();
                 async move {
-                    let mut tracker = ChangeTracker::default();
                     let tool = tools
                         .iter()
                         .find(|tool| tool.name() == call.name)
@@ -1789,7 +1794,6 @@ impl Session {
                         image_refs: vec![],
                         documents: vec![],
                         document_refs: vec![],
-                        file_change: None,
                         stopped,
                         elapsed_ms,
                     };
@@ -1809,7 +1813,6 @@ impl Session {
                             image_refs: vec![],
                             documents,
                             document_refs: vec![],
-                            file_change: None,
                             stopped: false,
                             elapsed_ms,
                         },
@@ -1864,7 +1867,6 @@ impl Session {
                         documents,
                         image_refs,
                         document_refs,
-                        file_change,
                         stopped,
                         ..
                     } = out;
@@ -1890,35 +1892,6 @@ impl Session {
                         delivered_notification_ids: vec![],
                         recovery: None,
                     });
-                    // Defense in depth: classification guarantees read-only
-                    // means no changes; a future mutating tool mislabeled
-                    // read_only loses no data
-                    if let Some(change) = file_change {
-                        {
-                            let store = self.store.lock().expect("store lock");
-                            if change.additions == 0 && change.deletions == 0 {
-                                store.delete_file_change(&self.agent.id, &change.path);
-                            } else {
-                                store.upsert_file_change(
-                                    &self.agent.id,
-                                    &change.path,
-                                    &change.unified_diff,
-                                    change.additions,
-                                    change.deletions,
-                                );
-                            }
-                        }
-                        self.emit(
-                            |session_id| Event::FileChanged {
-                                session_id,
-                                path: change.path,
-                                unified_diff: change.unified_diff,
-                                additions: change.additions,
-                                deletions: change.deletions,
-                            },
-                            tx,
-                        );
-                    }
                 }
                 None if cancelled => {
                     // Cancelled: every group member already got a Begin, so
@@ -2097,10 +2070,7 @@ struct ParallelCall {
     summary: String,
 }
 
-/// Execution product of one call in a parallel read-only group (same shape as
-/// GatedToolOutcome::Executed, plus a defensive file_change channel —
-/// classification guarantees read-only is always None; if mislabeled, no data
-/// is lost)
+/// Execution product of one call in a parallel wave.
 struct ParallelOutput {
     output: String,
     is_error: bool,
@@ -2111,7 +2081,6 @@ struct ParallelOutput {
     documents: Vec<pig_provider::ChatDocument>,
     /// Refs persisted before the completion event is emitted
     document_refs: Vec<crate::rollout::DocumentRef>,
-    file_change: Option<tool::FileChange>,
     stopped: bool,
     /// This call's own span (concurrent calls overlap, so the turn sums them
     /// the way the harness sums per-call tool spans rather than using the
@@ -2119,37 +2088,6 @@ struct ParallelOutput {
     elapsed_ms: u64,
 }
 
-/// Exclusion list for the parallel read-only segment: tools that declare
-/// read_only() but have session side effects or session-layer interception
-/// semantics all fall back to serial sync points. The interception logic for
-/// AskUserQuestion/EnterPlanMode/ExitPlanMode/Agent lives in run_step's serial
-/// body with unchanged semantics (natural sync points).
-const PARALLEL_EXCLUDED: &[&str] = &[
-    "TodoList",        // write variant mutates todos, persists and pushes events
-    "TaskStop",        // stops a background task; a mutating operation
-    "AskUserQuestion", // session-layer popup interception
-    "EnterPlanMode",   // mode-switch interception
-    "ExitPlanMode",    // mode-switch interception (with approval popup)
-    "Agent",           // subagent delegation interception
-];
-
-/// Concurrency-safety check for a single call (conservative: all must hold):
-/// known tool, read_only, approval-free in the current mode (read-only tools
-/// are approval-free in all modes under the current approval matrix, but still
-/// go through the same requires_approval check to guard against regressions if
-/// the matrix changes). Out-of-workspace access in this codebase is a hard
-/// error / session-toggle gate (resolve_with_access) and produces no approval
-/// popup; sensitive files are unconditionally hard-rejected inside tools —
-/// approval popups can only come from the dangerous-command/requires_approval
-/// branches, and group members classified here never enter those two branches,
-/// so two concurrent approval popups are impossible. ReadMediaFile is
-/// intercepted by the session-layer capability gate when the model lacks image
-/// input; not concurrent. MCP and plugin tools also require a project deny
-/// precheck because the concurrent path bypasses exec_tool_gated_ctx. The
-/// subject is the full tool name, same as the serial gate. McpClient
-/// request multiplexing is verified concurrency-safe (stdio: AtomicU64 id +
-/// Mutex pending map + stdin write lock; http: one independent POST per
-/// request).
 #[allow(clippy::too_many_arguments)]
 fn parallel_safe(
     call: &ToolCall,
@@ -2161,63 +2099,25 @@ fn parallel_safe(
     cwd: &std::path::Path,
     hooks: &crate::hooks::HookSet,
 ) -> bool {
-    if PARALLEL_EXCLUDED.contains(&call.name.as_str()) || call.name == "TaskWait" {
-        return false;
+    match scheduler::classify_tool_access(
+        call,
+        tools,
+        permissions,
+        false,
+        media,
+        permission_rules,
+        state,
+        cwd,
+        hooks,
+    ) {
+        scheduler::ToolAccessPlan::Stateless => true,
+        scheduler::ToolAccessPlan::Paths(paths) => paths
+            .iter()
+            .all(|access| access.kind != scheduler::PathAccessKind::Write),
+        scheduler::ToolAccessPlan::Exclusive => false,
     }
-    // Only serialize a call when a runnable tool-lifecycle hook actually matches
-    // this tool. Session/turn-level hooks or hooks targeting other tools must
-    // not collapse unrelated read-only calls into serial execution.
-    if hooks.matches_tool(&call.name) {
-        return false;
-    }
-    // FetchURL checks sandbox network block and user deny rules through the
-    // serial gate whenever either policy would reject it.
-    if call.name == "FetchURL" {
-        if permissions.sandbox.mode != pig_protocol::SandboxMode::DangerFullAccess
-            && crate::task::network_blocked_for(state)
-        {
-            return false;
-        }
-        let subject = tool::approval_subject(call);
-        if permission_rules.deny_hit(&call.name, &subject).is_some() {
-            return false;
-        }
-    }
-    // An out-of-workspace WRITE needs the approval popup — only the serial gate
-    // can request one, so such calls are sync points. Reads are never gated,
-    // with one exception: a read tool whose target sits inside a credential
-    // store is auto-detected by the gate, so it must reach it.
-    if tool::fs_outside_intent(state, cwd, &call.name, &call.arguments).is_some() {
-        return false;
-    }
-    if let Some(target) = tool::file_tool_target(cwd, call)
-        && crate::task::credential_grant(state, &target) != crate::task::CredentialGrant::Outside
-    {
-        return false;
-    }
-    if call.name == "ReadMediaFile" && !media.any() {
-        return false;
-    }
-    let Some(tool_ref) = tools.iter().find(|t| t.name() == call.name.as_str()) else {
-        return false;
-    };
-    if !tool_ref.read_only() || tool::requires_approval(tool_ref.as_ref(), permissions) {
-        return false;
-    }
-    // Project deny precheck for runtime tools (hit → falls back to a serial
-    // sync point; the full gate produces the rejection message).
-    if (call.name.starts_with("mcp__") || tool_ref.is_plugin())
-        && permission_rules.deny_hit(&call.name, &call.name).is_some()
-    {
-        return false;
-    }
-    true
 }
 
-/// Slices one step's tool_calls into a parallel-segment mask: true = may join
-/// a parallel read-only group; false = sync point (writes/shell/needs
-/// approval/session-layer interception/unknown tool/deny hit/matching tool hook),
-/// executed serially on its own after the preceding group drains.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn parallel_mask(
     calls: &[ToolCall],
@@ -2741,6 +2641,161 @@ mod tests {
             out.contains("[Cannot reference file ../etc/passwd"),
             "{out}"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn path_aware_scheduler_groups_disjoint_writes_and_splits_overlaps() {
+        let dir = pointer_test_dir("path-waves");
+        let tools = tool::all();
+        let state = crate::task::SessionToolState::for_test();
+        let rules = crate::permissions::PermissionRules::default();
+        let hooks = crate::hooks::HookSet::empty();
+        let perms = ExecMode::Auto.permissions();
+        let media = tool::MediaCapabilities::new(true, true);
+
+        let classify = |calls: &[ToolCall]| {
+            let plans: Vec<_> = calls
+                .iter()
+                .map(|c| {
+                    scheduler::classify_tool_access(
+                        c, &tools, perms, false, media, &rules, &state, &dir, &hooks,
+                    )
+                })
+                .collect();
+            scheduler::plan_execution_waves(&plans)
+        };
+
+        let disjoint = vec![
+            ToolCall {
+                id: "1".into(),
+                name: "Write".into(),
+                arguments: r#"{"path":"a.rs","content":"a"}"#.into(),
+            },
+            ToolCall {
+                id: "2".into(),
+                name: "Read".into(),
+                arguments: r#"{"path":"b.rs"}"#.into(),
+            },
+            ToolCall {
+                id: "3".into(),
+                name: "Write".into(),
+                arguments: r#"{"path":"c.rs","content":"c"}"#.into(),
+            },
+        ];
+        assert_eq!(
+            classify(&disjoint),
+            vec![scheduler::ExecutionWave::Parallel(0..3)]
+        );
+
+        let overlapping = vec![
+            ToolCall {
+                id: "1".into(),
+                name: "Write".into(),
+                arguments: r#"{"path":"a.rs","content":"a"}"#.into(),
+            },
+            ToolCall {
+                id: "2".into(),
+                name: "Read".into(),
+                arguments: r#"{"path":"a.rs"}"#.into(),
+            },
+        ];
+        assert_eq!(
+            classify(&overlapping),
+            vec![
+                scheduler::ExecutionWave::Parallel(0..1),
+                scheduler::ExecutionWave::Parallel(1..2),
+            ]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn parallel_group_executes_disjoint_writes_and_persists_changes() {
+        let dir = std::env::temp_dir().join(format!(
+            "pig-parallel-writes-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let data_dir = dir.join("data");
+        let sessions_dir = data_dir.join("sessions");
+        std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+        let store = Arc::new(Mutex::new(
+            crate::store::Store::open(&data_dir).expect("store"),
+        ));
+        let (task_tx, _) = async_channel::bounded(1024);
+        let registry = crate::plugins::PluginRegistry::new(data_dir.clone());
+        let meta = SessionMeta {
+            id: "s-pwrite".into(),
+            title: String::new(),
+            title_custom: false,
+            cwd: dir.clone(),
+            created_at: 1,
+            updated_at: 1,
+            pinned: false,
+            archived: false,
+            provider_id: None,
+            model_id: None,
+            reasoning_level: None,
+            permissions: ExecMode::Auto.permissions(),
+            plan_enabled: false,
+        };
+        let mut session = Session::create(
+            meta,
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(HashMap::new())),
+            store.clone(),
+            &sessions_dir,
+            data_dir.clone(),
+            task_tx,
+            &registry.into_shared(),
+            None,
+        )
+        .expect("session");
+        session.set_permissions(ExecMode::Auto.permissions());
+        let (tx, rx) = async_channel::unbounded();
+        let cancel = CancellationToken::new();
+        let calls = vec![
+            ToolCall {
+                id: "w1".into(),
+                name: "Write".into(),
+                arguments: r#"{"path":"one.txt","content":"first\n"}"#.into(),
+            },
+            ToolCall {
+                id: "w2".into(),
+                name: "Write".into(),
+                arguments: r#"{"path":"two.txt","content":"second\n"}"#.into(),
+            },
+        ];
+        let items = vec!["item-w1".into(), "item-w2".into()];
+        let ok = session
+            .run_parallel_group(&calls, &items, 0, 2, "turn-pw", 128_000, &tx, &cancel)
+            .await;
+        assert!(ok);
+        assert_eq!(std::fs::read_to_string(dir.join("one.txt")).unwrap(), "first\n");
+        assert_eq!(std::fs::read_to_string(dir.join("two.txt")).unwrap(), "second\n");
+
+        let mut changed_paths = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let Event::FileChanged { path, .. } = event {
+                changed_paths.push(path);
+            }
+        }
+        changed_paths.sort();
+        assert_eq!(changed_paths, vec!["one.txt", "two.txt"]);
+        let persisted: Vec<String> = store
+            .lock()
+            .unwrap()
+            .file_changes("s-pwrite")
+            .into_iter()
+            .map(|(p, _, _, _)| p)
+            .collect();
+        assert_eq!(persisted.len(), 2, "{persisted:?}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

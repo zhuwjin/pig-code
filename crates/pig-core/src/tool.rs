@@ -120,9 +120,11 @@ impl MediaCapabilities {
 
 pub struct ToolEffect {
     pub output: String,
-    pub file_change: Option<FileChange>,
+    /// Session-cumulative file diffs produced by this tool call (one per file
+    /// touched; `ApplyPatch` may return several).
+    pub file_changes: Vec<FileChange>,
     /// The diff of this edit itself ("before edit → after edit"), rendered inline by the UI tool card;
-    /// `file_change` is the session-cumulative view (for the review panel) — the two differ in granularity
+    /// `file_changes` is the session-cumulative view (for the review panel) — the two differ in granularity
     pub edit_diff: Option<FileChange>,
     /// Image/PDF output (ReadMediaFile); always empty for other tools
     pub images: Vec<ToolImage>,
@@ -135,7 +137,7 @@ impl ToolEffect {
     pub(crate) fn plain(output: String) -> Self {
         Self {
             output,
-            file_change: None,
+            file_changes: vec![],
             edit_diff: None,
             images: vec![],
             documents: vec![],
@@ -199,10 +201,12 @@ mod exec_command;
 mod fetch;
 mod media;
 mod misc;
+mod patch;
 mod paths;
 mod read;
 mod search;
 mod skill;
+mod tool_search;
 mod tracker;
 mod write;
 pub(crate) use write::atomic_write;
@@ -220,6 +224,10 @@ pub use danger::{DangerReason, is_dangerous_command};
 pub use edit::{EditMatchError, EditOutcome, compute_edit};
 pub use fetch::{check_fetch_url, extract_text, is_private_host, is_private_ip};
 pub use misc::{AgentSwarmTool, AgentTool, SendMessageTool, parse_questions, parse_swarm_args};
+pub use patch::{
+    APPLY_PATCH_TOOL, PatchHunk, UpdateChunk, apply_update_chunks, parse_patch, patch_target_paths,
+    preview_patch,
+};
 pub use paths::{FsAccess, is_sensitive_file, resolve_checked, resolve_with_access};
 pub use pig_utils::image::{
     CompressedImage, base64_encode, compress_image_for_model, convert_tiff_to_png,
@@ -227,6 +235,9 @@ pub use pig_utils::image::{
 };
 pub use search::search_files;
 pub(crate) use skill::SkillTool;
+pub use tool_search::{
+    DEFAULT_DEFERRED_TOOL_THRESHOLD, DeferredToolEntry, DeferredToolRegistry, TOOL_SEARCH_TOOL,
+};
 pub use tracker::{ChangeTracker, snapshot_from_store, snapshot_to_store};
 
 pub use pig_protocol::{TodoItem, TodoStatus};
@@ -452,6 +463,7 @@ pub fn all() -> Vec<Box<dyn Tool>> {
         Box::new(ReadFile),
         Box::new(WriteFile),
         Box::new(EditFile),
+        Box::new(patch::ApplyPatchTool),
         Box::new(Glob),
         Box::new(Grep),
         Box::new(ExecCommand),
@@ -466,6 +478,7 @@ pub fn all() -> Vec<Box<dyn Tool>> {
         Box::new(ExitPlanModeTool),
         Box::new(EnterPlanModeTool),
         Box::new(ReadMediaFile),
+        Box::new(tool_search::ToolSearchTool),
     ]
 }
 
@@ -529,7 +542,10 @@ fn only_the_declared_tools_opt_into_strict() {
         .filter(|tool| tool.prefer_strict())
         .map(|tool| tool.name().to_owned())
         .collect();
-    assert_eq!(declared, ["Read", "Write", "Edit", "ExecCommand"]);
+    assert_eq!(
+        declared,
+        ["Read", "Write", "Edit", "ApplyPatch", "ExecCommand"]
+    );
     for tool in all() {
         let schema = schema_with_strict(tool.as_ref());
         if tool.prefer_strict() {
@@ -628,6 +644,15 @@ pub fn summarize(call: &ToolCall) -> String {
         "Read" | "Write" | "Edit" | "ReadMediaFile" => {
             args["path"].as_str().unwrap_or("?").to_string()
         }
+        APPLY_PATCH_TOOL => {
+            let paths = patch_target_paths(&call.arguments);
+            match paths.as_slice() {
+                [] => "patch".to_string(),
+                [only] => only.clone(),
+                [first, rest @ ..] => format!("{first} (+{} more)", rest.len()),
+            }
+        }
+        TOOL_SEARCH_TOOL => args["query"].as_str().unwrap_or("?").to_string(),
         name if is_exec_command(name) => args["command"].as_str().unwrap_or("?").to_string(),
         WRITE_STDIN_TOOL => {
             let sid = args["session_id"].as_str().unwrap_or("?");
@@ -685,7 +710,7 @@ pub async fn execute(
 ) -> (
     String,
     bool,
-    Option<FileChange>,
+    Vec<FileChange>,
     Option<pig_protocol::EditDiff>,
     ToolOutputMedia,
 ) {
@@ -700,7 +725,7 @@ pub async fn execute_with_extra(
 ) -> (
     String,
     bool,
-    Option<FileChange>,
+    Vec<FileChange>,
     Option<pig_protocol::EditDiff>,
     ToolOutputMedia,
 ) {
@@ -714,7 +739,7 @@ pub async fn execute_with_extra(
         return (
             format!("Unknown tool: {}", call.name),
             true,
-            None,
+            vec![],
             None,
             ToolOutputMedia::default(),
         );
@@ -723,7 +748,7 @@ pub async fn execute_with_extra(
         Ok(effect) => (
             effect.output,
             false,
-            effect.file_change,
+            effect.file_changes,
             effect.edit_diff.map(Into::into),
             ToolOutputMedia {
                 images: effect.images,
@@ -731,7 +756,7 @@ pub async fn execute_with_extra(
                 delivered_notification_ids: effect.delivered_notification_ids,
             },
         ),
-        Err(error) => (error, true, None, None, ToolOutputMedia::default()),
+        Err(error) => (error, true, vec![], None, ToolOutputMedia::default()),
     }
 }
 
@@ -807,6 +832,28 @@ pub fn file_tool_target(cwd: &std::path::Path, call: &ToolCall) -> Option<std::p
     }
 }
 
+/// All normalized filesystem paths targeted by a file tool call (single path
+/// for `Read`/`Write`/`Edit`/`ReadMediaFile`/`Grep`/`Glob`, all source and
+/// destination paths for `ApplyPatch`).
+pub fn file_tool_targets(cwd: &std::path::Path, call: &ToolCall) -> Vec<std::path::PathBuf> {
+    if call.name == APPLY_PATCH_TOOL {
+        let base = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+        return patch_target_paths(&call.arguments)
+            .into_iter()
+            .map(|raw| {
+                let path = std::path::Path::new(&raw);
+                let joined = if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    base.join(path)
+                };
+                paths::lexical_normalize_public(&joined)
+            })
+            .collect();
+    }
+    file_tool_target(cwd, call).into_iter().collect()
+}
+
 pub fn approval_subject(call: &ToolCall) -> String {
     let args: serde_json::Value = serde_json::from_str(&call.arguments).unwrap_or_default();
     match call.name.as_str() {
@@ -817,6 +864,7 @@ pub fn approval_subject(call: &ToolCall) -> String {
             .to_string(),
         WRITE_STDIN_TOOL => args["session_id"].as_str().unwrap_or("").to_string(),
         "Write" | "Edit" => args["path"].as_str().unwrap_or("").to_string(),
+        APPLY_PATCH_TOOL => patch_target_paths(&call.arguments).join(", "),
         _ => String::new(),
     }
 }

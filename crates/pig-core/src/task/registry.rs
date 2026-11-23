@@ -473,6 +473,9 @@ pub struct SessionToolState {
     /// Session-scoped persistent PTY manager for interactive `ExecCommand(tty=true)`
     /// / `WriteStdin` sessions.
     pub pty: Arc<super::pty::PtySessionManager>,
+    /// Session-scoped deferred runtime tool catalog and append-only activation
+    /// set (model-agnostic `ToolSearch`).
+    pub deferred_tools: Arc<Mutex<crate::tool::DeferredToolRegistry>>,
 }
 
 impl Clone for SessionToolState {
@@ -498,6 +501,7 @@ impl Clone for SessionToolState {
             sandbox_project: self.sandbox_project.clone(),
             env: self.env.clone(),
             pty: self.pty.clone(),
+            deferred_tools: self.deferred_tools.clone(),
         }
     }
 }
@@ -545,6 +549,7 @@ impl SessionToolState {
             sandbox_project: Arc::new(std::sync::RwLock::new(Default::default())),
             env: super::env::ExecutionEnvironment::local(),
             pty: Arc::new(super::pty::PtySessionManager::new()),
+            deferred_tools: Arc::new(Mutex::new(crate::tool::DeferredToolRegistry::default())),
         }
     }
 

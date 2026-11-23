@@ -597,6 +597,14 @@ fn tool_summaries() -> &'static [(&'static str, &'static str)] {
             "ask the user to confirm the written plan and exit plan mode",
         ),
         (
+            "ApplyPatch",
+            "apply a multi-file, multi-hunk patch atomically (`*** Begin Patch` ... `*** End Patch`, supporting Add/Update/Move/Delete)",
+        ),
+        (
+            "ToolSearch",
+            "search and load deferred MCP/plugin tools by keyword or `select:name1,name2` when many runtime tools are configured",
+        ),
+        (
             "Skill",
             "load a skill's full instructions (skills are domain capabilities/workflows listed \
              in the system prompt; when a task matches one, load it before acting)",

@@ -101,7 +101,7 @@ async fn edit_not_found_and_not_unique() {
     )
     .await;
     assert!(!is_error);
-    let change = change.expect("Edit should produce a FileChange");
+    let change = change.into_iter().next().expect("Edit should produce a FileChange");
     assert_eq!(change.path, "a.txt");
     assert_eq!((change.additions, change.deletions), (1, 1));
     assert!(change.unified_diff.contains("-bar") && change.unified_diff.contains("+x"));
@@ -195,7 +195,7 @@ async fn write_diff_revert_cycle() {
     )
     .await;
     assert!(!is_error);
-    let change = change.expect("Write should produce a FileChange");
+    let change = change.into_iter().next().expect("Write should produce a FileChange");
     assert_eq!(
         change.path, "sub/new.txt",
         "path relativized with forward slashes"
@@ -220,7 +220,7 @@ async fn write_diff_revert_cycle() {
     )
     .await;
     assert!(!is_error);
-    let change = change.unwrap();
+    let change = change.into_iter().next().unwrap();
     assert_eq!(
         (change.additions, change.deletions),
         (2, 0),
@@ -296,7 +296,7 @@ async fn edit_produces_per_edit_diff() {
         edit.unified_diff
     );
     assert!(edit.unified_diff.contains("-b") && edit.unified_diff.contains("+B"));
-    let change = change.expect("cumulative diff still present");
+    let change = change.into_iter().next().expect("cumulative diff still present");
     assert_eq!(
         (change.additions, change.deletions),
         (3, 0),
