@@ -236,7 +236,8 @@ pub use pig_utils::image::{
 pub use search::search_files;
 pub(crate) use skill::SkillTool;
 pub use tool_search::{
-    DEFAULT_DEFERRED_TOOL_THRESHOLD, DeferredToolEntry, DeferredToolRegistry, TOOL_SEARCH_TOOL,
+    CALL_TOOL, DeferredToolEntry, DeferredToolRegistry, TOOL_SEARCH_TOOL, unwrap_call_tool,
+    validate_tool_arguments,
 };
 pub use tracker::{ChangeTracker, snapshot_from_store, snapshot_to_store};
 
@@ -479,6 +480,7 @@ pub fn all() -> Vec<Box<dyn Tool>> {
         Box::new(EnterPlanModeTool),
         Box::new(ReadMediaFile),
         Box::new(tool_search::ToolSearchTool),
+        Box::new(tool_search::CallToolProxy),
     ]
 }
 
@@ -653,6 +655,16 @@ pub fn summarize(call: &ToolCall) -> String {
             }
         }
         TOOL_SEARCH_TOOL => args["query"].as_str().unwrap_or("?").to_string(),
+        CALL_TOOL => match unwrap_call_tool(call) {
+            Some(Ok((target, target_args))) => {
+                if target_args == "{}" {
+                    target
+                } else {
+                    format!("{target} · {target_args}")
+                }
+            }
+            _ => args["name"].as_str().unwrap_or("?").to_string(),
+        },
         name if is_exec_command(name) => args["command"].as_str().unwrap_or("?").to_string(),
         WRITE_STDIN_TOOL => {
             let sid = args["session_id"].as_str().unwrap_or("?");
@@ -865,6 +877,10 @@ pub fn approval_subject(call: &ToolCall) -> String {
         WRITE_STDIN_TOOL => args["session_id"].as_str().unwrap_or("").to_string(),
         "Write" | "Edit" => args["path"].as_str().unwrap_or("").to_string(),
         APPLY_PATCH_TOOL => patch_target_paths(&call.arguments).join(", "),
+        CALL_TOOL => match unwrap_call_tool(call) {
+            Some(Ok((target, _))) => target,
+            _ => args["name"].as_str().unwrap_or("").to_string(),
+        },
         _ => String::new(),
     }
 }

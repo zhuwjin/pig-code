@@ -602,7 +602,11 @@ fn tool_summaries() -> &'static [(&'static str, &'static str)] {
         ),
         (
             "ToolSearch",
-            "search and load deferred MCP/plugin tools by keyword or `select:name1,name2` when many runtime tools are configured",
+            "search available MCP and plugin tools and inspect their full JSON parameter schemas before calling them with CallTool",
+        ),
+        (
+            "CallTool",
+            "invoke an MCP or plugin tool by name with a JSON arguments object (use ToolSearch first to get the schema)",
         ),
         (
             "Skill",

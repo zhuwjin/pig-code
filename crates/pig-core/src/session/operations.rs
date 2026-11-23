@@ -27,10 +27,10 @@ impl Session {
 
     /// Root session tool schema set for sampling and context accounting.
     ///
-    /// When runtime tools (MCP + plugins) exceed `DEFAULT_DEFERRED_TOOL_THRESHOLD`,
-    /// non-activated runtime schemas are withheld behind the model-agnostic
-    /// `ToolSearch` tool and appended in activation order as the model loads
-    /// them (protecting prefix-cache stability).
+    /// Built-in tools are exposed directly in `tools[]`. Whenever any runtime
+    /// tools (MCP servers or plugins) are available, they are exposed solely
+    /// through the fixed `ToolSearch` + `CallTool` proxy pair so `tools[]`
+    /// remains byte-identical across turns (zero prefix-cache invalidation).
     pub(crate) fn root_schemas(&self) -> Vec<serde_json::Value> {
         let builtins = tool::all_root_with_summary(
             &self.agent.cwd,
@@ -47,22 +47,16 @@ impl Session {
             .iter()
             .map(|t| tool::DeferredToolEntry::from_tool(t.as_ref()))
             .collect();
-        let (deferral_active, tool_search_schema, activated_schemas) = {
+        let tool_search_schema = {
             let mut deferred = self
                 .state
                 .deferred_tools
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             deferred.sync_catalog(entries);
-            if deferred.is_deferral_active() {
-                (
-                    true,
-                    Some(deferred.tool_search_schema()),
-                    deferred.activated_schemas(),
-                )
-            } else {
-                (false, None, Vec::new())
-            }
+            deferred
+                .has_runtime_tools()
+                .then(|| deferred.tool_search_schema())
         };
 
         let mut schemas: Vec<serde_json::Value> = Vec::new();
@@ -73,14 +67,13 @@ impl Session {
                 }
                 continue;
             }
-            schemas.push(tool::schema_with_strict(builtin.as_ref()));
-        }
-        if deferral_active {
-            schemas.extend(activated_schemas);
-        } else {
-            for rt in &runtime_tools {
-                schemas.push(tool::schema_with_strict(rt.as_ref()));
+            if builtin.name() == tool::CALL_TOOL {
+                if tool_search_schema.is_some() {
+                    schemas.push(tool::schema_with_strict(builtin.as_ref()));
+                }
+                continue;
             }
+            schemas.push(tool::schema_with_strict(builtin.as_ref()));
         }
         schemas
     }

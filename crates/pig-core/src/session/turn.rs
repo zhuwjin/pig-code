@@ -936,7 +936,17 @@ impl Session {
             }
 
             let tool_ref = tools.iter().find(|t| t.name() == call.name.as_str());
-            let read_only = tool_ref.is_some_and(|t| t.read_only());
+            let read_only = if call.name == tool::CALL_TOOL {
+                match tool::unwrap_call_tool(call) {
+                    Some(Ok((target_name, _))) => tools
+                        .iter()
+                        .find(|t| t.name() == target_name.as_str())
+                        .is_some_and(|t| t.read_only()),
+                    _ => false,
+                }
+            } else {
+                tool_ref.is_some_and(|t| t.read_only())
+            };
 
             // ExitPlanMode: intercepted before the plan-mode hard rejection (it
             // is the only way out of plan mode; force a popup for user
@@ -2796,6 +2806,346 @@ mod tests {
             .map(|(p, _, _, _)| p)
             .collect();
         assert_eq!(persisted.len(), 2, "{persisted:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn root_schemas_and_call_tool_proxy_enforce_schema_and_gate() {
+        let dir = std::env::temp_dir().join(format!(
+            "pig-proxy-plugin-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let data_dir = dir.join("data");
+        let sessions_dir = data_dir.join("sessions");
+        std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+        let store = Arc::new(Mutex::new(
+            crate::store::Store::open(&data_dir).expect("store"),
+        ));
+
+        // 1. Without any runtime tools, root_schemas() omits both ToolSearch and CallTool.
+        let empty_registry = crate::plugins::PluginRegistry::new(data_dir.clone());
+        let (task_tx, _) = async_channel::bounded(64);
+        let empty_meta = SessionMeta {
+            id: "s-no-runtime".into(),
+            title: String::new(),
+            title_custom: false,
+            cwd: dir.clone(),
+            created_at: 1,
+            updated_at: 1,
+            pinned: false,
+            archived: false,
+            provider_id: None,
+            model_id: None,
+            reasoning_level: None,
+            permissions: ExecMode::Auto.permissions(),
+            plan_enabled: false,
+        };
+        let empty_session = Session::create(
+            empty_meta,
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(HashMap::new())),
+            store.clone(),
+            &sessions_dir,
+            data_dir.clone(),
+            task_tx,
+            &empty_registry.into_shared(),
+            None,
+        )
+        .expect("empty session");
+        let empty_names: Vec<String> = empty_session
+            .root_schemas()
+            .iter()
+            .filter_map(|s| s["function"]["name"].as_str().map(str::to_string))
+            .collect();
+        assert!(!empty_names.contains(&tool::TOOL_SEARCH_TOOL.to_string()));
+        assert!(!empty_names.contains(&tool::CALL_TOOL.to_string()));
+
+        // 2. With even a single plugin tool, root_schemas() exposes ToolSearch + CallTool
+        //    and keeps raw plugin schemas out of `tools[]`.
+        let package_root = data_dir.join("plugins/demo");
+        std::fs::create_dir_all(&package_root).expect("plugin fixture");
+        std::fs::write(
+            package_root.join("pig-plugin.json"),
+            r#"{
+              "apiVersion": 1,
+              "id": "demo",
+              "name": "Demo",
+              "version": "1.0.0",
+              "build": 1,
+              "backend": "backend.ts",
+              "minHostVersion": "1.0.0",
+              "protocols": {"ui": 1, "services": 1},
+              "capabilities": [],
+              "contributions": {
+                "tools": [{
+                  "name": "DemoRead",
+                  "description": "Read demo data",
+                  "parameters": {
+                    "type": "object",
+                    "properties": {
+                      "query": { "type": "string" }
+                    },
+                    "required": ["query"]
+                  },
+                  "read_only": true
+                }],
+                "actions": ["provide_tools"]
+              }
+            }"#,
+        )
+        .expect("plugin manifest");
+        std::fs::write(package_root.join("backend.ts"), "export {};\n").expect("backend entry");
+        let mut registry = crate::plugins::PluginRegistry::new(data_dir.clone());
+        let snapshot = registry.sync(vec![pig_protocol::PluginPackageSource {
+            root: package_root,
+            source: pig_protocol::PluginSource::User,
+        }]);
+        registry
+            .set_enabled("demo", &snapshot.packages[0].digest, true)
+            .expect("enable plugin");
+
+        let (task_tx, _) = async_channel::bounded(1024);
+        let meta = SessionMeta {
+            id: "s-proxy".into(),
+            title: String::new(),
+            title_custom: false,
+            cwd: dir.clone(),
+            created_at: 1,
+            updated_at: 1,
+            pinned: false,
+            archived: false,
+            provider_id: None,
+            model_id: None,
+            reasoning_level: None,
+            permissions: ExecMode::Auto.permissions(),
+            plan_enabled: false,
+        };
+        let mut session = Session::create(
+            meta,
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(HashMap::new())),
+            store,
+            &sessions_dir,
+            data_dir.clone(),
+            task_tx,
+            &registry.into_shared(),
+            None,
+        )
+        .expect("session");
+        session.set_permissions(ExecMode::Auto.permissions());
+
+        let schemas = session.root_schemas();
+        let schema_names: Vec<&str> = schemas
+            .iter()
+            .filter_map(|s| s["function"]["name"].as_str())
+            .collect();
+        assert!(schema_names.contains(&tool::TOOL_SEARCH_TOOL), "{schema_names:?}");
+        assert!(schema_names.contains(&tool::CALL_TOOL), "{schema_names:?}");
+        assert!(!schema_names.contains(&"DemoRead"), "{schema_names:?}");
+        let search_desc = schemas
+            .iter()
+            .find(|s| s["function"]["name"].as_str() == Some(tool::TOOL_SEARCH_TOOL))
+            .and_then(|s| s["function"]["description"].as_str())
+            .unwrap_or_default();
+        assert!(search_desc.contains("DemoRead"), "{search_desc}");
+
+        // 3. Valid CallTool executes the target plugin tool end-to-end.
+        let dispatcher = session.plugin_tools.dispatcher();
+        let (tx, rx) = async_channel::unbounded();
+        let cancel = CancellationToken::new();
+        let calls = vec![ToolCall {
+            id: "call-proxy-ok".into(),
+            name: tool::CALL_TOOL.into(),
+            arguments: r#"{"name":"DemoRead","arguments":{"query":"ping"}}"#.into(),
+        }];
+        let items = vec!["item-proxy-ok".into()];
+        let (tx_exec, rx_done) = (tx.clone(), rx.clone());
+        let resolver = tokio::spawn(async move {
+            loop {
+                match rx_done.recv().await.expect("event") {
+                    Event::PluginToolCall { call } => {
+                        assert_eq!(call.tool, "DemoRead");
+                        dispatcher.resolve(pig_protocol::PluginToolResult {
+                            request_id: call.request_id,
+                            session_id: call.session_id,
+                            package: call.package,
+                            digest: call.digest,
+                            result: Ok("proxy-ok".into()),
+                        });
+                    }
+                    Event::ToolCallEnd { output, is_error, .. } => break (output, is_error),
+                    _ => {}
+                }
+            }
+        });
+        assert!(
+            session
+                .run_parallel_group(&calls, &items, 0, 1, "turn-proxy", 128_000, &tx_exec, &cancel)
+                .await
+        );
+        let (output, is_error) = resolver.await.expect("resolver");
+        assert!(!is_error, "{output}");
+        assert_eq!(output, "proxy-ok");
+
+        // 4. Missing required argument is rejected before dispatch with the schema.
+        let (tx_err, rx_err) = async_channel::unbounded();
+        let bad_calls = vec![ToolCall {
+            id: "call-proxy-bad".into(),
+            name: tool::CALL_TOOL.into(),
+            arguments: r#"{"name":"DemoRead","arguments":{}}"#.into(),
+        }];
+        let bad_items = vec!["item-proxy-bad".into()];
+        assert!(
+            session
+                .run_parallel_group(&bad_calls, &bad_items, 0, 1, "turn-bad", 128_000, &tx_err, &cancel)
+                .await
+        );
+        let mut bad_end = None;
+        while let Ok(ev) = rx_err.try_recv() {
+            if let Event::ToolCallEnd { output, is_error, .. } = ev {
+                bad_end = Some((output, is_error));
+            }
+        }
+        let (bad_out, bad_is_err) = bad_end.expect("bad ToolCallEnd");
+        assert!(bad_is_err);
+        assert!(bad_out.contains("query"), "{bad_out}");
+        assert!(bad_out.contains("Expected parameters schema"), "{bad_out}");
+
+        // 5. Built-in tools cannot be invoked through CallTool.
+        let (tx_bi, rx_bi) = async_channel::unbounded();
+        let builtin_calls = vec![ToolCall {
+            id: "call-proxy-builtin".into(),
+            name: tool::CALL_TOOL.into(),
+            arguments: r#"{"name":"Read","arguments":{"path":"a.rs"}}"#.into(),
+        }];
+        let builtin_items = vec!["item-proxy-builtin".into()];
+        assert!(
+            session
+                .run_parallel_group(&builtin_calls, &builtin_items, 0, 1, "turn-bi", 128_000, &tx_bi, &cancel)
+                .await
+        );
+        let mut bi_end = None;
+        while let Ok(ev) = rx_bi.try_recv() {
+            if let Event::ToolCallEnd { output, is_error, .. } = ev {
+                bi_end = Some((output, is_error));
+            }
+        }
+        let (bi_out, bi_is_err) = bi_end.expect("builtin ToolCallEnd");
+        assert!(bi_is_err);
+        assert!(bi_out.contains("built-in tool"), "{bi_out}");
+
+        // 6. Permission deny rules apply to the unwrapped target tool name.
+        {
+            let mut rules = session
+                .permission_rules
+                .lock()
+                .expect("permission_rules lock");
+            *rules = crate::permissions::PermissionRules::parse(r#"deny = ["DemoRead(*)"]"#)
+                .expect("parse deny rule");
+        }
+        let (tx_deny, rx_deny) = async_channel::unbounded();
+        let deny_items = vec!["item-proxy-deny".into()];
+        assert!(
+            session
+                .run_parallel_group(&calls, &deny_items, 0, 1, "turn-deny", 128_000, &tx_deny, &cancel)
+                .await
+        );
+        let mut deny_end = None;
+        while let Ok(ev) = rx_deny.try_recv() {
+            if let Event::ToolCallEnd { output, is_error, .. } = ev {
+                deny_end = Some((output, is_error));
+            }
+        }
+        let (deny_out, deny_is_err) = deny_end.expect("deny ToolCallEnd");
+        assert!(deny_is_err);
+        assert!(deny_out.contains("DemoRead"), "{deny_out}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scheduler_unwraps_call_tool_for_mcp_concurrency() {
+        let dir = pointer_test_dir("call-tool-sched");
+        let mcp = crate::mcp::McpManager::for_test(
+            "srv",
+            vec![
+                crate::mcp::McpToolSpec {
+                    name: "read".into(),
+                    description: Some("read data".into()),
+                    input_schema: serde_json::json!({"type": "object"}),
+                    annotations: crate::mcp::McpToolAnnotations {
+                        read_only_hint: Some(true),
+                        ..Default::default()
+                    },
+                },
+                crate::mcp::McpToolSpec {
+                    name: "write".into(),
+                    description: Some("write data".into()),
+                    input_schema: serde_json::json!({"type": "object"}),
+                    annotations: crate::mcp::McpToolAnnotations {
+                        read_only_hint: Some(false),
+                        ..Default::default()
+                    },
+                },
+            ],
+        );
+        let mut tools = tool::all();
+        tools.extend(mcp.tools());
+        let state = crate::task::SessionToolState::for_test();
+        let rules = crate::permissions::PermissionRules::default();
+        let hooks = crate::hooks::HookSet::empty();
+        let perms = ExecMode::Auto.permissions();
+        let media = tool::MediaCapabilities::new(true, true);
+
+        let read_call = ToolCall {
+            id: "1".into(),
+            name: tool::CALL_TOOL.into(),
+            arguments: r#"{"name":"mcp__srv__read","arguments":{}}"#.into(),
+        };
+        let write_call = ToolCall {
+            id: "2".into(),
+            name: tool::CALL_TOOL.into(),
+            arguments: r#"{"name":"mcp__srv__write","arguments":{}}"#.into(),
+        };
+        let bad_call = ToolCall {
+            id: "3".into(),
+            name: tool::CALL_TOOL.into(),
+            arguments: r#"{"arguments":{}}"#.into(),
+        };
+
+        assert_eq!(
+            scheduler::classify_tool_access(
+                &read_call, &tools, perms, false, media, &rules, &state, &dir, &hooks,
+            ),
+            scheduler::ToolAccessPlan::Stateless
+        );
+        assert_eq!(
+            scheduler::classify_tool_access(
+                &write_call, &tools, perms, false, media, &rules, &state, &dir, &hooks,
+            ),
+            scheduler::ToolAccessPlan::Exclusive
+        );
+        assert_eq!(
+            scheduler::classify_tool_access(
+                &bad_call, &tools, perms, false, media, &rules, &state, &dir, &hooks,
+            ),
+            scheduler::ToolAccessPlan::Exclusive
+        );
+
+        let deny_rules =
+            crate::permissions::PermissionRules::parse(r#"deny = ["mcp__srv__read(*)"]"#)
+                .expect("parse rules");
+        assert_eq!(
+            scheduler::classify_tool_access(
+                &read_call, &tools, perms, false, media, &deny_rules, &state, &dir, &hooks,
+            ),
+            scheduler::ToolAccessPlan::Exclusive
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

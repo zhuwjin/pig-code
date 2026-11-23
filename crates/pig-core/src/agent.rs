@@ -18,12 +18,16 @@ pub const DEFAULT_MAX_TURNS: usize = 20;
 /// in `tool::all()`; child preparation adds them separately only when both the
 /// profile and the remaining depth budget allow them. Plan/question tools stay
 /// forbidden to avoid plan-mode deadlocks and blocking the parent turn.
-pub const FORBIDDEN_CHILD_TOOLS: [&str; 5] = [
+/// `ToolSearch` and `CallTool` belong to the root session's deferred runtime
+/// proxy layer; children inherit their narrowed MCP/plugin tools directly.
+pub const FORBIDDEN_CHILD_TOOLS: [&str; 7] = [
     "Agent",
     "AgentSwarm",
     "EnterPlanMode",
     "ExitPlanMode",
     "AskUserQuestion",
+    crate::tool::TOOL_SEARCH_TOOL,
+    crate::tool::CALL_TOOL,
 ];
 
 /// Subagent profile
@@ -720,6 +724,8 @@ You are a code reviewer; output only the issue list.
         assert!(!tools.contains(&"AskUserQuestion".to_string()));
         assert!(!tools.contains(&"EnterPlanMode".to_string()));
         assert!(!tools.contains(&"ExitPlanMode".to_string()));
+        assert!(!tools.contains(&crate::tool::TOOL_SEARCH_TOOL.to_string()));
+        assert!(!tools.contains(&crate::tool::CALL_TOOL.to_string()));
     }
 
     #[test]

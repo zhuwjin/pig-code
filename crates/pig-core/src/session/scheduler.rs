@@ -78,6 +78,33 @@ pub(crate) fn classify_tool_access(
     cwd: &Path,
     hooks: &crate::hooks::HookSet,
 ) -> ToolAccessPlan {
+    // Unwrap `CallTool` so concurrency classification inspects the real target
+    // MCP/plugin tool (read-only runtime tools stay concurrent; mutating,
+    // denied, hooked, or malformed calls remain Exclusive).
+    if let Some(unwrapped) = tool::unwrap_call_tool(call) {
+        let Ok((target_name, target_args)) = unwrapped else {
+            return ToolAccessPlan::Exclusive;
+        };
+        let target_call = ToolCall {
+            id: call.id.clone(),
+            name: target_name,
+            arguments: target_args,
+        };
+        if target_call.name == tool::CALL_TOOL {
+            return ToolAccessPlan::Exclusive;
+        }
+        return classify_tool_access(
+            &target_call,
+            tools,
+            permissions,
+            plan_enabled,
+            media,
+            permission_rules,
+            state,
+            cwd,
+            hooks,
+        );
+    }
     if EXCLUSIVE_TOOLS.contains(&call.name.as_str()) {
         return ToolAccessPlan::Exclusive;
     }

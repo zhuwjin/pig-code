@@ -22,6 +22,47 @@ pub(crate) async fn exec_tool_gated_ctx(
     if cancel.is_cancelled() {
         return GatedToolOutcome::Cancelled;
     }
+
+    // Unwrap `CallTool({ name, arguments })` into its real MCP/plugin target
+    // BEFORE hooks, permission rules, approvals, and execution so every policy
+    // check applies to the actual runtime tool with zero bypasses.
+    let unwrapped_call: Option<ToolCall>;
+    let (incoming, tool) = if let Some(unwrapped) = tool::unwrap_call_tool(incoming) {
+        let (target_name, target_args) = match unwrapped {
+            Ok(pair) => pair,
+            Err(note) => return GatedToolOutcome::Rejected { note },
+        };
+        let Some(target_tool) = ctx
+            .extra_tools
+            .iter()
+            .find(|extra| extra.name() == target_name.as_str())
+        else {
+            let note = if tool::all().iter().any(|t| t.name() == target_name.as_str()) {
+                format!(
+                    "`{target_name}` is a built-in tool; call it directly instead of via CallTool."
+                )
+            } else {
+                format!(
+                    "Unknown MCP/plugin tool `{target_name}`. Call ToolSearch to inspect available runtime tools."
+                )
+            };
+            return GatedToolOutcome::Rejected { note };
+        };
+        if let Err(note) = tool::validate_tool_arguments(&target_tool.schema(), &target_args) {
+            return GatedToolOutcome::Rejected { note };
+        }
+        unwrapped_call = Some(ToolCall {
+            id: incoming.id.clone(),
+            name: target_name,
+            arguments: target_args,
+        });
+        (
+            unwrapped_call.as_ref().expect("unwrapped call"),
+            Some(target_tool.as_ref()),
+        )
+    } else {
+        (incoming, tool)
+    };
     // ---- PreToolUse hooks (before any permission logic, so hooks observe
     // every call including ones the rules will deny). May reject the call,
     // rewrite the input, or adjust the permission path; contexts carry to the
@@ -967,15 +1008,6 @@ The sandbox stays on: ordinary paths become writable, but protected files, deny 
     let Some((mut output, is_error, file_changes, edit, mut media)) = result else {
         return GatedToolOutcome::Cancelled;
     };
-    // Auto-activate any deferred runtime tool called directly by name so its
-    // full schema is loaded for subsequent steps.
-    if call.name.starts_with("mcp__") || plugin_tool {
-        ctx.state
-            .deferred_tools
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .activate(&call.name);
-    }
 
     // Codex's default approval policy (`OnRequest`) does not retry a failed
     // command automatically: the sandbox denial is returned to the model,
