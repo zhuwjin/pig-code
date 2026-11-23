@@ -366,23 +366,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stopped_fields_default_for_legacy_data() {
-        let legacy_event: Event = serde_json::from_value(serde_json::json!({
-            "ToolCallEnd": {
-                "session_id": "s",
-                "item_id": "call",
-                "output": "Stopped",
-                "is_error": true,
-            }
-        }))
-        .expect("legacy tool end");
-        assert!(matches!(
-            legacy_event,
-            Event::ToolCallEnd { stopped: false, .. }
-        ));
-    }
-
-    #[test]
     fn sources_event_carries_the_exact_text_item_and_round_trips() {
         let event = Event::Sources {
             session_id: "s".into(),

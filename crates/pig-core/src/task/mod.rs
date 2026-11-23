@@ -75,8 +75,6 @@ pub use sandbox::init_sandbox_network;
 pub use sandbox::init_sandbox_settings;
 pub use sandbox::platform_sandbox_status;
 #[cfg(target_os = "windows")]
-pub use sandbox::init_windows_sandbox_network;
-#[cfg(target_os = "windows")]
 pub use sandbox::{
     SandboxDenyRuleKind, SandboxReadiness, sandbox_classify_deny_rule, sandbox_readiness,
     validate_deny_rule,

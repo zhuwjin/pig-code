@@ -4,9 +4,8 @@ use pig_provider::{ChatImage, ChatMsg, ToolCall};
 use std::collections::HashMap;
 
 /// Rebuild the exact continuable message shape represented by canonical
-/// records, with legacy records retained as a best-effort compatibility path.
-/// No media bytes are read: this is for callers that only need text, tool calls
-/// and the recorded projection. Session replay must use
+/// records. No media bytes are read: this is for callers that only need text,
+/// tool calls and the recorded projection. Session replay must use
 /// [`rebuild_history_with_media_root`] so every media read is contained.
 pub fn rebuild_history(
     records: &[RolloutRecord],
@@ -141,8 +140,6 @@ fn rebuild_records(
     let mut history = vec![ChatMsg::system(system)];
     let mut provenance: Vec<Option<usize>> = vec![None];
     let mut user_ixs = Vec::new();
-    let mut pending_reasoning: Option<String> = None;
-    let mut pending_replay: Option<pig_provider::AssistantReplay> = None;
     let mut active_replay: Option<ActiveReplay> = None;
     let mut skip_media_before: Option<usize> = None;
     let mut notification_receipts = HashMap::new();
@@ -167,8 +164,6 @@ fn rebuild_records(
                 ..
             } => {
                 finalize_active_replay(&mut history, &mut active_replay);
-                pending_reasoning = None;
-                pending_replay = None;
                 history.push(ChatMsg::user(model_text.clone()));
                 provenance.push(None);
                 let index = history.len() - 1;
@@ -180,8 +175,6 @@ fn rebuild_records(
             }
             RolloutRecord::MailboxMessage { text, .. } => {
                 finalize_active_replay(&mut history, &mut active_replay);
-                pending_reasoning = None;
-                pending_replay = None;
                 history.push(ChatMsg::user(text.clone()));
                 provenance.push(None);
             }
@@ -196,8 +189,6 @@ fn rebuild_records(
                 ..
             } => {
                 finalize_active_replay(&mut history, &mut active_replay);
-                pending_reasoning = None;
-                pending_replay = None;
                 let input_image = media.map(|caps| caps.input_image);
                 let reproject = match (sent_input_image, input_image, model_text) {
                     (Some(original), Some(current), Some(base)) if *original != current => {
@@ -271,20 +262,6 @@ fn rebuild_records(
                 ..
             } => {
                 finalize_active_replay(&mut history, &mut active_replay);
-                if pending_replay.is_some() {
-                    materialize_pending_replay(
-                        &mut history,
-                        &mut provenance,
-                        &mut pending_replay,
-                        &mut pending_reasoning,
-                        String::new(),
-                        &mut active_replay,
-                        record_ix,
-                    );
-                    finalize_active_replay(&mut history, &mut active_replay);
-                }
-                pending_reasoning = None;
-                pending_replay = None;
                 let calls: Vec<ToolCall> = tool_calls
                     .iter()
                     .map(|call| ToolCall {
@@ -308,23 +285,6 @@ fn rebuild_records(
                     next_result: 0,
                 });
             }
-            RolloutRecord::Reasoning { text, replay } => {
-                finalize_active_replay(&mut history, &mut active_replay);
-                pending_reasoning = Some(text.clone());
-                pending_replay = replay.clone();
-            }
-            RolloutRecord::Text { text } => {
-                finalize_active_replay(&mut history, &mut active_replay);
-                materialize_pending_replay(
-                    &mut history,
-                    &mut provenance,
-                    &mut pending_replay,
-                    &mut pending_reasoning,
-                    text.clone(),
-                    &mut active_replay,
-                    record_ix,
-                );
-            }
             RolloutRecord::ToolCall {
                 tool,
                 arguments,
@@ -336,17 +296,6 @@ fn rebuild_records(
                 delivered_notification_ids,
                 ..
             } => {
-                if pending_replay.is_some() {
-                    materialize_pending_replay(
-                        &mut history,
-                        &mut provenance,
-                        &mut pending_replay,
-                        &mut pending_reasoning,
-                        String::new(),
-                        &mut active_replay,
-                        record_ix,
-                    );
-                }
                 if let Some(call_id) = active_replay
                     .as_ref()
                     .and_then(|active| active.call_ids.get(active.next_result).cloned())
@@ -393,11 +342,7 @@ fn rebuild_records(
                 {
                     calls.push(wire_call.to_wire());
                 } else {
-                    history.push(ChatMsg::assistant(
-                        String::new(),
-                        vec![wire_call],
-                        pending_reasoning.take(),
-                    ));
+                    history.push(ChatMsg::assistant(String::new(), vec![wire_call], None));
                     provenance.push(Some(record_ix));
                 }
                 history.push(restore_tool_result(
@@ -428,8 +373,6 @@ fn rebuild_records(
                 ..
             } => {
                 finalize_active_replay(&mut history, &mut active_replay);
-                pending_reasoning = None;
-                pending_replay = None;
                 if let Some(tail_len) = tail_len {
                     let omitted = *omitted;
                     let tail_len = *tail_len;
@@ -443,11 +386,13 @@ fn rebuild_records(
                     // context to `[system, note]` (or a note plus assistants)
                     // and drop every request.
                     let last_real_user = user_ixs.last().copied().flatten();
-                    let promoted_checkpoint = history.get(1).is_some_and(|message| {
-                        message.role == "system" || crate::rollout::is_compaction_handoff(message)
-                    }) && history.get(2).is_some_and(|message| {
-                        message.role == "user" && !crate::rollout::is_compaction_handoff(message)
-                    });
+                    let promoted_checkpoint = history
+                        .get(1)
+                        .is_some_and(crate::rollout::is_compaction_handoff)
+                        && history.get(2).is_some_and(|message| {
+                            message.role == "user"
+                                && !crate::rollout::is_compaction_handoff(message)
+                        });
                     let tail_has_user_anchor = history.get(cut).is_some_and(|message| {
                         message.role == "user" && !crate::rollout::is_compaction_handoff(message)
                     });
@@ -531,7 +476,7 @@ fn rebuild_records(
                                 preserved_user = ?preserved_user,
                                 last_real_user = ?last_real_user,
                                 cut,
-                                "compact preserved-user index does not reference the active real user; using legacy replay"
+                                "compact preserved-user index does not reference the active real user; appending note without rewriting history"
                             );
                             history.push(crate::rollout::compaction_note_message(note.clone()));
                             provenance.push(None);
@@ -545,7 +490,7 @@ fn rebuild_records(
                             anchor_ok,
                             active_kept,
                             preserved_user = ?preserved_user,
-                            "compact context boundary is invalid; using legacy replay"
+                            "compact context boundary is invalid; appending note without rewriting history"
                         );
                         history.push(crate::rollout::compaction_note_message(note.clone()));
                         provenance.push(None);
@@ -557,15 +502,11 @@ fn rebuild_records(
             }
             RolloutRecord::HookContext { text } => {
                 finalize_active_replay(&mut history, &mut active_replay);
-                pending_reasoning = None;
-                pending_replay = None;
                 history.push(ChatMsg::user(text.clone()));
                 provenance.push(Some(record_ix));
             }
             RolloutRecord::Recall => {
                 finalize_active_replay(&mut history, &mut active_replay);
-                pending_reasoning = None;
-                pending_replay = None;
                 match user_ixs.pop() {
                     Some(Some(ix)) => {
                         history.truncate(ix);
@@ -580,17 +521,6 @@ fn rebuild_records(
                 }
             }
         }
-    }
-    if pending_replay.is_some() {
-        materialize_pending_replay(
-            &mut history,
-            &mut provenance,
-            &mut pending_replay,
-            &mut pending_reasoning,
-            String::new(),
-            &mut active_replay,
-            records.len(),
-        );
     }
     finalize_active_replay(&mut history, &mut active_replay);
     debug_assert_eq!(history.len(), provenance.len());
@@ -684,60 +614,6 @@ struct ActiveReplay {
     assistant_ix: usize,
     call_ids: Vec<String>,
     next_result: usize,
-}
-
-fn materialize_pending_replay(
-    history: &mut Vec<ChatMsg>,
-    provenance: &mut Vec<Option<usize>>,
-    pending_replay: &mut Option<pig_provider::AssistantReplay>,
-    pending_reasoning: &mut Option<String>,
-    text: String,
-    active_replay: &mut Option<ActiveReplay>,
-    record_ix: usize,
-) {
-    let Some(replay) = pending_replay.take() else {
-        history.push(ChatMsg::assistant(text, vec![], pending_reasoning.take()));
-        provenance.push(Some(record_ix));
-        return;
-    };
-    let content = if text.is_empty() {
-        replay
-            .items
-            .iter()
-            .filter_map(|item| match item {
-                pig_provider::AssistantReplayItem::Text { text, .. } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<String>()
-    } else {
-        text
-    };
-    let calls: Vec<ToolCall> = replay
-        .items
-        .iter()
-        .filter_map(|item| match item {
-            pig_provider::AssistantReplayItem::ToolCall { call } => Some(ToolCall {
-                id: call.id.clone(),
-                name: call.function.name.clone(),
-                arguments: call.function.arguments.clone(),
-            }),
-            _ => None,
-        })
-        .collect();
-    let call_ids = calls.iter().map(|call| call.id.clone()).collect();
-    let assistant_ix = history.len();
-    history.push(ChatMsg::assistant_with_replay(
-        content,
-        calls,
-        pending_reasoning.take(),
-        Some(replay),
-    ));
-    provenance.push(Some(record_ix));
-    *active_replay = Some(ActiveReplay {
-        assistant_ix,
-        call_ids,
-        next_result: 0,
-    });
 }
 
 fn finalize_active_replay(history: &mut [ChatMsg], active_replay: &mut Option<ActiveReplay>) {

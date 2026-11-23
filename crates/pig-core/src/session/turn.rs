@@ -630,7 +630,7 @@ impl Session {
                         }
                     }
                     let duration_ms = started.elapsed().as_millis() as u64;
-                    let stats = self.flush_turn_stats(config, duration_ms, finish_reason);
+                    let stats = self.flush_turn_stats(duration_ms, finish_reason);
                     // The turn's changes panel is emitted before the turn-end
                     // event (durable data before boundary events)
                     self.flush_turn_changes(tx);
@@ -663,7 +663,7 @@ impl Session {
                             tx,
                         );
                         let duration_ms = started.elapsed().as_millis() as u64;
-                        let _ = self.flush_turn_stats(config, duration_ms, None);
+                        let _ = self.flush_turn_stats(duration_ms, None);
                         self.flush_turn_changes(tx);
                         self.sync_rollout();
                         self.report_rollout_failure(tx);
@@ -690,7 +690,7 @@ impl Session {
                     // keeps its interrupted state (TurnAborted was already
                     // emitted), so the returned footer stats are dropped here
                     let duration_ms = started.elapsed().as_millis() as u64;
-                    let _ = self.flush_turn_stats(config, duration_ms, None);
+                    let _ = self.flush_turn_stats(duration_ms, None);
                     // Changes already made this turn still produce a panel
                     self.flush_turn_changes(tx);
                     self.sync_rollout();

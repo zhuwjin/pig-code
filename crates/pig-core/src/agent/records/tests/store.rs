@@ -353,7 +353,7 @@ fn a_torn_line_after_a_complete_compact_marker_keeps_the_compaction() {
             .iter()
             .map(|message| message.role.as_str())
             .collect::<Vec<_>>(),
-        vec!["system", "system", "user", "assistant"]
+        vec!["system", "user", "user", "assistant"]
     );
     assert_eq!(history[1].content.as_deref(), Some("persisted note"));
     assert_eq!(history[2].content.as_deref(), Some("task"));

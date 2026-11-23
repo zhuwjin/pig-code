@@ -37,7 +37,7 @@ fn compact_record_replays_identically_and_preserves_the_active_user() {
             .iter()
             .map(|message| message.role.as_str())
             .collect::<Vec<_>>(),
-        vec!["system", "system", "user", "assistant"]
+        vec!["system", "user", "user", "assistant"]
     );
     assert!(
         first[1]
@@ -293,7 +293,7 @@ fn repeated_compaction_markers_replay_sequentially() {
             .iter()
             .map(|message| message.role.as_str())
             .collect::<Vec<_>>(),
-        vec!["system", "system", "user", "assistant"]
+        vec!["system", "user", "user", "assistant"]
     );
     assert_eq!(history[1].content.as_deref(), Some("second note"));
     assert_eq!(history[2].content.as_deref(), Some("second task"));

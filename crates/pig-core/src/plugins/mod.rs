@@ -281,7 +281,11 @@ mod tests {
             serde_json::json!({
                 "url": "https://example.test/mcp",
                 "headers": {"Authorization": "Bearer secret"},
-                "oauth": {"client": "preserved"}
+                "oauth": {
+                    "clientId": "preserved",
+                    "tokenUrl": "https://auth.example.test/token",
+                    "clientSecret": "oauth-secret"
+                }
             }),
         )
         .expect("initial config");
@@ -295,11 +299,13 @@ mod tests {
         );
         let server = &snapshot.mcp.servers[0];
         assert_eq!(server.config["headers"]["Authorization"], REDACTED);
+        assert_eq!(server.config["oauth"]["clientSecret"], REDACTED);
         assert!(!serde_json::to_string(&server).unwrap().contains("secret"));
         upsert_mcp(&data, &PluginScope::User, "docs", server.config.clone())
             .expect("save redacted edit");
         let raw = std::fs::read_to_string(data.join("mcp.json")).unwrap();
         assert!(raw.contains("Bearer secret"));
+        assert!(raw.contains("oauth-secret"));
         assert!(raw.contains("preserved"));
     }
 

@@ -261,22 +261,6 @@ pub(crate) fn read_agent_stored(path: &Path) -> Result<(AgentMeta, Vec<StoredAge
                 apply_agent_compact(&mut stored, &compact, line_no);
                 pending_calls.clear();
             }
-            RolloutRecord::Reasoning { text, replay } => stored.push(message(
-                ChatMsg::assistant_with_replay(String::new(), Vec::new(), Some(text), replay),
-                Vec::new(),
-                Vec::new(),
-                0,
-                None,
-                None,
-            )),
-            RolloutRecord::Text { text } => stored.push(message(
-                ChatMsg::assistant(text, Vec::new(), None),
-                Vec::new(),
-                Vec::new(),
-                0,
-                None,
-                None,
-            )),
             RolloutRecord::TurnChanges { .. }
             | RolloutRecord::HookContext { .. }
             | RolloutRecord::TurnStats { .. }

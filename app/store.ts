@@ -873,9 +873,13 @@ export class AgentStore {
   sandboxStatus(): PlatformSandboxStatus | null {
     try {
       const parsed = JSON.parse(this.agent.sandboxStatus()) as Partial<PlatformSandboxStatus>;
-      if (typeof parsed.supported === "boolean" && typeof parsed.backend === "string") {
+      if (
+        typeof parsed.enabled === "boolean" &&
+        typeof parsed.supported === "boolean" &&
+        typeof parsed.backend === "string"
+      ) {
         return {
-          enabled: parsed.enabled ?? true,
+          enabled: parsed.enabled,
           supported: parsed.supported,
           backend: parsed.backend,
           detail: parsed.detail ?? null,

@@ -291,6 +291,18 @@ fn redact_config(config: &serde_json::Value) -> serde_json::Value {
                 }
             }
         }
+        if let Some(oauth) = map
+            .get_mut("oauth")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            for secret_key in ["clientSecret", "accessToken", "refreshToken"] {
+                if let Some(value) = oauth.get_mut(secret_key)
+                    && !value.is_null()
+                {
+                    *value = serde_json::Value::String(REDACTED.to_owned());
+                }
+            }
+        }
     }
     config
 }
@@ -344,7 +356,7 @@ fn restore_redacted(
     mut config: serde_json::Value,
     previous: Option<&serde_json::Value>,
 ) -> serde_json::Value {
-    for field in ["env", "headers"] {
+    for field in ["env", "headers", "oauth"] {
         let Some(new_values) = config
             .get_mut(field)
             .and_then(serde_json::Value::as_object_mut)

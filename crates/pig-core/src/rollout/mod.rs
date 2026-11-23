@@ -29,22 +29,17 @@ pub(crate) const DEFAULT_HISTORY_LIMIT_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Prefix of the marked user-role message that hands a compaction summary to
 /// the next model request. Replay uses it to distinguish a compaction handoff
-/// from a real user message; legacy system-role notes have no marker.
+/// from a real user message.
 pub(crate) const COMPACTION_HANDOFF_MARKER: &str =
     "[compaction handoff | synthetic user message, not a new request]";
 
-/// A compaction note installed in the model context: new notes are user-role
-/// with an explicit marker, legacy notes (no marker) stay system-role so old
-/// rollouts replay exactly as they ran.
+/// A compaction note installed in the model context as a synthetic user-role
+/// message carrying `COMPACTION_HANDOFF_MARKER`.
 pub(crate) fn compaction_note_message(note: String) -> ChatMsg {
-    if is_compaction_handoff_note(&note) {
-        ChatMsg::user(note)
-    } else {
-        ChatMsg::system(note)
-    }
+    ChatMsg::user(note)
 }
 
-/// Whether a note text was produced by the current compaction code.
+/// Whether a note text was produced by compaction.
 pub(crate) fn is_compaction_handoff_note(note: &str) -> bool {
     note.starts_with(COMPACTION_HANDOFF_MARKER)
 }
@@ -58,15 +53,9 @@ pub(crate) fn is_compaction_handoff(message: &ChatMsg) -> bool {
             .is_some_and(is_compaction_handoff_note)
 }
 
-/// Whether a message is either a new user-role handoff or a legacy system
-/// note produced by an earlier compaction.
+/// Whether a message is a compaction note.
 pub(crate) fn is_compaction_note(message: &ChatMsg) -> bool {
     is_compaction_handoff(message)
-        || (message.role == "system"
-            && message
-                .content
-                .as_deref()
-                .is_some_and(|text| text.starts_with("[Earlier context compacted")))
 }
 
 /// Number of leading non-conversation messages: the frozen system prefix and
@@ -138,38 +127,12 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
-fn deserialize_permission_reminder<'de, D>(
-    deserializer: D,
-) -> Result<Option<(pig_protocol::PermissionSettings, bool, String)>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let values = Option::<Vec<serde_json::Value>>::deserialize(deserializer)?;
-    let Some(values) = values else {
-        return Ok(None);
-    };
-    if values.len() != 2 && values.len() != 3 {
-        return Err(serde::de::Error::custom(
-            "permission reminder must have two or three entries",
-        ));
-    }
-    let permissions =
-        serde_json::from_value(values[0].clone()).map_err(serde::de::Error::custom)?;
-    let plan = serde_json::from_value(values[1].clone()).map_err(serde::de::Error::custom)?;
-    let access = if values.len() == 3 {
-        serde_json::from_value(values[2].clone()).map_err(serde::de::Error::custom)?
-    } else {
-        String::new()
-    };
-    Ok(Some((permissions, plan, access)))
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PromptReminderState {
     pub date: String,
     pub agents: String,
     pub memory: String,
-    #[serde(default, deserialize_with = "deserialize_permission_reminder")]
+    #[serde(default)]
     pub permissions: Option<(pig_protocol::PermissionSettings, bool, String)>,
 }
 
@@ -301,15 +264,6 @@ pub enum RolloutRecord {
         model_text: String,
         sent_at_ms: u64,
     },
-    Reasoning {
-        text: String,
-        /// Ordered native items for provider continuation; legacy records only have text.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        replay: Option<pig_provider::AssistantReplay>,
-    },
-    Text {
-        text: String,
-    },
     /// Durable admission marker, synced before the tool body can produce side effects.
     ToolExecutionStart {
         execution_id: String,
@@ -369,9 +323,7 @@ pub enum RolloutRecord {
         cache_read: u64,
         output: u64,
         duration_ms: u64,
-        /// Wall-clock end of the turn (unix ms; absent in records written
-        /// before this field existed → 0). The UI prints it as the turn's end
-        /// time; SQLite keeps the same moment in turn_usage.ended_at_ms.
+        /// Wall-clock end of the turn (unix ms). The UI prints it as the turn's end time.
         #[serde(default)]
         ended_at_ms: u64,
         api_ms: u64,
@@ -387,10 +339,7 @@ pub enum RolloutRecord {
         has_usage: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         finish_reason: Option<pig_protocol::FinishReason>,
-        /// Durable per-turn identity shared with this turn's StepUsage records:
-        /// SQLite usage insertion is unique on (session, turn_id), so a crash
-        /// between the SQLite insert and this record (or the reverse) cannot
-        /// double count.
+        /// Durable per-turn identity shared with this turn's StepUsage records.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         turn_id: Option<String>,
     },
@@ -1059,13 +1008,12 @@ impl RolloutError {
 
 /// Conversation record line prefixes (`#[serde(tag = "type")]` serializes the
 /// tag first) scanned by [`search_sessions_by_content`]: user messages,
-/// assistant text, reasoning, and stop-hook context. Tool calls, usage/compact
-/// records and the meta line are not conversation.
-const CONVERSATION_LINE_PREFIXES: [&str; 5] = [
+/// Conversation lines searched by content: user messages, canonical assistant
+/// records (text and reasoning), and stop-hook context. Tool calls,
+/// usage/compact records and the meta line are not conversation.
+const CONVERSATION_LINE_PREFIXES: [&str; 3] = [
     "{\"type\":\"user\"",
     "{\"type\":\"assistant\"",
-    "{\"type\":\"text\"",
-    "{\"type\":\"reasoning\"",
     "{\"type\":\"hook_context\"",
 ];
 
@@ -1255,12 +1203,12 @@ mod tests {
 
     fn native_replay() -> pig_provider::AssistantReplay {
         pig_provider::AssistantReplay {
-            origin: pig_provider::ReplayOrigin {
-                api_format: pig_protocol::ApiFormat::OpenAiResponses,
-                base_url: "http://localhost/v1".into(),
-                model: None,
-                credential: None,
-            },
+            origin: pig_provider::ReplayOrigin::new(
+                pig_protocol::ApiFormat::OpenAiResponses,
+                "http://localhost/v1",
+                "gpt-5",
+                "test-key",
+            ),
             items: vec![
                 pig_provider::AssistantReplayItem::ResponsesReasoning {
                     id: Some("rs_1".into()),
@@ -1311,41 +1259,50 @@ mod tests {
         }
     }
 
-    #[test]
-    fn legacy_records_without_new_fields_stay_readable() {
-        let reasoning: RolloutRecord =
-            serde_json::from_str(r#"{"type":"reasoning","text":"legacy"}"#)
-                .expect("legacy reasoning");
-        assert!(matches!(
-            reasoning,
-            RolloutRecord::Reasoning { replay: None, .. }
-        ));
+    fn assistant_record(text: impl Into<String>) -> RolloutRecord {
+        RolloutRecord::Assistant {
+            text: text.into(),
+            reasoning: None,
+            replay: None,
+            tool_calls: vec![],
+            tool_execution_ids: vec![],
+            ts_ms: 0,
+            reasoning_ms: None,
+        }
+    }
 
-        let stats: RolloutRecord = serde_json::from_str(
-            r#"{"type":"turn_stats","input":1,"cache_read":2,"output":3,"duration_ms":4,"api_ms":5,"ttft_ms":6,"api_steps":1,"tool_ms":0}"#,
-        )
-        .expect("legacy turn stats");
-        assert!(matches!(
-            stats,
-            RolloutRecord::TurnStats {
-                has_usage: true,
-                finish_reason: None,
-                ended_at_ms: 0,
-                ..
-            }
-        ));
+    fn native_assistant_record(
+        text: impl Into<String>,
+        reasoning: Option<String>,
+        replay: pig_provider::AssistantReplay,
+    ) -> RolloutRecord {
+        let tool_calls: Vec<ToolCallWire> = replay
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                pig_provider::AssistantReplayItem::ToolCall { call } => Some(call.clone()),
+                _ => None,
+            })
+            .collect();
+        let tool_execution_ids = tool_calls
+            .iter()
+            .map(|call| format!("execution-{}", call.id))
+            .collect();
+        RolloutRecord::Assistant {
+            text: text.into(),
+            reasoning,
+            replay: Some(replay),
+            tool_calls,
+            tool_execution_ids,
+            ts_ms: 0,
+            reasoning_ms: None,
+        }
     }
 
     #[test]
     fn structured_replay_restores_original_calls_without_duplicates() {
         let records = vec![
-            RolloutRecord::Reasoning {
-                text: "reasoning".into(),
-                replay: Some(native_replay()),
-            },
-            RolloutRecord::Text {
-                text: "answer".into(),
-            },
+            native_assistant_record("answer", Some("reasoning".into()), native_replay()),
             tool_record("first output"),
             tool_record("second output"),
         ];
@@ -1367,13 +1324,7 @@ mod tests {
     #[test]
     fn crashed_replay_drops_unanswered_tool_calls() {
         let records = vec![
-            RolloutRecord::Reasoning {
-                text: "reasoning".into(),
-                replay: Some(native_replay()),
-            },
-            RolloutRecord::Text {
-                text: "answer".into(),
-            },
+            native_assistant_record("answer", Some("reasoning".into()), native_replay()),
             tool_record("only completed output"),
         ];
         let (history, _) = rebuild_history(&records, "system".into());
@@ -1403,10 +1354,11 @@ mod tests {
                 pig_provider::AssistantReplayItem::ResponsesReasoning { .. }
             )
         });
-        let records = vec![RolloutRecord::Reasoning {
-            text: "reasoning only".into(),
-            replay: Some(replay),
-        }];
+        let records = vec![native_assistant_record(
+            "",
+            Some("reasoning only".into()),
+            replay,
+        )];
         let (history, _) = rebuild_history(&records, "system".into());
         assert_eq!(history.len(), 2);
         assert_eq!(history[1].reasoning.as_deref(), Some("reasoning only"));
@@ -1414,7 +1366,7 @@ mod tests {
         assert!(history[1].tool_calls.is_none());
     }
 
-    /// Content search hits only conversation lines (user/text/reasoning),
+    /// Content search hits only conversation lines (user/assistant/hook_context),
     /// never tool calls or model-io traces, and is case-insensitive
     #[test]
     fn search_sessions_by_content_conversation_only() {
@@ -1436,11 +1388,8 @@ mod tests {
         .expect("write b");
         // The model-io debug trace is not a conversation either
         std::fs::write(dir.join("c.model-io.jsonl"), "Kiwi-Fruit\n").expect("write c");
-        std::fs::write(
-            dir.join("d.jsonl"),
-            "{\"type\":\"text\",\"text\":\"nothing relevant\"}\n",
-        )
-        .expect("write d");
+        let d_line = serde_json::to_string(&assistant_record("nothing relevant")).expect("ser");
+        std::fs::write(dir.join("d.jsonl"), format!("{d_line}\n")).expect("write d");
 
         let hits = search_sessions_by_content(&dir, "kiwi-fruit");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1462,7 +1411,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create sessions dir");
         let text = format!("{}\n\nKiwi-Fruit\t{}", "x".repeat(80), "y".repeat(100));
-        let line = serde_json::to_string(&RolloutRecord::Text { text }).expect("serialize");
+        let line = serde_json::to_string(&assistant_record(text)).expect("serialize");
         std::fs::write(dir.join("a.jsonl"), format!("{line}\n")).expect("write a");
 
         let hits = search_sessions_by_content(&dir, "kiwi-fruit");
@@ -1474,81 +1423,6 @@ mod tests {
         assert_eq!(hit.before, format!("…{} ", "x".repeat(39)));
         // after_full = collapsed space + 100 y's (101 chars) → first 60 kept
         assert_eq!(hit.after, format!(" {}…", "y".repeat(59)));
-    }
-
-    #[test]
-    fn legacy_context_fields_use_compatibility_defaults() {
-        let user: RolloutRecord =
-            serde_json::from_str(r#"{"type":"user","text":"legacy","files":[],"images":[]}"#)
-                .expect("legacy user");
-        assert!(matches!(
-            user,
-            RolloutRecord::User {
-                sent_at_ms: 0,
-                sent_text: None,
-                sent_images,
-                ..
-            } if sent_images.is_empty()
-        ));
-        let compact: RolloutRecord = serde_json::from_str(
-            r#"{"type":"compact","note":"n","omitted":2,"automatic":false,"used_after":null,"used_before":null,"summary":null}"#,
-        )
-        .expect("legacy compact");
-        assert!(matches!(
-            compact,
-            RolloutRecord::Compact { tail_len: None, .. }
-        ));
-        // Canonical records written before the preserved-user field keep
-        // deserializing (the split boundary is simply absent).
-        let canonical: RolloutRecord = serde_json::from_str(
-            r#"{"type":"compact","note":"n","omitted":2,"automatic":false,"used_after":null,"used_before":null,"summary":null,"tail_len":2}"#,
-        )
-        .expect("compact without a preserved user");
-        assert!(matches!(
-            canonical,
-            RolloutRecord::Compact {
-                tail_len: Some(2),
-                preserved_user: None,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn legacy_two_part_permission_snapshot_is_readable() {
-        let snapshot = PromptSnapshot {
-            text: "system".into(),
-            git_snapshot: None,
-            agents_prompt: String::new(),
-            skills_prompt: String::new(),
-            skills_state: String::new(),
-            memory_prompt: String::new(),
-            memory_enabled: false,
-            profiles_summary: String::new(),
-            date_frozen: "2026-01-01".into(),
-            reminders: PromptReminderState {
-                date: "2026-01-01".into(),
-                agents: String::new(),
-                memory: String::new(),
-                permissions: Some((
-                    pig_protocol::PermissionSettings::default(),
-                    false,
-                    String::new(),
-                )),
-            },
-        };
-        let mut value = serde_json::to_value(RolloutRecord::PromptSnapshot { snapshot })
-            .expect("serialize snapshot");
-        value["snapshot"]["reminders"]["permissions"] =
-            serde_json::json!([pig_protocol::PermissionSettings::default(), false]);
-        value["snapshot"]["web_search"] = serde_json::Value::Bool(false);
-        let record: RolloutRecord = serde_json::from_value(value).expect("legacy snapshot");
-        let RolloutRecord::PromptSnapshot { snapshot } = record else {
-            panic!("snapshot record");
-        };
-        let (_, plan, access) = snapshot.reminders.permissions.expect("permission state");
-        assert!(!plan);
-        assert!(access.is_empty());
     }
 
     #[test]
@@ -1650,9 +1524,7 @@ mod tests {
         assert!(!recovered.contains("tor"), "{recovered:?}");
         let mut rollout = Rollout::open_append(&dir, "s1").expect("open after recovery");
         rollout
-            .append(&RolloutRecord::Text {
-                text: "after".into(),
-            })
+            .append(&assistant_record("after"))
             .expect("append after recovery");
         rollout.sync().expect("sync");
         let records = Rollout::load(&path).expect("reload");
@@ -1689,10 +1561,7 @@ mod tests {
     #[test]
     fn unterminated_valid_final_line_is_repaired() {
         let (dir, path) = temp_rollout("unterminated");
-        let line = serde_json::to_string(&RolloutRecord::Text {
-            text: "tail".into(),
-        })
-        .expect("serialize");
+        let line = serde_json::to_string(&assistant_record("tail")).expect("serialize");
         std::fs::write(
             &path,
             format!("{}{}{}", meta_line("s1"), user_line("hi"), line),
@@ -1732,9 +1601,7 @@ mod tests {
         let mut rollout = Rollout::open_append(&dir, "s1").expect("open");
         rollout.poisoned = Some("simulated partial write".into());
         let error = rollout
-            .append(&RolloutRecord::Text {
-                text: "lost".into(),
-            })
+            .append(&assistant_record("lost"))
             .expect_err("poisoned append");
         assert_eq!(error.kind, RolloutFailureKind::Poisoned);
         let records = Rollout::load(&path).expect("file still valid");
@@ -1762,17 +1629,13 @@ mod tests {
         };
         let mut rollout = Rollout::create_with_limit(&dir, &meta, 2048).expect("create");
         rollout
-            .append(&RolloutRecord::Text {
-                text: "kept".into(),
-            })
+            .append(&assistant_record("kept"))
             .expect("within quota");
         rollout.sync().expect("sync");
         let original = std::fs::read(&path).expect("original bytes");
         let used = original.len() as u64;
         let error = rollout
-            .append(&RolloutRecord::Text {
-                text: "x".repeat(4096),
-            })
+            .append(&assistant_record("x".repeat(4096)))
             .expect_err("quota is enforced before writing")
             .into_core(&path);
         assert!(matches!(
@@ -1787,11 +1650,7 @@ mod tests {
         assert_eq!(std::fs::read(&path).expect("preserved bytes"), original);
 
         let mut reopened = Rollout::open_append_with_limit(&dir, "s1", used).expect("reopen");
-        assert!(
-            reopened
-                .append(&RolloutRecord::Text { text: "x".into() })
-                .is_err()
-        );
+        assert!(reopened.append(&assistant_record("x")).is_err());
         assert_eq!(
             std::fs::read(&path).expect("unchanged after reopen"),
             original

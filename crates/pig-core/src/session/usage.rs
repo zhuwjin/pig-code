@@ -41,17 +41,15 @@ pub(crate) fn system_fingerprint(history: &[ChatMsg]) -> u64 {
 }
 
 impl Session {
-    /// Persist the turn's accumulated usage (SQLite turn_usage row for
-    /// statistics aggregation + rollout TurnStats record for replay) and build
-    /// the UI footer stats. Called on both the normal turn end and the
-    /// interrupt/failure wrap-up so interrupted turns still count; the rollout
-    /// record doubles as the "counted" marker for the crash-recovery scan in
-    /// Session::load. The in-flight request's usage is unrecoverable either
-    /// way (usage arrives at the stream's end). Returns None when no request
-    /// of the turn reported usage.
+    /// Persist the turn's accumulated usage (rollout TurnStats record for
+    /// replay) and build the UI footer stats. Called on both the normal turn
+    /// end and the interrupt/failure wrap-up so interrupted turns still count;
+    /// the rollout record doubles as the "counted" marker for the
+    /// crash-recovery scan in Session::load. The in-flight request's usage is
+    /// unrecoverable either way (usage arrives at the stream's end). Returns
+    /// None when no request of the turn reported usage.
     pub(super) fn flush_turn_stats(
         &mut self,
-        config: &ResolvedModel,
         duration_ms: u64,
         finish_reason: Option<pig_protocol::FinishReason>,
     ) -> Option<pig_protocol::TurnUsageStats> {
@@ -61,23 +59,7 @@ impl Session {
         if !has_usage && finish_reason.is_none() {
             return None;
         }
-        // The turn's end stamp: one instant shared by the SQLite row
-        // (turn_usage.ended_at_ms), the rollout record (so replay can print it)
-        // and the returned footer stats
         let ended_at_ms = crate::model_io::now_ms();
-        if has_usage {
-            self.store.lock().expect("store lock").record_usage_at(
-                ended_at_ms,
-                &self.agent.id,
-                &config.provider_name,
-                &config.model,
-                self.run_state.input,
-                self.run_state.cache_read,
-                self.run_state.output,
-                self.run_state.reasoning_output,
-                self.run_state.usage_turn_id.as_deref(),
-            );
-        }
         // An incomplete finish is durable even when the provider omitted usage.
         self.record(&RolloutRecord::TurnStats {
             input: self.run_state.input,

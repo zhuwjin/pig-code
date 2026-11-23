@@ -94,39 +94,6 @@ mod tests {
     use super::FinishReason;
 
     #[test]
-    fn error_fatality_and_deferred_plan_default_for_legacy_payloads() {
-        let error: super::Event = serde_json::from_value(serde_json::json!({
-            "Error": {
-                "session_id": null,
-                "error": {"kind": "internal", "detail": "legacy"},
-            }
-        }))
-        .expect("legacy error event");
-        assert!(
-            matches!(error, super::Event::Error { fatal: true, .. }),
-            "an unset fatality keeps the old turn-ending interpretation"
-        );
-
-        let plan: super::Event = serde_json::from_value(serde_json::json!({
-            "PlanModeChanged": {
-                "session_id": "s",
-                "enabled": true,
-            }
-        }))
-        .expect("legacy plan event");
-        assert!(
-            matches!(
-                plan,
-                super::Event::PlanModeChanged {
-                    deferred: false,
-                    ..
-                }
-            ),
-            "a legacy plan event is an immediate application"
-        );
-    }
-
-    #[test]
     fn events_carry_no_sequence_cursor() {
         let event = super::Event::TurnStarted {
             session_id: "s".into(),
@@ -916,7 +883,6 @@ pub enum Event {
         /// failure); false = an operation request was rejected or a background
         /// action failed while the session and any running turn continue. The
         /// client must not tear down turn state for a nonfatal error.
-        #[serde(default = "default_true")]
         fatal: bool,
     },
 }
@@ -1057,10 +1023,4 @@ pub enum HookRunState {
     Finished,
     Failed,
     Blocked,
-}
-
-/// Legacy `Error` events (and hand-written test fixtures) predate the
-/// fatality flag; an unset value keeps the old turn-ending interpretation.
-fn default_true() -> bool {
-    true
 }

@@ -136,19 +136,6 @@ async fn model_io_written_per_step() {
         assert_eq!(row.6.as_deref(), Some(mock::MOCK_TRACE_ID));
         assert_eq!(row.7.as_deref(), Some("chatcmpl-mock"));
     }
-    let turn_totals = db.query_row(
-        "SELECT input_tokens, output_tokens FROM turn_usage WHERE session_id = ?1",
-        rusqlite::params![sid],
-        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-    );
-    let api_totals = api_rows
-        .iter()
-        .fold((0, 0), |acc, row| (acc.0 + row.3, acc.1 + row.4));
-    assert_eq!(
-        turn_totals.unwrap(),
-        api_totals,
-        "turn aggregation is unchanged"
-    );
     agent.shutdown();
     let _ = std::fs::remove_dir_all(data_dir.parent().expect("test root"));
 }

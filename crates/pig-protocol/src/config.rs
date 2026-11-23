@@ -183,10 +183,8 @@ pub struct TurnUsageStats {
     /// time pairs call/result the same way.
     #[serde(default)]
     pub tool_ms: u64,
-    /// Wall-clock time the turn ended (unix ms; 0 = unknown, e.g. a record
-    /// written before this field existed). The message action row prints it as
-    /// the turn's end time; replay restores it from the rollout's TurnStats,
-    /// and SQLite keeps the same moment in turn_usage.ended_at_ms.
+    /// Wall-clock time the turn ended (unix ms). The message action row prints
+    /// it as the turn's end time; replay restores it from the rollout's TurnStats.
     #[serde(default)]
     pub ended_at_ms: u64,
 }

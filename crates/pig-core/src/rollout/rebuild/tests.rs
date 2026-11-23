@@ -287,48 +287,6 @@ fn empty_canonical_assistant_is_not_dropped() {
 }
 
 #[test]
-fn legacy_compact_and_canonical_records_can_be_mixed() {
-    let legacy_user = RolloutRecord::User {
-        sent_at_ms: 0,
-        text: "legacy user".into(),
-        files: vec![],
-        images: vec![],
-        sent_text: None,
-        sent_images: vec![],
-        model_text: None,
-        sent_input_image: None,
-    };
-    let legacy_compact = RolloutRecord::Compact {
-        note: "legacy note".into(),
-        omitted: 1,
-        automatic: false,
-        used_after: None,
-        used_before: None,
-        summary: None,
-        tail_len: None,
-        preserved_user: None,
-        trigger: None,
-    };
-    let records = vec![
-        legacy_user,
-        RolloutRecord::Reasoning {
-            text: "legacy reasoning".into(),
-            replay: None,
-        },
-        RolloutRecord::Text {
-            text: "legacy answer".into(),
-        },
-        legacy_compact,
-        assistant("canonical answer", vec![]),
-    ];
-    let (history, _) = rebuild_history(&records, "sys".into());
-    assert_eq!(history.len(), 5);
-    assert_eq!(history[3].role, "system");
-    assert_eq!(history[3].content.as_deref(), Some("legacy note"));
-    assert_eq!(history[4].content.as_deref(), Some("canonical answer"));
-}
-
-#[test]
 fn canonical_crash_tail_drops_unanswered_calls_and_native_replay_items() {
     let calls = [
         ToolCall {
@@ -343,12 +301,12 @@ fn canonical_crash_tail_drops_unanswered_calls_and_native_replay_items() {
         },
     ];
     let replay = pig_provider::AssistantReplay {
-        origin: pig_provider::ReplayOrigin {
-            api_format: pig_protocol::ApiFormat::OpenAiResponses,
-            base_url: "http://localhost/v1".into(),
-            model: None,
-            credential: None,
-        },
+        origin: pig_provider::ReplayOrigin::new(
+            pig_protocol::ApiFormat::OpenAiResponses,
+            "http://localhost/v1",
+            "gpt-5",
+            "test-key",
+        ),
         items: calls
             .iter()
             .map(|call| pig_provider::AssistantReplayItem::ToolCall {
@@ -721,7 +679,7 @@ fn invalid_preserved_user_indices_fall_back_conservatively() {
             6,
             "invalid index {bad} must not truncate: {history:#?}"
         );
-        assert_eq!(history[5].role, "system");
+        assert_eq!(history[5].role, "user");
         assert_eq!(history[5].content.as_deref(), Some("note"));
         assert_eq!(history[1].content.as_deref(), Some("u1"));
     }
@@ -735,7 +693,7 @@ fn invalid_preserved_user_indices_fall_back_conservatively() {
     ];
     let (history, _) = rebuild_history(&records, "sys".into());
     assert_eq!(history.len(), 5, "{history:#?}");
-    assert_eq!(history[4].role, "system");
+    assert_eq!(history[4].role, "user");
     assert_eq!(history[2].content.as_deref(), Some("hook"));
 }
 
@@ -757,7 +715,7 @@ fn preserved_user_must_be_the_active_real_user() {
         6,
         "the corrupt record must not truncate: {history:#?}"
     );
-    assert_eq!(history[5].role, "system");
+    assert_eq!(history[5].role, "user");
     assert_eq!(history[5].content.as_deref(), Some("note"));
     assert_eq!(history[1].content.as_deref(), Some("u1"));
     assert_eq!(history[3].content.as_deref(), Some("u2"));
@@ -812,13 +770,13 @@ fn corrupt_tail_boundaries_fall_back_conservatively() {
     assert_eq!(history.len(), 4, "no rewrite: {history:#?}");
     assert_eq!(history[3].content.as_deref(), Some("note"));
 
-    // An assistant-starting tail may not follow a bare system note: the next
+    // An assistant-starting tail may not follow a bare note: the next
     // request would have no user anchor.
     let assistant_after_a_note = vec![
         user("u1"),
         assistant("a1", vec![]),
         RolloutRecord::Compact {
-            note: "legacy note".into(),
+            note: "note-1".into(),
             omitted: 1,
             automatic: false,
             used_after: None,
@@ -833,7 +791,7 @@ fn corrupt_tail_boundaries_fall_back_conservatively() {
     ];
     let (history, _) = rebuild_history(&assistant_after_a_note, "sys".into());
     assert_eq!(history.len(), 6, "no rewrite: {history:#?}");
-    assert_eq!(history[3].role, "system");
+    assert_eq!(history[3].role, "user");
     assert_eq!(history[4].role, "assistant");
     assert_eq!(history[5].content.as_deref(), Some("note-2"));
 }
@@ -883,16 +841,18 @@ fn compact_without_a_user_anchor_falls_back_conservatively() {
 /// user after the note).
 #[test]
 fn promoted_checkpoint_replays_after_its_tombstone_was_recalled() {
+    let note1 = format!("{}\nnote-1", crate::rollout::COMPACTION_HANDOFF_MARKER);
+    let note2 = format!("{}\nnote-2", crate::rollout::COMPACTION_HANDOFF_MARKER);
     let records = vec![
         user("u1"),
         assistant("a1", vec![]),
-        compact_with("note-1", 1, 0, Some(1)),
+        compact_with(&note1, 1, 0, Some(1)),
         RolloutRecord::Recall,
-        compact_with("note-2", 1, 0, Some(2)),
+        compact_with(&note2, 1, 0, Some(2)),
     ];
     let (history, user_ixs) = rebuild_history(&records, "sys".into());
     assert_eq!(history.len(), 3, "{history:#?}");
-    assert_eq!(history[1].content.as_deref(), Some("note-2"));
+    assert_eq!(history[1].content.as_deref(), Some(note2.as_str()));
     assert_eq!(history[2].content.as_deref(), Some("u1"));
     assert!(user_ixs.is_empty(), "{user_ixs:?}");
 }

@@ -77,21 +77,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("a1.jsonl");
         let mut store = AgentConversationStore::with_limit(&path, 1024);
-        let record = RolloutRecord::Text {
+        let record = RolloutRecord::Assistant {
             text: "first".into(),
+            reasoning: None,
+            replay: None,
+            tool_calls: vec![],
+            tool_execution_ids: vec![],
+            ts_ms: 0,
+            reasoning_ms: None,
         };
         store.append(&record).expect("first record");
         store.sync().expect("sync");
         let original = std::fs::read(&path).expect("original history");
         let error = store
-            .append(&RolloutRecord::Text {
+            .append(&RolloutRecord::Assistant {
                 text: "x".repeat(2048),
+                reasoning: None,
+                replay: None,
+                tool_calls: vec![],
+                tool_execution_ids: vec![],
+                ts_ms: 0,
+                reasoning_ms: None,
             })
             .expect_err("quota rejects a child record");
         assert!(matches!(error, CoreError::HistoryLimitExceeded { .. }));
         assert_eq!(std::fs::read(&path).expect("preserved history"), original);
         assert!(
-            matches!(store.load().expect("replay").as_slice(), [RolloutRecord::Text { text }] if text == "first")
+            matches!(store.load().expect("replay").as_slice(), [RolloutRecord::Assistant { text, .. }] if text == "first")
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

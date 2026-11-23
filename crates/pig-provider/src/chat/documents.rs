@@ -5,7 +5,7 @@ use super::messages::ChatMsg;
 
 /// Cached token cost of one PDF document. The source is part of the value so a
 /// window-derived reserve can never be mistaken for a measured provider cost.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DocumentTokenEstimate {
     /// Token cost charged by the context estimator.
     pub tokens: u64,
@@ -13,32 +13,6 @@ pub struct DocumentTokenEstimate {
     /// cost came from a visible page tree and is independent of the window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window: Option<u64>,
-}
-
-/// Accept both the current tagged object and a bare number. No released
-/// rollout contains a numeric cache (the field is newer); an intermediate
-/// local build could have written one, and it has no provenance, so it is
-/// treated as a measured cost rather than failing the whole rollout line.
-impl<'de> Deserialize<'de> for DocumentTokenEstimate {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Repr {
-            Tagged {
-                tokens: u64,
-                #[serde(default)]
-                window: Option<u64>,
-            },
-            Legacy(u64),
-        }
-        Ok(match Repr::deserialize(deserializer)? {
-            Repr::Tagged { tokens, window } => Self { tokens, window },
-            Repr::Legacy(tokens) => Self::measured(tokens),
-        })
-    }
 }
 
 impl DocumentTokenEstimate {
@@ -129,7 +103,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn token_estimate_accepts_tagged_and_legacy_numeric_shapes() {
+    fn token_estimate_round_trips_measured_and_window_fallback() {
         let measured: DocumentTokenEstimate =
             serde_json::from_value(serde_json::json!({"tokens": 6_000})).expect("measured");
         assert_eq!(measured, DocumentTokenEstimate::measured(6_000));
@@ -141,10 +115,6 @@ mod tests {
             fallback,
             DocumentTokenEstimate::window_fallback(16_000, 64_000)
         );
-
-        let legacy: DocumentTokenEstimate =
-            serde_json::from_value(serde_json::json!(6_000)).expect("legacy numeric cache");
-        assert_eq!(legacy, DocumentTokenEstimate::measured(6_000));
 
         assert_eq!(
             serde_json::to_value(DocumentTokenEstimate::window_fallback(16_000, 64_000))

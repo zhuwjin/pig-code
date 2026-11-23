@@ -1458,20 +1458,6 @@ async fn crash_interrupted_turn_usage_recovered_on_reopen() {
         1,
         "recovery appends exactly one synthesized marker: {recovered}"
     );
-    // SQLite-success / rollout-failure: the original completion had already
-    // inserted the turn_usage row with the same durable turn identity, so the
-    // recovery insert is ignored instead of double counting.
-    {
-        let db = rusqlite::Connection::open(data_dir.join("store.sqlite")).unwrap();
-        let usage_rows: i64 = db
-            .query_row(
-                "SELECT COUNT(*) FROM turn_usage WHERE session_id = ?1",
-                rusqlite::params![session_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(usage_rows, 1, "recovery must not double count the turn");
-    }
     agent2.shutdown();
 
     // Idempotent: a second reopen sees the marker and does not count again

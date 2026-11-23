@@ -3,8 +3,8 @@
 //! `<data_dir>/mcp.json`). Each server's tools are wrapped as Tool trait impls
 //! (`mcp__<server>__<tool>`); connections are established lazily with the session's first step and torn down via `shutdown` on exit.
 //! The remote shape is streamable HTTP (2025-03-26+ single-endpoint POST, JSON/SSE dual response shapes);
-//! legacy SSE (2024-11-05 dual-endpoint) is not yet supported; the config layer logs and skips `"type": "sse"` entries.
-//! Future items: OAuth, resources/prompts, roots/elicitation, legacy SSE.
+//! legacy SSE (2024-11-05 dual-endpoint) is not supported; the config layer logs and skips `"type": "sse"` entries.
+//! Future items: roots.
 
 mod capabilities;
 mod client;

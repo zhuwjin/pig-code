@@ -47,27 +47,25 @@ pub struct McpStdioConfig {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpOAuthConfig {
-    #[serde(alias = "client_id")]
     pub client_id: String,
-    #[serde(default, alias = "client_secret")]
+    #[serde(default)]
     pub client_secret: Option<String>,
-    #[serde(default, alias = "authorization_url")]
+    #[serde(default)]
     pub authorization_url: Option<String>,
-    #[serde(alias = "token_url")]
     pub token_url: String,
-    #[serde(default, alias = "redirect_uri")]
+    #[serde(default)]
     pub redirect_uri: Option<String>,
     #[serde(default)]
     pub scopes: Vec<String>,
     #[serde(default)]
     pub resource: Option<String>,
-    #[serde(default, alias = "access_token")]
+    #[serde(default)]
     pub access_token: Option<String>,
-    #[serde(default, alias = "refresh_token")]
+    #[serde(default)]
     pub refresh_token: Option<String>,
-    #[serde(default, alias = "expires_at")]
+    #[serde(default)]
     pub expires_at: Option<u64>,
-    #[serde(default, alias = "token_file")]
+    #[serde(default)]
     pub token_file: Option<String>,
 }
 
@@ -93,7 +91,7 @@ struct RawServer {
     #[serde(default)]
     headers: HashMap<String, String>,
     #[serde(default)]
-    oauth: Option<serde_json::Value>,
+    oauth: Option<McpOAuthConfig>,
     #[serde(rename = "timeoutMs")]
     timeout_ms: Option<u64>,
     #[serde(default)]
@@ -375,15 +373,17 @@ fn http_transport(raw: RawServer) -> Result<McpTransport, McpEntryError> {
     if !url.starts_with("http://") && !url.starts_with("https://") {
         return Err(McpEntryError::InvalidUrl(url.to_string()));
     }
-    let oauth = raw.oauth.and_then(|value| {
-        serde_json::from_value::<McpOAuthConfig>(value)
-            .ok()
-            .filter(|cfg| !cfg.client_id.trim().is_empty() && !cfg.token_url.trim().is_empty())
-    });
+    if let Some(oauth) = &raw.oauth {
+        if oauth.client_id.trim().is_empty() || oauth.token_url.trim().is_empty() {
+            return Err(McpEntryError::InvalidShape(
+                "oauth requires non-empty clientId and tokenUrl".to_string(),
+            ));
+        }
+    }
     Ok(McpTransport::Http(McpHttpConfig {
         url: url.to_string(),
         headers: raw.headers,
-        oauth,
+        oauth: raw.oauth,
     }))
 }
 

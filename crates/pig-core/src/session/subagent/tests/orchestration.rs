@@ -11,12 +11,12 @@ fn agent_context_native_replay_roundtrip() {
     let path = dir.join("agent.jsonl");
     persist_agent_meta(&path, "a1", "s-test", "general-purpose", "test");
     let replay = pig_provider::AssistantReplay {
-        origin: pig_provider::ReplayOrigin {
-            api_format: pig_protocol::ApiFormat::AnthropicMessages,
-            base_url: "http://localhost".into(),
-            model: None,
-            credential: None,
-        },
+        origin: pig_provider::ReplayOrigin::new(
+            pig_protocol::ApiFormat::AnthropicMessages,
+            "http://localhost",
+            "claude-sonnet-4-5",
+            "test-key",
+        ),
         items: vec![
             pig_provider::AssistantReplayItem::AnthropicThinking {
                 thinking: "signed".into(),
@@ -70,12 +70,12 @@ fn agent_context_rejects_boundary_after_unanswered_calls() {
         arguments: "{}".into(),
     };
     let replay = pig_provider::AssistantReplay {
-        origin: pig_provider::ReplayOrigin {
-            api_format: pig_protocol::ApiFormat::AnthropicMessages,
-            base_url: "http://localhost".into(),
-            model: None,
-            credential: None,
-        },
+        origin: pig_provider::ReplayOrigin::new(
+            pig_protocol::ApiFormat::AnthropicMessages,
+            "http://localhost",
+            "claude-sonnet-4-5",
+            "test-key",
+        ),
         items: vec![
             pig_provider::AssistantReplayItem::ToolCall {
                 call: first.to_wire(),

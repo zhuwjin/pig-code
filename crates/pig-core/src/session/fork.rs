@@ -271,8 +271,14 @@ mod tests {
     }
 
     fn text(t: &str) -> RolloutRecord {
-        RolloutRecord::Text {
+        RolloutRecord::Assistant {
             text: t.to_string(),
+            reasoning: None,
+            replay: None,
+            tool_calls: vec![],
+            tool_execution_ids: vec![],
+            ts_ms: 0,
+            reasoning_ms: None,
         }
     }
 

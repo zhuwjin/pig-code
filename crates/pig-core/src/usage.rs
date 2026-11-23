@@ -1,4 +1,4 @@
-//! Aggregated token-usage reporting over legacy per-turn rows and per-call rows.
+//! Aggregated token-usage reporting over per-call `api_usage` rows.
 
 use std::collections::BTreeSet;
 
@@ -199,8 +199,7 @@ impl RequestLogIds {
 }
 
 /// One recorded API request (an `api_usage` row) as shown by the usage page's
-/// request log. Legacy `turn_usage` rows are turn aggregates without timings,
-/// status, or request identity, so the log lists per-call rows only.
+/// request log.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RequestLogRow {
     started_at_ms: u64,
@@ -369,50 +368,19 @@ impl RequestLogQuery {
 /// The largest page the log query accepts; the UI offers 10/20/50/100/500.
 const MAX_LOG_PAGE_SIZE: usize = 500;
 
-// api_usage began after turn_usage. For each session, legacy rows before the
-// first recorded main call fill history; every per-call row is then authoritative.
-// This also preserves foreground-subagent accounting without counting it twice.
 const UNIFIED_USAGE: &str = r#"
-WITH legacy_turn_usage AS (
-    SELECT t.*
-    FROM turn_usage AS t
-    WHERE COALESCE(
-        t.ended_at_ms < (
-            SELECT MIN(a.started_at_ms)
-            FROM api_usage AS a
-            WHERE a.session_id = t.session_id AND a.source = 'main'
-        ),
-        1
-    )
-),
-usage_rows AS (
+WITH unified_usage AS (
     SELECT
-        ended_at_ms AS started_at_ms,
-        session_id,
-        provider,
-        model,
-        input_tokens,
-        cache_read_tokens,
-        output_tokens
-    FROM legacy_turn_usage
-    UNION ALL
-    SELECT
-        started_at_ms,
-        session_id,
-        provider,
-        model,
-        input_tokens,
-        cache_read_tokens,
-        output_tokens
+        api_usage.started_at_ms,
+        api_usage.session_id,
+        api_usage.provider,
+        api_usage.model,
+        api_usage.input_tokens,
+        api_usage.cache_read_tokens,
+        api_usage.output_tokens,
+        sessions.cwd AS workspace
     FROM api_usage
-),
-unified_usage AS (
-    -- Usage rows attribute to their session's workspace (cwd). Sessions and
-    -- usage rows cascade-delete together, so the join only misses an orphaned
-    -- row from an older database; the workspace filter then excludes it.
-    SELECT usage_rows.*, sessions.cwd AS workspace
-    FROM usage_rows
-    LEFT JOIN sessions ON sessions.id = usage_rows.session_id
+    LEFT JOIN sessions ON sessions.id = api_usage.session_id
 )
 "#;
 
@@ -690,11 +658,10 @@ mod tests {
     }
 
     #[test]
-    fn legacy_and_per_call_rows_join_without_double_counting() {
-        let (_dir, store) = open_test_store("cutover");
-        store.record_usage_at(1_000_000, "s1", "p1", "m-old", 1, 2, 3, 0, None);
-        store.record_usage_at(2_000_000, "s1", "p1", "m-new", 10, 20, 30, 0, None);
-        store.record_usage_at(1_500_000, "s2", "p2", "m-other", 5, 0, 5, 0, None);
+    fn per_call_rows_aggregate_by_provider_and_model() {
+        let (_dir, store) = open_test_store("aggregate");
+        record_api(&store, "s1", "main", 1_000_000, "p1", "m-old", 1, 2, 3);
+        record_api(&store, "s2", "main", 1_500_000, "p2", "m-other", 5, 0, 5);
         record_api(&store, "s1", "main", 1_500_000, "p1", "m-new", 10, 20, 30);
         record_api(&store, "s1", "subagent", 1_600_000, "p1", "m-new", 1, 2, 3);
         record_api(&store, "s1", "compact", 1_700_000, "p1", "m-new", 2, 3, 4);
@@ -703,8 +670,7 @@ mod tests {
         let stats = store
             .usage_stats(&UsageQuery::new(None, None, None, 0, 0, 0, 0))
             .expect("usage query");
-        // 6 legacy + 10 from the other session + 60 main + 6 subagent + 9 compact + 3 title.
-        // The later 60-token legacy turn overlaps the per-call rows and is excluded.
+        // 6 m-old + 10 from the other session + 60 main + 6 subagent + 9 compact + 3 title.
         assert_eq!(stats.summary().total(), 94);
         assert_eq!(stats.providers(), &["p1", "p2"]);
         assert_eq!(stats.models(), &["m-new", "m-old", "m-other"]);
@@ -738,29 +704,29 @@ mod tests {
         let last_7_start = today_start - 6 * day_ms;
         let last_30_start = today_start - 29 * day_ms;
         for (offset_days, input) in [(31, 1), (29, 2), (6, 4)] {
-            store.record_usage_at(
+            record_api(
+                &store,
+                "s1",
+                "main",
                 today_start - offset_days * day_ms,
-                "legacy",
                 "p",
                 "m",
                 input,
                 1,
                 2,
-                0,
-                None,
             );
         }
-        store.record_usage_at(today_start + 60_000, "legacy", "p", "m", 8, 1, 2, 0, None);
-        store.record_usage_at(
+        record_api(&store, "s1", "main", today_start + 60_000, "p", "m", 8, 1, 2);
+        record_api(
+            &store,
+            "s1",
+            "main",
             today_start + 120_000,
-            "legacy",
             "other",
             "m",
             100,
             0,
             0,
-            0,
-            None,
         );
 
         let stats = store
@@ -816,10 +782,10 @@ mod tests {
         let (_dir, store) = open_test_store("workspace");
         store.upsert_session(&session_meta("s1", "/work/a"));
         store.upsert_session(&session_meta("s2", "/work/b"));
-        store.record_usage_at(1_000, "s1", "p1", "m1", 10, 0, 10, 0, None);
-        store.record_usage_at(2_000, "s2", "p2", "m2", 5, 0, 5, 0, None);
-        // Usage without a session row (an older database) never matches a workspace.
-        store.record_usage_at(3_000, "orphan", "p3", "m3", 7, 0, 7, 0, None);
+        record_api(&store, "s1", "main", 1_000, "p1", "m1", 10, 0, 10);
+        record_api(&store, "s2", "main", 2_000, "p2", "m2", 5, 0, 5);
+        // Usage without a session row never matches a workspace.
+        record_api(&store, "orphan", "main", 3_000, "p3", "m3", 7, 0, 7);
 
         let all = store
             .usage_stats(&UsageQuery::new(None, None, None, 0, 0, 0, 0))

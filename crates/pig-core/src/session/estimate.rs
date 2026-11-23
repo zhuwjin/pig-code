@@ -309,12 +309,12 @@ mod tests {
         let mut message = ChatMsg::assistant(answer, vec![call], Some(thinking.clone()));
         let without_replay = estimate_message_tokens(&message);
         message.replay = Some(pig_provider::AssistantReplay {
-            origin: pig_provider::ReplayOrigin {
-                api_format: pig_protocol::ApiFormat::OpenAiResponses,
-                base_url: "https://api.openai.com/v1".into(),
-                model: None,
-                credential: None,
-            },
+            origin: pig_provider::ReplayOrigin::new(
+                pig_protocol::ApiFormat::OpenAiResponses,
+                "https://api.openai.com/v1",
+                "gpt-5",
+                "test-key",
+            ),
             items: vec![
                 pig_provider::AssistantReplayItem::ResponsesReasoning {
                     id: Some("rs_1".into()),
@@ -357,12 +357,12 @@ mod tests {
         let mut message = ChatMsg::assistant("answer".into(), vec![], None);
         let plain = estimate_message_tokens(&message);
         message.replay = Some(pig_provider::AssistantReplay {
-            origin: pig_provider::ReplayOrigin {
-                api_format: pig_protocol::ApiFormat::AnthropicMessages,
-                base_url: "https://api.anthropic.com".into(),
-                model: None,
-                credential: None,
-            },
+            origin: pig_provider::ReplayOrigin::new(
+                pig_protocol::ApiFormat::AnthropicMessages,
+                "https://api.anthropic.com",
+                "claude-sonnet-4-5",
+                "test-key",
+            ),
             items: vec![
                 pig_provider::AssistantReplayItem::Text {
                     text: "answer".into(),

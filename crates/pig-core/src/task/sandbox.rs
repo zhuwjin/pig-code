@@ -195,12 +195,6 @@ pub fn init_sandbox_network(block: bool) {
     SANDBOX_NETWORK_BLOCK.store(block, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Legacy Windows alias for `init_sandbox_network`.
-#[cfg(target_os = "windows")]
-pub fn init_windows_sandbox_network(block: bool) {
-    init_sandbox_network(block);
-}
-
 /// Cross-platform read-only sandbox availability & configuration snapshot.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PlatformSandboxStatus {

@@ -326,19 +326,16 @@ impl Session {
         // must be loud (setting None would silently drop all subsequent
         // records). The handle was opened above before tool recovery.
         // Crash recovery: a hard kill runs no wrap-up, so the tail turn's
-        // usage never reached turn_usage/TurnStats (the live interrupt path
-        // writes it at cancel time, so this only fires for uncounted tails).
-        // Per-request StepUsage records are durable — sum the tail turn's
-        // steps, count them, and append a synthesized TurnStats as the
-        // "counted" marker (reopening sees it and skips; replay restores the
-        // footer/session totals through the normal path). Timing fields are
-        // unknowable after a crash (zeros) and the reasoning split is not in
-        // StepUsage (0); the in-flight request's usage is lost either way.
+        // usage never reached TurnStats (the live interrupt path writes it at
+        // cancel time, so this only fires for uncounted tails). Per-request
+        // StepUsage records are durable — sum the tail turn's steps and append
+        // a synthesized TurnStats as the "counted" marker (reopening sees it
+        // and skips; replay restores the footer/session totals through the
+        // normal path). Timing fields are unknowable after a crash (zeros) and
+        // the in-flight request's usage is lost either way.
         let mut recovery_append_error: Option<CoreError> = None;
         if let Some((input, cache_read, output, turn_id)) = uncounted_tail_usage(&records) {
-            // The rollout file's mtime approximates when the interrupted turn
-            // ended (the recovery moment would skew by-day statistics); the
-            // record and the SQLite row share it, like the live path's stamp
+            // The rollout file's mtime approximates when the interrupted turn ended.
             let ended_at_ms = std::fs::metadata(sessions_dir.join(format!("{id}.jsonl")))
                 .and_then(|m| m.modified())
                 .ok()
@@ -358,11 +355,8 @@ impl Session {
                 tool_ms: 0,
                 has_usage: true,
                 finish_reason: None,
-                turn_id: turn_id.clone(),
+                turn_id,
             };
-            // Append as the "counted" marker before the SQLite row; both sides
-            // are idempotent on `turn_id`, so an earlier failure in either
-            // order cannot double count on the next open.
             if let Err(error) = rollout.append(&recovered) {
                 tracing::warn!(
                     error = %error,
@@ -370,36 +364,6 @@ impl Session {
                 );
                 recovery_append_error = Some(error.into_core(rollout.path()));
             }
-            // Attribute to the session's last used model (meta is
-            // write-through on SetModel)
-            let meta = store.lock().expect("store lock").get_session(id);
-            let selection = meta.as_ref().and_then(meta_to_selection);
-            let resolved = resolve_runtime_model(runtime.as_deref(), selection.as_ref(), None).ok();
-            let (provider, model) = match resolved {
-                Some(resolved) => (resolved.provider_name, resolved.model),
-                None => {
-                    let unknown = || "unknown".to_string();
-                    meta.as_ref()
-                        .map(|m| {
-                            (
-                                m.provider_id.clone().unwrap_or_else(unknown),
-                                m.model_id.clone().unwrap_or_else(unknown),
-                            )
-                        })
-                        .unwrap_or_else(|| (unknown(), unknown()))
-                }
-            };
-            store.lock().expect("store lock").record_usage_at(
-                ended_at_ms,
-                id,
-                &provider,
-                &model,
-                input,
-                cache_read,
-                output,
-                0,
-                turn_id.as_deref(),
-            );
             records.push(recovered);
         }
         // A recalled turn's PromptSnapshot still sits in the file but its User
@@ -529,18 +493,12 @@ pub(super) fn surviving_prompt_snapshot(
 /// ends normally — or is interrupted, which writes TurnStats at cancel time —
 /// always closes with TurnStats). Returns (input, cache_read, output,
 /// turn_id); None when the tail turn was counted or consumed nothing.
-///
-/// The identity makes the SQLite recovery insert idempotent even for legacy
-/// StepUsage records that predate `turn_id`: it falls back to the earliest
-/// tail StepUsage's record index, which is stable as long as no marker was
-/// written (the only state in which recovery runs twice).
 pub(super) fn uncounted_tail_usage(
     records: &[RolloutRecord],
 ) -> Option<(u64, u64, u64, Option<String>)> {
     let (mut input, mut cache_read, mut output, mut counted) = (0u64, 0u64, 0u64, false);
     let mut turn_id = None;
-    let mut first_step_ix = None;
-    for (ix, record) in records.iter().enumerate().rev() {
+    for record in records.iter().rev() {
         if matches!(record, RolloutRecord::User { .. }) {
             break;
         }
@@ -558,13 +516,11 @@ pub(super) fn uncounted_tail_usage(
                 if turn_id.is_none() {
                     turn_id = step_turn.clone();
                 }
-                first_step_ix = Some(ix);
             }
             RolloutRecord::TurnStats { .. } => counted = true,
             _ => {}
         }
     }
-    let turn_id = turn_id.or_else(|| first_step_ix.map(|ix| format!("recovered-{ix}")));
     (!counted && input + cache_read + output > 0).then_some((input, cache_read, output, turn_id))
 }
 

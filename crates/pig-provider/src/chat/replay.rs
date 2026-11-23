@@ -6,18 +6,13 @@ use super::ResolvedModel;
 use super::messages::ToolCallWire;
 
 /// The endpoint/model/credential identity an assistant replay was produced
-/// against. `base_url` stays a plain URL; `model` and `credential` are
-/// explicit optional fields so records written before the identity existed
-/// deserialize with `None` and degrade deterministically to the text/tool-only
-/// projection. `credential` is a one-way fingerprint, never the key itself.
+/// against. `credential` is a one-way SHA-256 fingerprint, never the raw key.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplayOrigin {
     pub api_format: ApiFormat,
     pub base_url: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub credential: Option<String>,
+    pub model: String,
+    pub credential: String,
 }
 
 /// Stable SHA-256 fingerprint of the credential. This is a change detector,
@@ -36,16 +31,13 @@ pub(crate) fn credential_fingerprint(api_key: &str) -> String {
 }
 
 impl ReplayOrigin {
-    /// Build the full identity from already-resolved wire values. Test
-    /// fixtures that seed durable replay records should use this instead of
-    /// spelling a bare `base_url`, which is treated as an unverified legacy
-    /// origin and therefore never replays natively.
+    /// Build the full identity from already-resolved wire values.
     pub fn new(api_format: ApiFormat, base_url: &str, model: &str, api_key: &str) -> Self {
         Self {
             api_format,
             base_url: base_url.trim_end_matches('/').to_string(),
-            model: Some(model.to_string()),
-            credential: Some(credential_fingerprint(api_key)),
+            model: model.to_string(),
+            credential: credential_fingerprint(api_key),
         }
     }
 
@@ -75,15 +67,10 @@ impl AssistantReplay {
     }
 
     pub fn origin_matches(&self, config: &ResolvedModel) -> bool {
-        if self.origin.api_format != config.api_format
-            || self.origin.base_url != config.base_url.trim_end_matches('/')
-            // A legacy record has no identity fields and never matches, so
-            // native replay degrades deterministically to text/tool-only.
-            || self.origin.model.as_deref() != Some(config.model.as_str())
-        {
-            return false;
-        }
-        self.origin.credential.as_deref() == Some(credential_fingerprint(&config.api_key).as_str())
+        self.origin.api_format == config.api_format
+            && self.origin.base_url == config.base_url.trim_end_matches('/')
+            && self.origin.model == config.model
+            && self.origin.credential == credential_fingerprint(&config.api_key)
     }
 
     pub fn remove_tool_calls(&mut self) {
@@ -172,61 +159,6 @@ mod tests {
         assert!(
             restored.origin_matches(&config),
             "same identity survives a restart round-trip"
-        );
-    }
-
-    /// Records from before the explicit identity fields (plain base URL or the
-    /// old `pig-origin-v2:` envelope) deserialize with `None` model/credential
-    /// and must degrade to the text/tool-only projection.
-    #[test]
-    fn legacy_origins_never_native_replay() {
-        let config = model();
-        let legacy = AssistantReplay {
-            origin: ReplayOrigin {
-                api_format: config.api_format,
-                base_url: config.base_url.trim_end_matches('/').to_string(),
-                model: None,
-                credential: None,
-            },
-            items: vec![AssistantReplayItem::Text {
-                text: "answer".into(),
-                citations: Vec::new(),
-            }],
-        };
-        assert!(
-            !legacy.origin_matches(&config),
-            "an origin without identity must degrade to the safe projection"
-        );
-
-        let encoded: AssistantReplay = serde_json::from_value(serde_json::json!({
-            "origin": {
-                "api_format": config.api_format,
-                "base_url": "https://api.anthropic.com/v1",
-            },
-            "items": [],
-        }))
-        .expect("legacy records deserialize");
-        assert_eq!(encoded.origin.model, None);
-        assert_eq!(encoded.origin.credential, None);
-        assert!(!encoded.origin_matches(&config));
-
-        let envelope = ReplayOrigin {
-            api_format: config.api_format,
-            base_url: format!(
-                "pig-origin-v2:{{\"base_url\":\"https://api.anthropic.com/v1\",\"model\":\"{}\",\"credential\":\"{}\"}}",
-                config.model,
-                credential_fingerprint(&config.api_key)
-            ),
-            model: None,
-            credential: None,
-        };
-        let envelope = AssistantReplay {
-            origin: envelope,
-            items: vec![],
-        };
-        assert!(
-            !envelope.origin_matches(&config),
-            "the old envelope is not reinterpreted"
         );
     }
 

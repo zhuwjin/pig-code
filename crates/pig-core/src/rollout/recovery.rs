@@ -126,8 +126,6 @@ pub(crate) fn tool_execution_recoveries(
             RolloutRecord::Meta { .. }
             | RolloutRecord::System { .. }
             | RolloutRecord::PromptSnapshot { .. }
-            | RolloutRecord::Reasoning { .. }
-            | RolloutRecord::Text { .. }
             | RolloutRecord::TurnChanges { .. }
             | RolloutRecord::TurnStats { .. }
             | RolloutRecord::StepUsage { .. }

@@ -402,12 +402,12 @@ fn openai_request_tools_keeps_wire_shape() {
 #[test]
 fn replay_sources_merge_dedupe_and_never_leak_credentials() {
     let replay = crate::chat::AssistantReplay {
-        origin: crate::chat::ReplayOrigin {
-            api_format: ApiFormat::OpenAiResponses,
-            base_url: "https://api.openai.com/v1".into(),
-            model: None,
-            credential: None,
-        },
+        origin: crate::chat::ReplayOrigin::new(
+            ApiFormat::OpenAiResponses,
+            "https://api.openai.com/v1",
+            "gpt-5",
+            "test-key",
+        ),
         items: vec![
             crate::chat::AssistantReplayItem::ResponsesWebSearchCall {
                 id: Some("ws_1".into()),
@@ -467,12 +467,12 @@ fn replay_sources_drop_overlong_urls_without_opening_a_truncated_one() {
     assert_eq!(invalid.chars().count(), 2049);
 
     let responses = crate::chat::AssistantReplay {
-        origin: crate::chat::ReplayOrigin {
-            api_format: ApiFormat::OpenAiResponses,
-            base_url: "https://api.openai.com/v1".into(),
-            model: None,
-            credential: None,
-        },
+        origin: crate::chat::ReplayOrigin::new(
+            ApiFormat::OpenAiResponses,
+            "https://api.openai.com/v1",
+            "gpt-5",
+            "test-key",
+        ),
         items: vec![
             crate::chat::AssistantReplayItem::ResponsesWebSearchCall {
                 id: Some("ws_1".into()),
@@ -509,12 +509,12 @@ fn replay_sources_drop_overlong_urls_without_opening_a_truncated_one() {
     );
 
     let anthropic = crate::chat::AssistantReplay {
-        origin: crate::chat::ReplayOrigin {
-            api_format: ApiFormat::AnthropicMessages,
-            base_url: "https://api.anthropic.com".into(),
-            model: None,
-            credential: None,
-        },
+        origin: crate::chat::ReplayOrigin::new(
+            ApiFormat::AnthropicMessages,
+            "https://api.anthropic.com",
+            "claude",
+            "test-key",
+        ),
         items: vec![
             crate::chat::AssistantReplayItem::AnthropicWebSearchResult {
                 tool_use_id: "srvtoolu_1".into(),
@@ -570,12 +570,12 @@ fn replay_sources_are_bounded_and_skip_non_http_urls() {
         })
         .collect();
     let replay = crate::chat::AssistantReplay {
-        origin: crate::chat::ReplayOrigin {
-            api_format: ApiFormat::AnthropicMessages,
-            base_url: "https://api.anthropic.com".into(),
-            model: None,
-            credential: None,
-        },
+        origin: crate::chat::ReplayOrigin::new(
+            ApiFormat::AnthropicMessages,
+            "https://api.anthropic.com",
+            "claude",
+            "test-key",
+        ),
         items: vec![crate::chat::AssistantReplayItem::Text {
             text: "answer".into(),
             citations,

@@ -116,59 +116,6 @@ impl Session {
                         tx,
                     );
                 }
-                RolloutRecord::Reasoning { text, .. } => {
-                    if text.is_empty() {
-                        continue;
-                    }
-                    if !in_assistant {
-                        replay_turns += 1;
-                        let turn_id = format!("replay-{replay_turns}");
-                        self.emit(
-                            |session_id| Event::TurnStarted {
-                                session_id,
-                                turn_id,
-                                run: None,
-                            },
-                            tx,
-                        );
-                        in_assistant = true;
-                    }
-                    let item = format!("replay-{replay_turns}-reason");
-                    let delta = text.clone();
-                    self.emit(
-                        |session_id| Event::ReasoningDelta {
-                            session_id,
-                            item_id: item,
-                            delta,
-                        },
-                        tx,
-                    );
-                }
-                RolloutRecord::Text { text } => {
-                    if !in_assistant {
-                        replay_turns += 1;
-                        let turn_id = format!("replay-{replay_turns}");
-                        self.emit(
-                            |session_id| Event::TurnStarted {
-                                session_id,
-                                turn_id,
-                                run: None,
-                            },
-                            tx,
-                        );
-                        in_assistant = true;
-                    }
-                    let item = format!("replay-{replay_turns}-text-{record_ix}");
-                    let full = text.clone();
-                    self.emit(
-                        |session_id| Event::TextDone {
-                            session_id,
-                            item_id: item,
-                            full_text: full,
-                        },
-                        tx,
-                    );
-                }
                 RolloutRecord::ToolCall {
                     tool,
                     summary: _,

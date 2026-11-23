@@ -51,35 +51,22 @@ fn stats() -> RolloutRecord {
 #[test]
 fn crashed_tail_turn_sums_step_usage() {
     // Completed turn (counted) + crashed tail turn → only the tail sums.
-    // Legacy steps without a turn_id get a stable record-index identity so
-    // a repeated failed recovery append cannot double count in SQLite.
     let records = vec![
         user(),
         step(5, 5, 5),
         stats(),
         user(),
-        step(1, 2, 3),
+        RolloutRecord::StepUsage {
+            input: 1,
+            cache_read: 2,
+            output: 3,
+            used: 0,
+            turn_id: Some("t1-1".into()),
+        },
         step(4, 5, 6),
     ];
-    let expected = (5, 7, 9, Some("recovered-4".to_string()));
-    assert_eq!(uncounted_tail_usage(&records), Some(expected.clone()));
     assert_eq!(
         uncounted_tail_usage(&records),
-        Some(expected),
-        "the derived identity is stable across reopens"
-    );
-
-    // A modern step's durable identity wins over the derived fallback.
-    let mut modern = records.clone();
-    modern[4] = RolloutRecord::StepUsage {
-        input: 1,
-        cache_read: 2,
-        output: 3,
-        used: 0,
-        turn_id: Some("t1-1".into()),
-    };
-    assert_eq!(
-        uncounted_tail_usage(&modern),
         Some((5, 7, 9, Some("t1-1".to_string())))
     );
 }

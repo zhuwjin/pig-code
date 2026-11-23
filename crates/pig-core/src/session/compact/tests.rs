@@ -592,12 +592,7 @@ fn user_role_handoff_is_a_fixed_prefix_not_a_user_segment() {
         "the next real user starts its own run"
     );
 
-    // The same marker installs as user role; a legacy note stays system.
     assert_eq!(crate::rollout::compaction_note_message(note).role, "user");
-    assert_eq!(
-        crate::rollout::compaction_note_message("legacy note".into()).role,
-        "system"
-    );
 }
 
 /// Zero-tail compaction installs `[system, handoff, checkpoint]`; when the

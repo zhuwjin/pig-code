@@ -1,7 +1,6 @@
 //! SQLite storage: {data_dir}/store.sqlite
 //! - sessions table: session index (pin/archive/title all write here)
 //! - workspaces table: workspace registry (alias, hidden flag)
-//! - turn_usage table: per-turn token usage for statistics aggregation
 //! - api_usage table: per-logical-call usage/timing/outcome and provider response identifiers
 //! - todos table: current session todo-list state (full upsert; the event stream no longer persists to JSONL)
 //! - file_changes table: current session file-change state (upsert by path; rows deleted when the net change is zero)
@@ -84,27 +83,6 @@ const BASELINE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS sessions (
                 alias TEXT,
                 hidden INTEGER NOT NULL DEFAULT 0
             );
-            CREATE TABLE IF NOT EXISTS turn_usage (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL,
-                -- Wall-clock end of the turn (unix ms): the moment the turn's
-                -- usage was written, which is when the turn ended
-                ended_at_ms INTEGER NOT NULL,
-                provider TEXT NOT NULL,
-                model TEXT NOT NULL,
-                input_tokens INTEGER NOT NULL,
-                cache_read_tokens INTEGER NOT NULL DEFAULT 0,
-                output_tokens INTEGER NOT NULL,
-                reasoning_output_tokens INTEGER NOT NULL DEFAULT 0,
-                -- Durable per-turn identity shared with the rollout's
-                -- TurnStats/StepUsage records; unique per session so recovery
-                -- after either side failed cannot double count.
-                turn_id TEXT
-            );
-            CREATE INDEX IF NOT EXISTS idx_turn_usage_ended_at ON turn_usage(ended_at_ms);
-            CREATE INDEX IF NOT EXISTS idx_turn_usage_session ON turn_usage(session_id);
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_turn_usage_turn
-                ON turn_usage(session_id, turn_id);
             CREATE TABLE IF NOT EXISTS api_usage (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT NOT NULL,
@@ -359,7 +337,6 @@ impl Store {
                 detail: format!("Failed to delete session {id}: {error}"),
             })?;
         for table in [
-            "turn_usage",
             "api_usage",
             "todos",
             "file_changes",
@@ -639,94 +616,6 @@ impl Store {
         crate::usage::request_log(&self.conn, query)
     }
 
-    // ---- Token usage ----
-
-    /// One row per finished turn; statistics aggregation (by day/model/workspace) all query this table.
-    /// input_tokens is input that missed the cache; cache_read_tokens is input served from the cache.
-    /// reasoning_output_tokens is the reasoning/thinking slice of output_tokens (informational split);
-    /// ended_at_ms is the turn's wall-clock end. Schema changes land by deleting the db (no
-    /// migrations — the user rebuilds).
-    #[allow(clippy::too_many_arguments)]
-    pub fn record_usage(
-        &self,
-        session_id: &str,
-        provider: &str,
-        model: &str,
-        input_tokens: u64,
-        cache_read_tokens: u64,
-        output_tokens: u64,
-        reasoning_output_tokens: u64,
-        turn_id: Option<&str>,
-    ) {
-        self.record_usage_at(
-            crate::model_io::now_ms(),
-            session_id,
-            provider,
-            model,
-            input_tokens,
-            cache_read_tokens,
-            output_tokens,
-            reasoning_output_tokens,
-            turn_id,
-        );
-    }
-
-    /// record_usage with an explicit end stamp: crash recovery attributes the
-    /// interrupted turn to the rollout file's mtime (the recovery moment would
-    /// skew by-day statistics). `turn_id` makes the insert idempotent:
-    /// `INSERT OR IGNORE` against the unique `(session_id, turn_id)` index
-    /// means a recovery after SQLite-success/rollout-failure (or a crash
-    /// window between the two) cannot add a second row.
-    #[allow(clippy::too_many_arguments)]
-    pub fn record_usage_at(
-        &self,
-        ended_at_ms: u64,
-        session_id: &str,
-        provider: &str,
-        model: &str,
-        input_tokens: u64,
-        cache_read_tokens: u64,
-        output_tokens: u64,
-        reasoning_output_tokens: u64,
-        turn_id: Option<&str>,
-    ) {
-        let result = self.conn.execute(
-            "INSERT OR IGNORE INTO turn_usage (session_id, ended_at_ms, provider, model, input_tokens, cache_read_tokens, output_tokens, reasoning_output_tokens, turn_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![
-                session_id,
-                ended_at_ms,
-                provider,
-                model,
-                input_tokens,
-                cache_read_tokens,
-                output_tokens,
-                reasoning_output_tokens,
-                turn_id
-            ],
-        );
-        if let Err(error) = result {
-            tracing::error!("record_usage failed for {session_id}: {error}");
-        }
-    }
-
-    /// Test/diagnostic accessor: usage rows for one session in insertion order.
-    #[cfg(test)]
-    pub(crate) fn turn_usage_rows(&self, session_id: &str) -> Vec<(String, u64, u64, u64)> {
-        let Ok(mut statement) = self.conn.prepare(
-            "SELECT provider, input_tokens, cache_read_tokens, output_tokens
-             FROM turn_usage WHERE session_id = ?1 ORDER BY id",
-        ) else {
-            return Vec::new();
-        };
-        statement
-            .query_map(params![session_id], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-            })
-            .map(|rows| rows.filter_map(Result::ok).collect())
-            .unwrap_or_default()
-    }
-
     // ---- Session todos (current state, full upsert) ----
 
     pub fn set_todos(&self, session_id: &str, items_json: &str) {
@@ -890,7 +779,18 @@ mod tests {
             plan_enabled: false,
         };
         store.upsert_session(&meta);
-        store.record_usage("s1", "p", "m", 1, 2, 3, 4, None);
+        store.record_api_usage(&crate::api_usage::ApiUsageRecord {
+            session_id: "s1".to_string(),
+            source: "main".to_string(),
+            started_at_ms: 1,
+            provider: "p".to_string(),
+            model: "m".to_string(),
+            input_tokens: 1,
+            cache_read_tokens: 2,
+            output_tokens: 3,
+            reasoning_output_tokens: 4,
+            ..Default::default()
+        });
         store.set_todos("s1", "[]");
         store.upsert_file_change("s1", "a.rs", "d", 1, 1);
         store.upsert_file_original("s1", "a.rs", Some("old"));
@@ -917,22 +817,6 @@ mod tests {
             .request_session_deletion("s1")
             .expect("request deletion");
         store.delete_session_checked("s1").expect("delete session");
-    }
-
-    /// The durable turn identity makes usage recovery idempotent: a second
-    /// insert for the same (session, turn) is ignored, while a different turn
-    /// still adds a row. Legacy NULL identities keep their old behavior.
-    #[test]
-    fn turn_usage_is_idempotent_by_turn_id() {
-        let (_dir, store) = open_test_store("usage-idempotent");
-        store.record_usage_at(10, "s1", "p", "m", 100, 20, 30, 5, Some("turn-a"));
-        store.record_usage_at(10, "s1", "p", "m", 100, 20, 30, 5, Some("turn-a"));
-        store.record_usage_at(20, "s1", "p", "m", 1, 2, 3, 0, Some("turn-b"));
-        store.record_usage_at(30, "s1", "p", "m", 7, 0, 0, 0, None);
-        store.record_usage_at(31, "s1", "p", "m", 7, 0, 0, 0, None);
-        let rows = store.turn_usage_rows("s1");
-        assert_eq!(rows.len(), 4, "{rows:?}");
-        assert_eq!(rows[0], ("p".to_string(), 100, 20, 30));
     }
 
     #[test]
@@ -1145,7 +1029,7 @@ mod tests {
     }
 
     #[test]
-    fn sqlite_migrations_set_user_version_upgrade_legacy_v0_and_reject_future_versions() {
+    fn sqlite_migrations_set_user_version_and_reject_future_versions() {
         let dir = std::env::temp_dir().join(format!(
             "pig-store-migrate-{}-{}",
             std::process::id(),
@@ -1160,15 +1044,6 @@ mod tests {
         let reopened = Store::open(&dir).expect("reopen store");
         assert_eq!(reopened.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
         drop(reopened);
-
-        // Legacy v0 database (user_version == 0 with existing tables) upgrades cleanly.
-        {
-            let conn = Connection::open(dir.join("store.sqlite")).expect("raw conn");
-            conn.pragma_update(None, "user_version", 0u32).expect("reset v0");
-        }
-        let upgraded = Store::open(&dir).expect("upgrade legacy v0 store");
-        assert_eq!(upgraded.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
-        drop(upgraded);
 
         // Future schema version fails closed instead of corrupting unknown tables.
         {
