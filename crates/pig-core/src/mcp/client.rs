@@ -7,7 +7,7 @@
 //! pending requests return with an error.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -18,6 +18,10 @@ use tokio::process::{ChildStderr, ChildStdin, ChildStdout};
 use tokio::sync::oneshot;
 
 use crate::NoConsoleExt as _;
+use crate::mcp::capabilities::{
+    ElicitationHandler, McpConnectionState, McpPromptResult, McpPromptSpec, McpResourceContent,
+    McpResourceSpec, McpResourceTemplate, McpServerCapabilities, handle_server_request,
+};
 use crate::mcp::config::{McpServerConfig, McpStdioConfig, McpTransport};
 use crate::mcp::tool::McpToolAnnotations;
 use pig_protocol::CoreError;
@@ -116,10 +120,26 @@ impl Transport {
     }
 }
 
-/// One MCP server connection (concrete transport + JSON-RPC session)
+/// One MCP server connection (concrete transport + JSON-RPC session + reconnection state machine)
 pub struct McpClient {
     name: String,
-    transport: Transport,
+    config: Option<McpServerConfig>,
+    workspace_root: PathBuf,
+    elicitation: Option<ElicitationHandler>,
+    transport: tokio::sync::RwLock<Transport>,
+    generation: AtomicU64,
+    state: Mutex<McpConnectionState>,
+    capabilities: Mutex<McpServerCapabilities>,
+    reconnect_lock: tokio::sync::Mutex<()>,
+    shut_down: AtomicBool,
+}
+
+fn is_reconnectable_error(error: &str) -> bool {
+    error.contains("connection is closed")
+        || error.contains("write failed")
+        || error.contains("SSE stream ended")
+        || error.contains("HTTP 404")
+        || error.contains("request failed")
 }
 
 impl McpClient {
@@ -134,27 +154,72 @@ impl McpClient {
         config: &McpServerConfig,
         workspace_root: &Path,
     ) -> Result<(Arc<Self>, Vec<McpToolSpec>), CoreError> {
+        Self::connect_with_elicitation(config, workspace_root, None).await
+    }
+
+    /// Connect with an optional handler for server-initiated `elicitation/create` requests.
+    pub async fn connect_with_elicitation(
+        config: &McpServerConfig,
+        workspace_root: &Path,
+        elicitation: Option<ElicitationHandler>,
+    ) -> Result<(Arc<Self>, Vec<McpToolSpec>), CoreError> {
+        let (transport, capabilities) =
+            Self::open_and_initialize(config, workspace_root, elicitation.clone()).await?;
+        let client = Arc::new(Self {
+            name: config.name.clone(),
+            config: Some(config.clone()),
+            workspace_root: workspace_root.to_path_buf(),
+            elicitation,
+            transport: tokio::sync::RwLock::new(transport),
+            generation: AtomicU64::new(1),
+            state: Mutex::new(McpConnectionState::Connected),
+            capabilities: Mutex::new(capabilities),
+            reconnect_lock: tokio::sync::Mutex::new(()),
+            shut_down: AtomicBool::new(false),
+        });
+        // tools/list is done together with the handshake: failures belong to the same connection boundary, classified as initialize
+        let tools = client
+            .list_tools()
+            .await
+            .map_err(|e| CoreError::McpInitialize { detail: e })?;
+        Ok((client, tools))
+    }
+
+    async fn open_and_initialize(
+        config: &McpServerConfig,
+        workspace_root: &Path,
+        elicitation: Option<ElicitationHandler>,
+    ) -> Result<(Transport, McpServerCapabilities), CoreError> {
         let transport = match &config.transport {
             McpTransport::Stdio(stdio) => Transport::Stdio(
-                StdioTransport::spawn(&config.name, stdio, config.timeout, workspace_root).await?,
+                StdioTransport::spawn(
+                    &config.name,
+                    stdio,
+                    config.timeout,
+                    workspace_root,
+                    elicitation.clone(),
+                )
+                .await?,
             ),
             McpTransport::Http(http) => Transport::Http(super::http::HttpTransport::new(
                 &config.name,
                 http,
                 config.timeout,
+                elicitation.clone(),
             )?),
         };
-        let client = Arc::new(Self {
-            name: config.name.clone(),
-            transport,
-        });
-        let announced = client.transport.protocol_version();
-        let init = client
+        let announced = transport.protocol_version();
+        let client_capabilities = if elicitation.is_some() {
+            json!({ "elicitation": {} })
+        } else {
+            json!({})
+        };
+        let init = transport
             .request(
                 "initialize",
                 json!({
                     "protocolVersion": announced,
-                    "capabilities": {},
+                    "capabilities": client_capabilities,
                     "clientInfo": {"name": "pig-code", "version": env!("CARGO_PKG_VERSION")},
                 }),
             )
@@ -164,28 +229,109 @@ impl McpClient {
         if server_version != announced {
             tracing::warn!(
                 "{} protocol version {server_version} (client {announced}), continuing with server version",
-                client.name
+                config.name
             );
         }
-        client.transport.notify_negotiated(server_version);
-        client
-            .notify("notifications/initialized", json!({}))
-            .await?;
-        // tools/list is done together with the handshake: failures belong to the same connection boundary, classified as initialize
-        let tools = client
-            .list_tools()
-            .await
-            .map_err(|e| CoreError::McpInitialize { detail: e })?;
-        Ok((client, tools))
+        let capabilities = McpServerCapabilities::from_initialize_result(&init);
+        transport.notify_negotiated(server_version);
+        transport.notify("notifications/initialized", json!({})).await?;
+        Ok((transport, capabilities))
     }
 
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    /// Negotiated server capabilities from the latest `initialize` handshake.
+    pub fn capabilities(&self) -> McpServerCapabilities {
+        *self
+            .capabilities
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Current connection lifecycle state.
+    pub fn connection_state(&self) -> McpConnectionState {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Explicitly tear down and re-establish the underlying transport + MCP handshake.
+    pub async fn reconnect(&self) -> Result<(), CoreError> {
+        let gen_before = self.generation.load(Ordering::Acquire);
+        self.reconnect_if_needed(gen_before)
+            .await
+            .map_err(|detail| CoreError::McpInitialize { detail })
+    }
+
+    async fn reconnect_if_needed(&self, failed_generation: u64) -> Result<(), String> {
+        if self.shut_down.load(Ordering::Acquire) {
+            return Err(format!("MCP server {} was shut down", self.name));
+        }
+        let Some(config) = &self.config else {
+            return Err(format!("MCP server {} cannot reconnect (no config)", self.name));
+        };
+        let _guard = self.reconnect_lock.lock().await;
+        if self.shut_down.load(Ordering::Acquire) {
+            return Err(format!("MCP server {} was shut down", self.name));
+        }
+        // Single-flight deduplication: if a concurrent call already reconnected
+        // while we waited for the lock, reuse the new transport immediately.
+        if self.generation.load(Ordering::Acquire) != failed_generation {
+            return Ok(());
+        }
+        *self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            McpConnectionState::Reconnecting { attempt: 1 };
+        tracing::warn!(server = %self.name, "MCP transport dropped; attempting single-flight reconnect");
+
+        // Close old transport before spawning/connecting the replacement.
+        {
+            let old = self.transport.read().await;
+            old.shutdown().await;
+        }
+
+        match Self::open_and_initialize(config, &self.workspace_root, self.elicitation.clone())
+            .await
+        {
+            Ok((fresh, caps)) => {
+                *self.transport.write().await = fresh;
+                *self
+                    .capabilities
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = caps;
+                self.generation.fetch_add(1, Ordering::Release);
+                *self
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                    McpConnectionState::Connected;
+                Ok(())
+            }
+            Err(error) => {
+                let reason = format!("{error:?}");
+                *self
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                    McpConnectionState::Disconnected {
+                        reason: reason.clone(),
+                    };
+                Err(format!("MCP server {} reconnect failed: {reason}", self.name))
+            }
+        }
+    }
+
     /// Diagnostic tail snapshot (stdio = stderr tail; http = empty)
     pub fn stderr_tail(&self) -> String {
-        self.transport.diagnostic_tail()
+        self.transport
+            .try_read()
+            .map(|t| t.diagnostic_tail())
+            .unwrap_or_default()
     }
 
     /// JSON-RPC ping (liveness probe)
@@ -202,17 +348,155 @@ impl McpClient {
             .await
     }
 
+    /// `resources/list` (paginated via `nextCursor` up to `MAX_LIST_PAGES`).
+    pub async fn list_resources(&self) -> Result<Vec<McpResourceSpec>, String> {
+        let mut resources = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut pages = 0;
+        loop {
+            let params = match &cursor {
+                Some(cursor) => json!({"cursor": cursor}),
+                None => json!({}),
+            };
+            let result = self.request("resources/list", params).await?;
+            for entry in result["resources"].as_array().cloned().unwrap_or_default() {
+                if let Ok(spec) = serde_json::from_value::<McpResourceSpec>(entry) {
+                    resources.push(spec);
+                }
+            }
+            let Some(next) = result["nextCursor"].as_str() else {
+                break;
+            };
+            pages += 1;
+            if pages >= MAX_LIST_PAGES {
+                break;
+            }
+            cursor = Some(next.to_string());
+        }
+        Ok(resources)
+    }
+
+    /// `resources/templates/list` (paginated via `nextCursor` up to `MAX_LIST_PAGES`).
+    pub async fn list_resource_templates(&self) -> Result<Vec<McpResourceTemplate>, String> {
+        let mut templates = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut pages = 0;
+        loop {
+            let params = match &cursor {
+                Some(cursor) => json!({"cursor": cursor}),
+                None => json!({}),
+            };
+            let result = self.request("resources/templates/list", params).await?;
+            for entry in result["resourceTemplates"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+            {
+                if let Ok(tpl) = serde_json::from_value::<McpResourceTemplate>(entry) {
+                    templates.push(tpl);
+                }
+            }
+            let Some(next) = result["nextCursor"].as_str() else {
+                break;
+            };
+            pages += 1;
+            if pages >= MAX_LIST_PAGES {
+                break;
+            }
+            cursor = Some(next.to_string());
+        }
+        Ok(templates)
+    }
+
+    /// `resources/read` for one URI.
+    pub async fn read_resource(&self, uri: &str) -> Result<Vec<McpResourceContent>, String> {
+        let result = self.request("resources/read", json!({"uri": uri})).await?;
+        let mut contents = Vec::new();
+        for entry in result["contents"].as_array().cloned().unwrap_or_default() {
+            if let Ok(content) = serde_json::from_value::<McpResourceContent>(entry) {
+                contents.push(content);
+            }
+        }
+        Ok(contents)
+    }
+
+    /// `prompts/list` (paginated via `nextCursor` up to `MAX_LIST_PAGES`).
+    pub async fn list_prompts(&self) -> Result<Vec<McpPromptSpec>, String> {
+        let mut prompts = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut pages = 0;
+        loop {
+            let params = match &cursor {
+                Some(cursor) => json!({"cursor": cursor}),
+                None => json!({}),
+            };
+            let result = self.request("prompts/list", params).await?;
+            for entry in result["prompts"].as_array().cloned().unwrap_or_default() {
+                if let Ok(spec) = serde_json::from_value::<McpPromptSpec>(entry) {
+                    prompts.push(spec);
+                }
+            }
+            let Some(next) = result["nextCursor"].as_str() else {
+                break;
+            };
+            pages += 1;
+            if pages >= MAX_LIST_PAGES {
+                break;
+            }
+            cursor = Some(next.to_string());
+        }
+        Ok(prompts)
+    }
+
+    /// `prompts/get` for one named prompt and optional arguments map.
+    pub async fn get_prompt(
+        &self,
+        name: &str,
+        arguments: Option<serde_json::Map<String, Value>>,
+    ) -> Result<McpPromptResult, String> {
+        let params = match arguments {
+            Some(args) => json!({"name": name, "arguments": Value::Object(args)}),
+            None => json!({"name": name}),
+        };
+        let result = self.request("prompts/get", params).await?;
+        serde_json::from_value(result)
+            .map_err(|e| format!("MCP server {} returned invalid prompts/get result: {e}", self.name))
+    }
+
     /// Close the connection; the stdio normal Drop path is covered by kill_on_drop set at spawn
     pub async fn shutdown(&self) {
-        self.transport.shutdown().await;
+        self.shut_down.store(true, Ordering::Release);
+        *self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            McpConnectionState::Disconnected {
+                reason: "shut down".to_string(),
+            };
+        self.transport.read().await.shutdown().await;
     }
 
     async fn request(&self, method: &str, params: Value) -> Result<Value, String> {
-        self.transport.request(method, params).await
-    }
-
-    async fn notify(&self, method: &str, params: Value) -> Result<(), CoreError> {
-        self.transport.notify(method, params).await
+        let gen_before = self.generation.load(Ordering::Acquire);
+        let first = {
+            let transport = self.transport.read().await;
+            transport.request(method, params.clone()).await
+        };
+        match first {
+            Ok(value) => Ok(value),
+            Err(error)
+                if is_reconnectable_error(&error)
+                    && !self.shut_down.load(Ordering::Acquire)
+                    && self.config.is_some() =>
+            {
+                if let Err(reconnect_err) = self.reconnect_if_needed(gen_before).await {
+                    return Err(format!("{error}; {reconnect_err}"));
+                }
+                let transport = self.transport.read().await;
+                transport.request(method, params).await
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// tools/list (follows nextCursor pagination, with a page cap to prevent an infinite loop)
@@ -253,7 +537,15 @@ impl McpClient {
     pub(crate) fn for_test(name: &str) -> Arc<Self> {
         Arc::new(Self {
             name: name.to_string(),
-            transport: Transport::Noop,
+            config: None,
+            workspace_root: PathBuf::from("."),
+            elicitation: None,
+            transport: tokio::sync::RwLock::new(Transport::Noop),
+            generation: AtomicU64::new(1),
+            state: Mutex::new(McpConnectionState::Connected),
+            capabilities: Mutex::new(McpServerCapabilities::default()),
+            reconnect_lock: tokio::sync::Mutex::new(()),
+            shut_down: AtomicBool::new(false),
         })
     }
 }
@@ -369,6 +661,7 @@ impl StdioTransport {
         config: &McpStdioConfig,
         timeout: Duration,
         workspace_root: &Path,
+        elicitation: Option<ElicitationHandler>,
     ) -> Result<Self, CoreError> {
         // Windows: CreateProcess only appends .exe automatically; npm-family
         // tools (npx/pnpm/bunx...) are actually .cmd/.bat shims, so resolve the
@@ -423,6 +716,7 @@ impl StdioTransport {
             pending,
             closed,
             transport.writer.clone(),
+            elicitation,
         ));
         tokio::spawn(stderr_loop(name.to_string(), stderr, stderr_tail));
         Ok(transport)
@@ -519,11 +813,14 @@ async fn read_loop(
     pending: PendingMap,
     closed: Arc<AtomicBool>,
     writer: Writer,
+    elicitation: Option<ElicitationHandler>,
 ) {
     let mut lines = LineReader::new(stdout, MAX_LINE_BYTES, &name);
     loop {
         match lines.next_line().await {
-            Ok(Some(line)) => handle_line(&name, &line, &pending, &writer).await,
+            Ok(Some(line)) => {
+                handle_line(&name, &line, &pending, &writer, elicitation.as_ref()).await
+            }
             Ok(None) => break,
             Err(e) => {
                 tracing::warn!("{name} failed to read stdout: {e}");
@@ -535,7 +832,13 @@ async fn read_loop(
     fail_all(&pending);
 }
 
-async fn handle_line(name: &str, line: &str, pending: &PendingMap, writer: &Writer) {
+async fn handle_line(
+    name: &str,
+    line: &str,
+    pending: &PendingMap,
+    writer: &Writer,
+    elicitation: Option<&ElicitationHandler>,
+) {
     let line = line.trim();
     if line.is_empty() {
         return;
@@ -566,12 +869,25 @@ async fn handle_line(name: &str, line: &str, pending: &PendingMap, writer: &Writ
             return;
         }
         if let Some(method) = message.get("method").and_then(Value::as_str) {
-            let reply = json!({
-                "jsonrpc": "2.0",
-                "id": message["id"],
-                "error": {"code": -32601, "message": format!("Pig Code does not support {method}")},
+            let server_name = name.to_string();
+            let req_id = message["id"].clone();
+            let method = method.to_string();
+            let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
+            let writer = writer.clone();
+            let handler = elicitation.cloned();
+            // Spawn so slow interactive elicitation never stalls reading
+            // subsequent JSON-RPC responses on stdout.
+            tokio::spawn(async move {
+                let reply = handle_server_request(
+                    &server_name,
+                    req_id,
+                    &method,
+                    &params,
+                    handler.as_ref(),
+                )
+                .await;
+                let _ = writer.write_message(&reply).await;
             });
-            let _ = writer.write_message(&reply).await;
         }
     }
     // The rest (notifications/*) are ignored
@@ -676,8 +992,8 @@ mod tests {
         }
         let stdin = std::io::stdin();
         let mut stdout = std::io::stdout();
-        for line in stdin.lock().lines() {
-            let Ok(line) = line else { break };
+        let mut stdin_lines = stdin.lock().lines();
+        while let Some(Ok(line)) = stdin_lines.next() {
             let Ok(message) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
@@ -691,7 +1007,7 @@ mod tests {
             let result = match method {
                 "initialize" => json!({
                     "protocolVersion": PROTOCOL_VERSION,
-                    "capabilities": {"tools": {}},
+                    "capabilities": {"tools": {}, "resources": {}, "prompts": {}},
                     "serverInfo": {"name": "fake", "version": "0.1"}
                 }),
                 "ping" => json!({}),
@@ -700,11 +1016,85 @@ mod tests {
                     "description": "Echoes the text parameter",
                     "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}},
                     "annotations": {"readOnlyHint": true, "idempotentHint": true}
+                }, {
+                    "name": "ask_user",
+                    "description": "Triggers elicitation/create before replying",
+                    "inputSchema": {"type": "object"},
+                    "annotations": {"readOnlyHint": true}
+                }, {
+                    "name": "crash_once",
+                    "description": "Exits immediately to test reconnection",
+                    "inputSchema": {"type": "object"},
+                    "annotations": {"readOnlyHint": true}
                 }]}),
-                "tools/call" => json!({"content": [{
-                    "type": "text",
-                    "text": message["params"]["arguments"]["text"].as_str().unwrap_or("")
+                "tools/call" => {
+                    let tool = message["params"]["name"].as_str().unwrap_or("");
+                    if tool == "crash_once" {
+                        std::process::exit(0);
+                    } else if tool == "ask_user" {
+                        let req = json!({
+                            "jsonrpc": "2.0",
+                            "id": 999,
+                            "method": "elicitation/create",
+                            "params": {
+                                "message": "Provide token label",
+                                "requestedSchema": {
+                                    "type": "object",
+                                    "properties": {"label": {"type": "string"}}
+                                }
+                            }
+                        });
+                        writeln!(stdout, "{req}").expect("write elicitation");
+                        stdout.flush().expect("flush");
+                        let reply_line = stdin_lines
+                            .next()
+                            .and_then(Result::ok)
+                            .unwrap_or_default();
+                        let reply_json: Value =
+                            serde_json::from_str(&reply_line).unwrap_or_default();
+                        let label = reply_json["result"]["content"]["label"]
+                            .as_str()
+                            .unwrap_or("none");
+                        let action = reply_json["result"]["action"]
+                            .as_str()
+                            .unwrap_or("none");
+                        json!({"content": [{"type": "text", "text": format!("{action}:{label}")}]})
+                    } else {
+                        json!({"content": [{
+                            "type": "text",
+                            "text": message["params"]["arguments"]["text"].as_str().unwrap_or("")
+                        }]})
+                    }
+                }
+                "resources/list" => json!({"resources": [{
+                    "uri": "file:///README.md",
+                    "name": "README",
+                    "description": "Project readme",
+                    "mimeType": "text/markdown"
                 }]}),
+                "resources/read" => json!({"contents": [{
+                    "uri": message["params"]["uri"].as_str().unwrap_or(""),
+                    "mimeType": "text/markdown",
+                    "text": "# Hello from MCP resource"
+                }]}),
+                "prompts/list" => json!({"prompts": [{
+                    "name": "summarize",
+                    "description": "Summarize input",
+                    "arguments": [{"name": "topic", "required": true}]
+                }]}),
+                "prompts/get" => json!({
+                    "description": "Summarize prompt",
+                    "messages": [{
+                        "role": "user",
+                        "content": {
+                            "type": "text",
+                            "text": format!(
+                                "Summarize {}",
+                                message["params"]["arguments"]["topic"].as_str().unwrap_or("all")
+                            )
+                        }
+                    }]
+                }),
                 _ => {
                     let reply = json!({"jsonrpc": "2.0", "id": id,
                         "error": {"code": -32601, "message": "no such method"}});
@@ -746,7 +1136,7 @@ mod tests {
         let (client, specs) = McpClient::connect(&fake_server_config(), std::path::Path::new("."))
             .await
             .expect("connect");
-        assert_eq!(specs.len(), 1);
+        assert!(specs.len() >= 1);
         assert_eq!(specs[0].name, "echo");
         assert!(specs[0].annotations.is_read_only());
 
@@ -809,10 +1199,15 @@ mod tests {
             ],
             env: HashMap::new(),
         };
-        let transport =
-            StdioTransport::spawn("shutdown-tree", &config, Duration::from_secs(1), &root)
-                .await
-                .expect("spawn MCP transport");
+        let transport = StdioTransport::spawn(
+            "shutdown-tree",
+            &config,
+            Duration::from_secs(1),
+            &root,
+            None,
+        )
+        .await
+        .expect("spawn MCP transport");
         tokio::time::timeout(Duration::from_secs(5), async {
             while !started.exists() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -874,6 +1269,76 @@ mod tests {
         );
         assert_eq!(a.expect("call a")["content"][0]["text"], "first");
         assert_eq!(b.expect("call b")["content"][0]["text"], "second");
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn stdio_resources_prompts_elicitation_and_auto_reconnect() {
+        let handler: ElicitationHandler = Arc::new(|req| {
+            Box::pin(async move {
+                assert_eq!(req.server, "fake");
+                assert_eq!(req.message, "Provide token label");
+                crate::mcp::capabilities::McpElicitationResponse::accept(
+                    json!({"label": "prod-key"}),
+                )
+            })
+        });
+        let (client, _) = McpClient::connect_with_elicitation(
+            &fake_server_config(),
+            std::path::Path::new("."),
+            Some(handler),
+        )
+        .await
+        .expect("connect");
+
+        let caps = client.capabilities();
+        assert!(caps.tools && caps.resources && caps.prompts);
+        assert_eq!(client.connection_state(), McpConnectionState::Connected);
+
+        // Resources list + read
+        let resources = client.list_resources().await.expect("resources/list");
+        assert_eq!(resources.len(), 1);
+        assert_eq!(resources[0].uri, "file:///README.md");
+        let contents = client
+            .read_resource("file:///README.md")
+            .await
+            .expect("resources/read");
+        assert_eq!(
+            contents[0].text.as_deref(),
+            Some("# Hello from MCP resource")
+        );
+
+        // Prompts list + get
+        let prompts = client.list_prompts().await.expect("prompts/list");
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0].name, "summarize");
+        let mut args = serde_json::Map::new();
+        args.insert("topic".into(), json!("architecture"));
+        let prompt = client
+            .get_prompt("summarize", Some(args))
+            .await
+            .expect("prompts/get");
+        assert_eq!(
+            prompt.messages[0].content["text"],
+            json!("Summarize architecture")
+        );
+
+        // Server-initiated elicitation/create roundtrip
+        let elicited = client
+            .call_tool("ask_user", json!({}))
+            .await
+            .expect("ask_user");
+        assert_eq!(elicited["content"][0]["text"], "accept:prod-key");
+
+        // Crash server process -> next request automatically reconnects single-flight and succeeds!
+        let _ = client.call_tool("crash_once", json!({})).await;
+        let recovered = client
+            .call_tool("echo", json!({"text": "after-reconnect"}))
+            .await
+            .expect("auto-reconnect should recover");
+        assert_eq!(recovered["content"][0]["text"], "after-reconnect");
+        assert_eq!(client.connection_state(), McpConnectionState::Connected);
+
         client.shutdown().await;
     }
 }

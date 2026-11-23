@@ -9,15 +9,20 @@
 //!
 //! legacy SSE (2024-11-05 dual-endpoint HTTP+SSE) is not supported -- the config layer already rejects that shape.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use futures_util::StreamExt as _;
 use serde_json::{Value, json};
 
-use crate::mcp::config::McpHttpConfig;
+use crate::mcp::capabilities::{ElicitationHandler, handle_server_request};
+use crate::mcp::config::{McpHttpConfig, McpOAuthConfig};
 use pig_protocol::CoreError;
+use pig_provider::oauth::{
+    FileTokenStore, MemoryTokenStore, OAuthConfig, OAuthTokenManager, OAuthTokenSet,
+    OAuthTokenStore,
+};
 
 /// Protocol version declared in the streamable HTTP handshake (this transport shape was introduced in 2025-03-26)
 const PROTOCOL_VERSION_HTTP: &str = "2025-03-26";
@@ -46,6 +51,8 @@ pub struct HttpTransport {
     url: String,
     /// Pre-built custom request headers (validated in new; an invalid/blocklisted entry rejects the whole server config)
     headers: reqwest::header::HeaderMap,
+    oauth: Option<Arc<OAuthTokenManager>>,
+    elicitation: Option<ElicitationHandler>,
     timeout: Duration,
     next_id: AtomicU64,
     session_id: Mutex<Option<String>>,
@@ -53,8 +60,55 @@ pub struct HttpTransport {
     closed: AtomicBool,
 }
 
+fn build_oauth_manager(cfg: &McpOAuthConfig) -> Result<Arc<OAuthTokenManager>, CoreError> {
+    reqwest::Url::parse(&cfg.token_url).map_err(|e| CoreError::McpInvalidUrl {
+        detail: format!("invalid OAuth token_url: {e}"),
+    })?;
+    let store: Arc<dyn OAuthTokenStore> = if let Some(path) = &cfg.token_file {
+        let file_store = FileTokenStore::new(path);
+        if file_store.load().ok().flatten().is_none()
+            && (cfg.access_token.is_some() || cfg.refresh_token.is_some())
+        {
+            let _ = file_store.save(&OAuthTokenSet {
+                access_token: cfg.access_token.clone().unwrap_or_default(),
+                refresh_token: cfg.refresh_token.clone(),
+                token_type: "Bearer".to_string(),
+                expires_at: cfg.expires_at,
+                scope: None,
+            });
+        }
+        Arc::new(file_store)
+    } else {
+        let initial = (cfg.access_token.is_some() || cfg.refresh_token.is_some()).then(|| {
+            OAuthTokenSet {
+                access_token: cfg.access_token.clone().unwrap_or_default(),
+                refresh_token: cfg.refresh_token.clone(),
+                token_type: "Bearer".to_string(),
+                expires_at: cfg.expires_at,
+                scope: None,
+            }
+        });
+        Arc::new(MemoryTokenStore::new(initial))
+    };
+    let oauth_config = OAuthConfig {
+        client_id: cfg.client_id.clone(),
+        client_secret: cfg.client_secret.clone(),
+        authorization_url: cfg.authorization_url.clone(),
+        token_url: cfg.token_url.clone(),
+        redirect_uri: cfg.redirect_uri.clone(),
+        scopes: cfg.scopes.clone(),
+        resource: cfg.resource.clone(),
+    };
+    Ok(Arc::new(OAuthTokenManager::new(oauth_config, store)))
+}
+
 impl HttpTransport {
-    pub fn new(name: &str, config: &McpHttpConfig, timeout: Duration) -> Result<Self, CoreError> {
+    pub fn new(
+        name: &str,
+        config: &McpHttpConfig,
+        timeout: Duration,
+        elicitation: Option<ElicitationHandler>,
+    ) -> Result<Self, CoreError> {
         // The config layer only validates the URL scheme; parse it fully here (a failure skips this server)
         reqwest::Url::parse(&config.url).map_err(|e| CoreError::McpInvalidUrl {
             detail: e.to_string(),
@@ -71,6 +125,10 @@ impl HttpTransport {
                 .map_err(|_| CoreError::McpHeaderValueInvalid { key: key.clone() })?;
             headers.insert(name, value);
         }
+        let oauth = match &config.oauth {
+            Some(cfg) => Some(build_oauth_manager(cfg)?),
+            None => None,
+        };
         Ok(Self {
             name: name.to_string(),
             // Same policy as the provider: only the connect time is limited; the overall timeout is governed by each call's tokio timeout
@@ -80,6 +138,8 @@ impl HttpTransport {
                 .unwrap_or_default(),
             url: config.url.clone(),
             headers,
+            oauth,
+            elicitation,
             timeout,
             next_id: AtomicU64::new(1),
             session_id: Mutex::new(None),
@@ -88,9 +148,15 @@ impl HttpTransport {
         })
     }
 
-    /// Build request headers: custom -> protocol-forced (content-type/accept, preventing custom overrides) -> negotiated state
-    fn build_headers(&self) -> reqwest::header::HeaderMap {
+    /// Build request headers: custom -> optional OAuth bearer -> protocol-forced (content-type/accept, preventing custom overrides) -> negotiated state
+    fn build_headers(&self, bearer_token: Option<&str>) -> reqwest::header::HeaderMap {
         let mut headers = self.headers.clone();
+        if let Some(token) = bearer_token
+            && !headers.contains_key(reqwest::header::AUTHORIZATION)
+            && let Ok(value) = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
+        {
+            headers.insert(reqwest::header::AUTHORIZATION, value);
+        }
         headers.insert(
             reqwest::header::CONTENT_TYPE,
             reqwest::header::HeaderValue::from_static("application/json"),
@@ -112,6 +178,16 @@ impl HttpTransport {
         headers
     }
 
+    async fn resolve_bearer_token(&self) -> Result<Option<String>, String> {
+        if self.headers.contains_key(reqwest::header::AUTHORIZATION) {
+            return Ok(None);
+        }
+        match &self.oauth {
+            Some(oauth) => oauth.valid_access_token().await.map(Some),
+            None => Ok(None),
+        }
+    }
+
     /// Record the session id returned by a response (negotiated from the initialize response; later responses carrying one again roll it forward)
     fn capture_session(&self, response: &reqwest::Response) {
         if let Some(value) = response
@@ -123,37 +199,50 @@ impl HttpTransport {
         }
     }
 
-    /// Send the POST and check the status code; returns the response on success (body unread)
+    /// Send the POST and check the status code; when OAuth is configured, a 401
+    /// triggers one transactional single-flight token refresh and retry.
     async fn post(&self, message: &Value) -> Result<reqwest::Response, String> {
         let body =
             serde_json::to_vec(message).map_err(|e| format!("Failed to serialize message: {e}"))?;
-        let response = self
-            .client
-            .post(&self.url)
-            .headers(self.build_headers())
-            .body(body)
-            .send()
-            .await
-            .map_err(|e| format!("MCP server {} request failed: {e}", self.name))?;
-        self.capture_session(&response);
-        let status = response.status();
-        if !status.is_success() {
-            let preview = read_body_capped(response, ERROR_BODY_PREVIEW)
+        let mut token = self.resolve_bearer_token().await?;
+        let mut refreshed_after_401 = false;
+        loop {
+            let response = self
+                .client
+                .post(&self.url)
+                .headers(self.build_headers(token.as_deref()))
+                .body(body.clone())
+                .send()
                 .await
-                .map(|b| String::from_utf8_lossy(&b).into_owned())
-                .unwrap_or_default();
-            let hint = if status.as_u16() == 404 {
-                " (the session may have expired or the endpoint path is wrong)"
-            } else {
-                ""
-            };
-            return Err(format!(
-                "MCP server {} HTTP {status}{hint}: {}",
-                self.name,
-                preview.trim()
-            ));
+                .map_err(|e| format!("MCP server {} request failed: {e}", self.name))?;
+            self.capture_session(&response);
+            let status = response.status();
+            if status == reqwest::StatusCode::UNAUTHORIZED
+                && !refreshed_after_401
+                && let (Some(oauth), Some(failed_token)) = (&self.oauth, token.as_deref())
+            {
+                refreshed_after_401 = true;
+                token = Some(oauth.force_refresh(failed_token).await?);
+                continue;
+            }
+            if !status.is_success() {
+                let preview = read_body_capped(response, ERROR_BODY_PREVIEW)
+                    .await
+                    .map(|b| String::from_utf8_lossy(&b).into_owned())
+                    .unwrap_or_default();
+                let hint = if status.as_u16() == 404 {
+                    " (the session may have expired or the endpoint path is wrong)"
+                } else {
+                    ""
+                };
+                return Err(format!(
+                    "MCP server {} HTTP {status}{hint}: {}",
+                    self.name,
+                    preview.trim()
+                ));
+            }
+            return Ok(response);
         }
-        Ok(response)
     }
 
     /// Extract the JSON-RPC result with the given id from the response: dispatch to JSON / SSE by Content-Type
@@ -256,18 +345,39 @@ impl HttpTransport {
                 rpc_result(&message).expect("result/error already decided"),
             ));
         }
-        if id.is_some() && message.get("method").is_some() {
-            // server-to-client request (roots/elicitation/sampling etc.; unsupported but we cannot just wait):
-            // per the spec, open a separate POST to reply with a JSON-RPC response (the peer replies 202)
-            let reply = json!({
-                "jsonrpc": "2.0",
-                "id": message["id"],
-                "error": {"code": -32601, "message": "Pig Code does not support server-initiated requests"},
-            });
+        if id.is_some()
+            && let Some(method) = message.get("method").and_then(Value::as_str)
+        {
+            // Server-initiated request (e.g. `elicitation/create`): per the MCP
+            // streamable HTTP spec, handle asynchronously and POST the JSON-RPC
+            // response back to the server endpoint.
+            let server_name = self.name.clone();
+            let req_id = message["id"].clone();
+            let method = method.to_string();
+            let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
+            let elicitation = self.elicitation.clone();
             let client = self.client.clone();
             let url = self.url.clone();
-            let headers = self.build_headers();
+            let oauth = self.oauth.clone();
+            let static_headers = self.build_headers(None);
+            let has_static_auth = self.headers.contains_key(reqwest::header::AUTHORIZATION);
             tokio::spawn(async move {
+                let reply = handle_server_request(
+                    &server_name,
+                    req_id,
+                    &method,
+                    &params,
+                    elicitation.as_ref(),
+                )
+                .await;
+                let mut headers = static_headers;
+                if !has_static_auth
+                    && let Some(oauth) = &oauth
+                    && let Ok(token) = oauth.valid_access_token().await
+                    && let Ok(val) = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
+                {
+                    headers.insert(reqwest::header::AUTHORIZATION, val);
+                }
                 let _ = client
                     .post(&url)
                     .headers(headers)
@@ -333,11 +443,12 @@ impl HttpTransport {
         if self.session_id.lock().expect("session lock").is_none() {
             return;
         }
+        let token = self.resolve_bearer_token().await.ok().flatten();
         let _ = tokio::time::timeout(
             Duration::from_secs(5),
             self.client
                 .delete(&self.url)
-                .headers(self.build_headers())
+                .headers(self.build_headers(token.as_deref()))
                 .send(),
         )
         .await;
@@ -709,6 +820,7 @@ mod tests {
             transport: McpTransport::Http(crate::mcp::config::McpHttpConfig {
                 url,
                 headers: HashMap::from([("Authorization".to_string(), "Bearer t".to_string())]),
+                oauth: None,
             }),
             timeout: Duration::from_secs(10),
             disabled: false,
@@ -775,17 +887,162 @@ mod tests {
         let mut config = crate::mcp::config::McpHttpConfig {
             url: "http://127.0.0.1/".to_string(),
             headers: HashMap::from([("content-length".to_string(), "5".to_string())]),
+            oauth: None,
         };
         assert!(matches!(
-            HttpTransport::new("t", &config, Duration::from_secs(1)).err(),
+            HttpTransport::new("t", &config, Duration::from_secs(1), None).err(),
             Some(CoreError::McpHeaderBlocked { key }) if key == "content-length"
         ));
         config.headers = HashMap::from([("bad name".to_string(), "v".to_string())]);
         assert!(matches!(
-            HttpTransport::new("t", &config, Duration::from_secs(1)).err(),
+            HttpTransport::new("t", &config, Duration::from_secs(1), None).err(),
             Some(CoreError::McpHeaderNameInvalid { .. })
         ));
         config.headers = HashMap::from([("X-Ok".to_string(), "v".to_string())]);
-        assert!(HttpTransport::new("t", &config, Duration::from_secs(1)).is_ok());
+        assert!(HttpTransport::new("t", &config, Duration::from_secs(1), None).is_ok());
+    }
+
+    #[tokio::test]
+    async fn http_oauth_refreshes_on_401_and_retries_transparently() {
+        let token_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind token");
+        let token_addr = token_listener.local_addr().expect("token addr");
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = token_listener.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let _ = socket.read(&mut buf).await;
+                    let body = json!({
+                        "access_token": "fresh-oauth-token",
+                        "refresh_token": "rt-2",
+                        "token_type": "Bearer",
+                        "expires_in": 3600
+                    })
+                    .to_string();
+                    let _ = write_response(
+                        &mut socket,
+                        200,
+                        "OK",
+                        "application/json",
+                        body.as_bytes(),
+                        &[],
+                    )
+                    .await;
+                });
+            }
+        });
+
+        let mcp_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mcp");
+        let mcp_addr = mcp_listener.local_addr().expect("mcp addr");
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = mcp_listener.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    let header_end = loop {
+                        if let Some(pos) = find_subslice(&buf, b"\r\n\r\n") {
+                            break pos;
+                        }
+                        let Ok(n) = socket.read(&mut chunk).await else { return };
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                    };
+                    let head = String::from_utf8_lossy(&buf[..header_end]).into_owned();
+                    let headers: HashMap<String, String> = head
+                        .split("\r\n")
+                        .skip(1)
+                        .filter_map(|line| line.split_once(':'))
+                        .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_string()))
+                        .collect();
+                    let content_length: usize = headers
+                        .get("content-length")
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0);
+                    let mut body = buf[header_end + 4..].to_vec();
+                    while body.len() < content_length {
+                        let Ok(n) = socket.read(&mut chunk).await else { return };
+                        if n == 0 {
+                            break;
+                        }
+                        body.extend_from_slice(&chunk[..n]);
+                    }
+                    if headers.get("authorization").map(String::as_str)
+                        != Some("Bearer fresh-oauth-token")
+                    {
+                        let _ = write_response(
+                            &mut socket,
+                            401,
+                            "Unauthorized",
+                            "application/json",
+                            br#"{"error":"token expired"}"#,
+                            &[],
+                        )
+                        .await;
+                        return;
+                    }
+                    let msg: Value = serde_json::from_slice(&body[..content_length]).unwrap();
+                    let method = msg["method"].as_str().unwrap_or("");
+                    let id = msg["id"].clone();
+                    if id.is_null() {
+                        let _ = write_response(&mut socket, 202, "Accepted", "text/plain", b"", &[]).await;
+                        return;
+                    }
+                    let result = match method {
+                        "initialize" => json!({
+                            "protocolVersion": PROTOCOL_VERSION_HTTP,
+                            "capabilities": {"tools": {}},
+                            "serverInfo": {"name": "oauth-http", "version": "0.1"}
+                        }),
+                        "tools/list" => json!({"tools": []}),
+                        "ping" => json!({}),
+                        _ => json!({}),
+                    };
+                    let reply = json!({"jsonrpc": "2.0", "id": id, "result": result});
+                    let _ = write_response(
+                        &mut socket,
+                        200,
+                        "OK",
+                        "application/json",
+                        reply.to_string().as_bytes(),
+                        &[],
+                    )
+                    .await;
+                });
+            }
+        });
+
+        let config = McpServerConfig {
+            name: "oauth-http".into(),
+            transport: McpTransport::Http(crate::mcp::config::McpHttpConfig {
+                url: format!("http://{mcp_addr}/mcp"),
+                headers: HashMap::new(),
+                oauth: Some(McpOAuthConfig {
+                    client_id: "pig".into(),
+                    client_secret: None,
+                    authorization_url: None,
+                    token_url: format!("http://{token_addr}/token"),
+                    redirect_uri: None,
+                    scopes: vec![],
+                    resource: None,
+                    access_token: Some("expired-on-server".into()),
+                    refresh_token: Some("rt-1".into()),
+                    expires_at: None, // Not expired locally, so server returns 401 -> forces reactive refresh!
+                    token_file: None,
+                }),
+            }),
+            timeout: Duration::from_secs(10),
+            disabled: false,
+        };
+        let (client, _) = McpClient::connect(&config, std::path::Path::new("."))
+            .await
+            .expect("connect should transparently refresh on 401");
+        client.ping().await.expect("ping after refresh");
     }
 }

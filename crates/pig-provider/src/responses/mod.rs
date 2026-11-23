@@ -24,6 +24,7 @@ mod live;
 mod request;
 mod search;
 mod stream;
+mod websocket;
 
 #[cfg(test)]
 mod replay_tests;
@@ -33,3 +34,5 @@ mod tests;
 pub(crate) use request::build_responses_body;
 pub use request::responses_web_search_tool;
 pub(crate) use stream::{stream_responses, usage_fields};
+pub use websocket::{RESPONSES_WS_BETA_HEADER, ResponsesWsSession, responses_ws_url};
+pub(crate) use websocket::stream_responses_ws;

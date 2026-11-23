@@ -43,11 +43,41 @@ pub struct McpStdioConfig {
     pub env: HashMap<String, String>,
 }
 
+/// OAuth 2.0 + PKCE configuration for remote MCP HTTP servers.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpOAuthConfig {
+    #[serde(alias = "client_id")]
+    pub client_id: String,
+    #[serde(default, alias = "client_secret")]
+    pub client_secret: Option<String>,
+    #[serde(default, alias = "authorization_url")]
+    pub authorization_url: Option<String>,
+    #[serde(alias = "token_url")]
+    pub token_url: String,
+    #[serde(default, alias = "redirect_uri")]
+    pub redirect_uri: Option<String>,
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    #[serde(default)]
+    pub resource: Option<String>,
+    #[serde(default, alias = "access_token")]
+    pub access_token: Option<String>,
+    #[serde(default, alias = "refresh_token")]
+    pub refresh_token: Option<String>,
+    #[serde(default, alias = "expires_at")]
+    pub expires_at: Option<u64>,
+    #[serde(default, alias = "token_file")]
+    pub token_file: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpHttpConfig {
     pub url: String,
-    /// Custom request headers (carried on every POST/DELETE; auth tokens go here, OAuth is a future item)
+    /// Custom request headers (carried on every POST/DELETE)
     pub headers: HashMap<String, String>,
+    /// Optional OAuth 2.0 / PKCE configuration for automatic bearer injection & 401 refresh
+    pub oauth: Option<McpOAuthConfig>,
 }
 
 #[derive(serde::Deserialize)]
@@ -62,6 +92,8 @@ struct RawServer {
     env: HashMap<String, String>,
     #[serde(default)]
     headers: HashMap<String, String>,
+    #[serde(default)]
+    oauth: Option<serde_json::Value>,
     #[serde(rename = "timeoutMs")]
     timeout_ms: Option<u64>,
     #[serde(default)]
@@ -343,9 +375,15 @@ fn http_transport(raw: RawServer) -> Result<McpTransport, McpEntryError> {
     if !url.starts_with("http://") && !url.starts_with("https://") {
         return Err(McpEntryError::InvalidUrl(url.to_string()));
     }
+    let oauth = raw.oauth.and_then(|value| {
+        serde_json::from_value::<McpOAuthConfig>(value)
+            .ok()
+            .filter(|cfg| !cfg.client_id.trim().is_empty() && !cfg.token_url.trim().is_empty())
+    });
     Ok(McpTransport::Http(McpHttpConfig {
         url: url.to_string(),
         headers: raw.headers,
+        oauth,
     }))
 }
 

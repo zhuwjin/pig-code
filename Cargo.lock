@@ -4733,6 +4733,7 @@ dependencies = [
 name = "pig-provider"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "encoding_rs",
  "futures-util",
  "libc",
@@ -4742,6 +4743,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tokio",
+ "tokio-tungstenite",
  "tokio-util",
  "tracing",
  "windows 0.57.0",

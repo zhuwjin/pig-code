@@ -2,13 +2,31 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use pig_protocol::ApiFormat;
-
 use crate::chat::{ChatMsg, ResolvedModel};
+use crate::core_error_en;
 use crate::events::{CallControl, ProviderEvent, RetryNotice, RetryReason};
-use crate::{anthropic, core_error_en, openai, responses};
+use crate::registry::{ProviderRegistry, no_driver_error};
 
 pub async fn stream_chat(
+    config: ResolvedModel,
+    messages: Vec<ChatMsg>,
+    tools: Vec<serde_json::Value>,
+    tx: tokio::sync::mpsc::Sender<ProviderEvent>,
+    control: CallControl,
+) {
+    stream_chat_with_registry(
+        ProviderRegistry::global(),
+        config,
+        messages,
+        tools,
+        tx,
+        control,
+    )
+    .await
+}
+
+pub async fn stream_chat_with_registry(
+    registry: &ProviderRegistry,
     config: ResolvedModel,
     messages: Vec<ChatMsg>,
     tools: Vec<serde_json::Value>,
@@ -61,31 +79,13 @@ pub async fn stream_chat(
             }
             (tx, held_finish, held_usage)
         });
-        let result = match config.api_format {
-            ApiFormat::OpenAiChat => {
-                openai::stream_openai(&config, messages.clone(), tools.clone(), &itx, &control)
+        let result = match registry.resolve(&config) {
+            Some(driver) => {
+                driver
+                    .stream(&config, messages.clone(), tools.clone(), &itx, &control)
                     .await
             }
-            ApiFormat::AnthropicMessages => {
-                anthropic::stream_anthropic(
-                    &config,
-                    messages.clone(),
-                    tools.clone(),
-                    &itx,
-                    &control,
-                )
-                .await
-            }
-            ApiFormat::OpenAiResponses => {
-                responses::stream_responses(
-                    &config,
-                    messages.clone(),
-                    tools.clone(),
-                    &itx,
-                    &control,
-                )
-                .await
-            }
+            None => Err(no_driver_error(&config)),
         };
         drop(itx);
         let Ok((back, held_finish, held_usage)) = forward.await else {

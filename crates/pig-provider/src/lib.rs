@@ -15,6 +15,7 @@
 
 pub mod api_log;
 pub mod mock;
+pub mod oauth;
 
 #[cfg(test)]
 mod contract;
@@ -28,6 +29,8 @@ mod events;
 mod identity;
 mod metadata;
 mod openai;
+mod registry;
+mod resilience;
 mod responses;
 mod retry;
 mod sidecar;
@@ -49,14 +52,23 @@ pub use endpoint::{
     native_search_replay_supported, native_web_search_enabled, prompt_cache_key_supported,
     session_prompt_cache_key, subagent_prompt_cache_key,
 };
-pub use events::{CallControl, ProviderEvent, RetryNotice, RetryReason};
+pub use events::{CallControl, CallError, ProviderEvent, RetryNotice, RetryReason};
 pub use metadata::{ProviderResponseMetadata, ProviderUsage};
-pub use responses::responses_web_search_tool;
+pub use registry::{
+    AnthropicMessagesDriver, OpenAiChatDriver, OpenAiResponsesHttpDriver, OpenAiResponsesWsDriver,
+    ProviderDriver, ProviderRegistry,
+};
+pub use resilience::{
+    CircuitBreakerConfig, CircuitState, EndpointHealthRegistry, stream_chat_with_fallback,
+};
+pub use responses::{
+    RESPONSES_WS_BETA_HEADER, ResponsesWsSession, responses_web_search_tool, responses_ws_url,
+};
 pub use sidecar::{
     CompleteCall, CompleteCallError, StructuredOutput, complete_messages, complete_text,
     test_provider,
 };
-pub use stream::stream_chat;
+pub use stream::{stream_chat, stream_chat_with_registry};
 pub use tool_settings::ToolCallSettings;
 
 /// CoreError -> single-line English text (for the model channel: subagent

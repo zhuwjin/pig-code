@@ -154,7 +154,7 @@ impl CallControl {
 /// stream_chat (the same boundary as the empty-completion retry). Errors after
 /// send_with_retry's pre-response budget are never retryable here.
 #[derive(Debug)]
-pub(crate) struct CallError {
+pub struct CallError {
     pub error: CoreError,
     pub retryable: bool,
 }

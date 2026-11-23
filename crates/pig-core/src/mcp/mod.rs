@@ -6,16 +6,22 @@
 //! legacy SSE (2024-11-05 dual-endpoint) is not yet supported; the config layer logs and skips `"type": "sse"` entries.
 //! Future items: OAuth, resources/prompts, roots/elicitation, legacy SSE.
 
+mod capabilities;
 mod client;
 mod config;
 mod http;
 mod naming;
 mod tool;
 
+pub use capabilities::{
+    ElicitationHandler, McpConnectionState, McpElicitationAction, McpElicitationRequest,
+    McpElicitationResponse, McpPromptArgument, McpPromptMessage, McpPromptResult, McpPromptSpec,
+    McpResourceContent, McpResourceSpec, McpResourceTemplate, McpServerCapabilities,
+};
 pub use client::{McpClient, McpToolSpec};
 pub use config::{
-    McpEntryError, McpEntryShape, McpHttpConfig, McpServerConfig, McpStdioConfig, McpTransport,
-    validate_server,
+    McpEntryError, McpEntryShape, McpHttpConfig, McpOAuthConfig, McpServerConfig, McpStdioConfig,
+    McpTransport, validate_server,
 };
 pub use tool::{McpTool, McpToolAnnotations};
 
@@ -198,6 +204,80 @@ impl McpManager {
             }),
         )
         .await
+    }
+
+    /// Snapshot of every connected server's current reconnection state.
+    pub fn connection_states(&self) -> Vec<(String, McpConnectionState)> {
+        self.servers
+            .iter()
+            .map(|server| {
+                (
+                    server.client.name().to_string(),
+                    server.client.connection_state(),
+                )
+            })
+            .collect()
+    }
+
+    /// List resources advertised across all connected servers supporting `resources`.
+    pub async fn list_resources(&self) -> Vec<(String, Result<Vec<McpResourceSpec>, String>)> {
+        futures_util::future::join_all(
+            self.servers
+                .iter()
+                .filter(|server| server.client.capabilities().resources)
+                .map(|server| async {
+                    (
+                        server.client.name().to_string(),
+                        server.client.list_resources().await,
+                    )
+                }),
+        )
+        .await
+    }
+
+    /// Read one resource URI from a specific named MCP server.
+    pub async fn read_resource(
+        &self,
+        server_name: &str,
+        uri: &str,
+    ) -> Result<Vec<McpResourceContent>, String> {
+        let server = self
+            .servers
+            .iter()
+            .find(|s| s.client.name() == server_name)
+            .ok_or_else(|| format!("MCP server not found: {server_name}"))?;
+        server.client.read_resource(uri).await
+    }
+
+    /// List prompts advertised across all connected servers supporting `prompts`.
+    pub async fn list_prompts(&self) -> Vec<(String, Result<Vec<McpPromptSpec>, String>)> {
+        futures_util::future::join_all(
+            self.servers
+                .iter()
+                .filter(|server| server.client.capabilities().prompts)
+                .map(|server| async {
+                    (
+                        server.client.name().to_string(),
+                        server.client.list_prompts().await,
+                    )
+                }),
+        )
+        .await
+    }
+
+    /// Render/fetch one prompt from a specific named MCP server.
+    pub async fn get_prompt(
+        &self,
+        server_name: &str,
+        prompt_name: &str,
+        arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<McpPromptResult, String> {
+        let server = self
+            .servers
+            .iter()
+            .find(|s| s.client.name() == server_name)
+            .ok_or_else(|| format!("MCP server not found: {server_name}"))?;
+        server.client.get_prompt(prompt_name, arguments).await
     }
 
     /// Shut down all connections (stdio kills and reaps the subprocess; http sends a best-effort DELETE to terminate the session)
