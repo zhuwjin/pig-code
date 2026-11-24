@@ -924,6 +924,10 @@ pub(crate) async fn stream_anthropic(
                         _ => {}
                     }
                 }
+                "content_block_stop" => {
+                    let index = json["index"].as_u64().unwrap_or(0) as usize;
+                    tool_stream.end_input(index, tx).await;
+                }
                 "message_delta" => {
                     usage.merge(&json["usage"]);
                     if let Some(raw_reason) = json["delta"]["stop_reason"].as_str() {

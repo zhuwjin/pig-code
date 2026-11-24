@@ -1077,16 +1077,22 @@ async fn edit_replace_all_disables_fuzzy_tiers() {
     assert!(!out.contains("tolerant match"), "{out}");
 }
 
-// ---------- 5.1 read-file-state pre-write freshness ----------
+// ---------- 5.1 No read-before-write gate ----------
+//
+// An edit is located by matching the file's current content, which is the
+// protection Codex, Kimi Code and DeepSeek Harness's shipped default all rely
+// on; the tool descriptions and the system prompt ask the model to read first.
+// These tests pin that nothing refuses a write for the lack of a prior Read.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn write_edit_requires_prior_read() {
-    let dir = temp_dir("fresh-gate");
+async fn write_and_edit_do_not_require_a_prior_read() {
+    let dir = temp_dir("no-read-gate");
     std::fs::write(dir.join("exist.txt"), "old\n").unwrap();
     let mut tracker = ChangeTracker::default();
     let state = SessionToolState::for_test();
 
-    // Writing before reading: both Edit / Write are rejected
+    // A file this session never read: Edit locates its change by the match,
+    // Write replaces the file whole.
     let (out, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
@@ -1095,20 +1101,20 @@ async fn write_edit_requires_prior_read() {
         serde_json::json!({"path": "exist.txt", "old_string": "old", "new_string": "new"}),
     )
     .await;
-    assert!(is_error, "{out}");
-    assert!(out.contains("has not been read"), "{out}");
+    assert!(!is_error, "{out}");
+    assert_eq!(std::fs::read_to_string(dir.join("exist.txt")).unwrap(), "new\n");
     let (out, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,
         "Write",
-        serde_json::json!({"path": "exist.txt", "content": "new\n"}),
+        serde_json::json!({"path": "exist.txt", "content": "newer\n"}),
     )
     .await;
-    assert!(is_error, "{out}");
-    assert!(out.contains("has not been read"), "{out}");
+    assert!(!is_error, "{out}");
+    assert_eq!(std::fs::read_to_string(dir.join("exist.txt")).unwrap(), "newer\n");
 
-    // A new (nonexistent) file needs no Read
+    // A file the model just wrote is edited right after, as before.
     let (_, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
@@ -1117,10 +1123,8 @@ async fn write_edit_requires_prior_read() {
         serde_json::json!({"path": "new.txt", "content": "a\nb\n"}),
     )
     .await;
-    assert!(!is_error, "{out}");
-
-    // Editing a file right after writing it: allowed (the write refreshed the state)
-    let (_, is_error, _, _, _) = run_tool_in(
+    assert!(!is_error);
+    let (out, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,
@@ -1129,31 +1133,38 @@ async fn write_edit_requires_prior_read() {
     )
     .await;
     assert!(!is_error, "{out}");
+    assert_eq!(std::fs::read_to_string(dir.join("new.txt")).unwrap(), "a\nB\n");
 
-    // Write is allowed after Read
+    // Reading first changes nothing about the outcome.
     let (_, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,
         "Read",
-        serde_json::json!({"path": "exist.txt"}),
+        serde_json::json!({"path": "new.txt"}),
     )
     .await;
     assert!(!is_error);
-    let (_, is_error, _, _, _) = run_tool_in(
+    let (out, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,
         "Write",
-        serde_json::json!({"path": "exist.txt", "content": "new\n"}),
+        serde_json::json!({"path": "new.txt", "content": "read first\n"}),
     )
     .await;
     assert!(!is_error, "{out}");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("new.txt")).unwrap(),
+        "read first\n"
+    );
 }
 
+/// What protects an externally changed file is the match itself: text that is
+/// no longer there cannot be edited, and text that is still there can.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn edit_blocked_after_external_modification() {
-    let dir = temp_dir("fresh-stale");
+async fn edit_after_an_external_modification_follows_the_current_content() {
+    let dir = temp_dir("no-read-gate-external");
     std::fs::write(dir.join("f.txt"), "v1\n").unwrap();
     let mut tracker = ChangeTracker::default();
     let state = SessionToolState::for_test();
@@ -1168,15 +1179,10 @@ async fn edit_blocked_after_external_modification() {
     .await;
     assert!(!is_error);
 
-    // An external process modified the file → Edit rejected
+    // An external process replaced the content the model saw.
     std::fs::write(dir.join("f.txt"), "v2\n").unwrap();
-    // Keep the freshness check independent of filesystem timestamp granularity.
-    std::fs::File::options()
-        .write(true)
-        .open(dir.join("f.txt"))
-        .unwrap()
-        .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(1))
-        .unwrap();
+    // The text the model would replace is gone: the match refuses, and the
+    // file is left as the external change left it.
     let (out, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
@@ -1186,19 +1192,11 @@ async fn edit_blocked_after_external_modification() {
     )
     .await;
     assert!(is_error, "{out}");
-    assert!(out.contains("modified externally"), "{out}");
+    assert!(out.contains("old_string not found in f.txt"), "{out}");
+    assert_eq!(std::fs::read_to_string(dir.join("f.txt")).unwrap(), "v2\n");
 
-    // Allowed after a fresh Read
-    let (_, is_error, _, _, _) = run_tool_in(
-        &dir,
-        &mut tracker,
-        &state,
-        "Read",
-        serde_json::json!({"path": "f.txt"}),
-    )
-    .await;
-    assert!(!is_error);
-    let (_, is_error, _, _, _) = run_tool_in(
+    // Text that is still there is edited without a re-read.
+    let (out, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,
@@ -1211,8 +1209,8 @@ async fn edit_blocked_after_external_modification() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mtime_touch_with_same_content_allowed() {
-    let dir = temp_dir("fresh-mtime");
+async fn mtime_touch_with_same_content_never_affects_an_edit() {
+    let dir = temp_dir("no-read-gate-mtime");
     std::fs::write(dir.join("f.txt"), "same content\n").unwrap();
     let mut tracker = ChangeTracker::default();
     let state = SessionToolState::for_test();
@@ -1227,10 +1225,10 @@ async fn mtime_touch_with_same_content_allowed() {
     .await;
     assert!(!is_error);
 
-    // Rewriting the same content (mtime touched, hash unchanged) → allowed and the state is refreshed in passing
+    // Rewriting the same content only moves the timestamp: no behavior keys on it.
     std::thread::sleep(std::time::Duration::from_millis(10));
     std::fs::write(dir.join("f.txt"), "same content\n").unwrap();
-    let (_, is_error, _, _, _) = run_tool_in(
+    let (out, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,
@@ -1238,13 +1236,19 @@ async fn mtime_touch_with_same_content_allowed() {
         serde_json::json!({"path": "f.txt", "old_string": "same", "new_string": "still same"}),
     )
     .await;
-    assert!(!is_error, "same hash should be allowed");
+    assert!(!is_error, "{out}");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("f.txt")).unwrap(),
+        "still same content\n"
+    );
 }
 
+/// A Read the budget truncated showed part of the file. Whether that is enough
+/// to edit is the model's call, not a reason to refuse the edit.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn partial_read_blocks_write_paged_read_clears() {
-    let dir = temp_dir("fresh-partial");
-    // Over 100k chars: a Read without arguments is guaranteed to be truncated by the budget
+async fn a_truncated_read_does_not_block_edits() {
+    let dir = temp_dir("no-read-gate-truncated");
+    // Over 100k chars: a Read without arguments is truncated by the budget
     let content: String = (1..=4000)
         .map(|i| format!("line {i:04} {}\n", "y".repeat(30)))
         .collect();
@@ -1263,7 +1267,6 @@ async fn partial_read_blocks_write_paged_read_clears() {
     assert!(!is_error, "{out}");
     assert!(out.contains("[Truncated"), "{out}");
 
-    // Incomplete view: both Edit/Write are rejected
     let (out, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
@@ -1272,23 +1275,8 @@ async fn partial_read_blocks_write_paged_read_clears() {
         serde_json::json!({"path": "big.txt", "old_string": "line 0001", "new_string": "x"}),
     )
     .await;
-    assert!(is_error, "{out}");
-    assert!(out.contains("incomplete view"), "{out}");
-
-    // An explicitly paged Read does not count as partial: the registration
-    // overrides to the full-view rule (freshness/hash still follow the last
-    // record), and Write is allowed — same rule as ZCode: pagination
-    // parameters mean the model knows it only viewed a window
-    let (_, is_error, _, _, _) = run_tool_in(
-        &dir,
-        &mut tracker,
-        &state,
-        "Read",
-        serde_json::json!({"path": "big.txt", "offset": 1, "limit": 50}),
-    )
-    .await;
-    assert!(!is_error);
-    let (_, is_error, _, _, _) = run_tool_in(
+    assert!(!is_error, "{out}");
+    let (out, is_error, _, _, _) = run_tool_in(
         &dir,
         &mut tracker,
         &state,
@@ -1297,6 +1285,7 @@ async fn partial_read_blocks_write_paged_read_clears() {
     )
     .await;
     assert!(!is_error, "{out}");
+    assert_eq!(std::fs::read_to_string(dir.join("big.txt")).unwrap(), "rewritten\n");
 }
 
 // ---------- Approval preview goes through the text pipeline (approval_detail) ----------

@@ -133,9 +133,9 @@ pub(crate) fn read_through_rejection(ctx: &ToolContext<'_>, full: &Path) -> Opti
 /// The lexical entry a Write/Edit acts on for an already-read spelling: the
 /// canonical parent plus the model-spelled final component. A final symlink
 /// stays a link (the write is a rename over that entry), while a symlinked
-/// parent resolves to the real directory. Used to key the freshness state of a
-/// read that opened the canonical target, so reading a symlinked file and then
-/// editing that same spelling keeps working.
+/// parent resolves to the real directory. Used to key what a Read showed when
+/// it opened the canonical target, so a later Read of that same spelling can
+/// answer "file unchanged".
 pub(crate) fn write_spelling(
     fs: &dyn crate::task::ExecutorFileSystem,
     cwd: &Path,

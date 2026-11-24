@@ -92,6 +92,10 @@ impl Session {
         if self.is_subagent() {
             return self.begin_child_attempt(rt, cancel);
         }
+        // Each attempt streams its own tool inputs: nothing a previous attempt
+        // of this step started survives into this one.
+        self.streamed_calls.clear();
+        self.early_tools.clear();
         let (_, config, control, _, _) = rt.root_parts();
         let config = config.clone();
         let control = control.clone();
@@ -208,7 +212,9 @@ impl Session {
             .unwrap_or(0)
             .min(api_elapsed.as_millis() as u64);
         let incomplete = attempt.finish_reason.is_incomplete();
-        let io_finish = if failure_present {
+        let io_finish = if attempt.preempted {
+            "preempted"
+        } else if failure_present {
             "error"
         } else if cancel.is_cancelled() {
             "cancelled"
@@ -301,6 +307,14 @@ impl Session {
             }
         }
 
+        // A steer preempted this request: nothing failed and nothing was
+        // interrupted. The next hook commits the text the user already saw,
+        // then the turn continues from the boundary.
+        if attempt.preempted {
+            self.early_tools.clear();
+            return AttemptAction::Continue;
+        }
+
         if let Some(error) = attempt.failure.as_ref() {
             let overflow = matches!(error, CoreError::ContextWindowExceeded { .. });
             if overflow && !forwarded_content && !self.run_state.overflow_recovered {
@@ -389,10 +403,30 @@ impl Session {
         let provider_usage = attempt.usage;
         let finish_reason = attempt.finish_reason;
         let incomplete = finish_reason.is_incomplete();
+        let preempted = attempt.preempted;
         let text = attempt.text;
-        let reasoning = Some(attempt.reasoning).filter(|reasoning| !reasoning.is_empty());
-        let replay = attempt.replay;
-        let tool_calls = attempt.tool_calls;
+        // A preempted step keeps only the text the user already saw, as a
+        // plain assistant message: its reasoning and native replay never
+        // completed, and a half-received thought must not enter the history.
+        let reasoning = (!preempted)
+            .then(|| attempt.reasoning)
+            .filter(|reasoning| !reasoning.is_empty());
+        let replay = attempt.replay.filter(|_| !preempted);
+        let tool_calls = if preempted {
+            Vec::new()
+        } else {
+            attempt.tool_calls
+        };
+        // Only a preempted step is settled here. A committed one leaves its
+        // early reads alone: the batch that follows joins them (and clears
+        // whatever it never reached), so they must not be dropped at this point.
+        if preempted {
+            self.early_tools.clear();
+            if text.is_empty() {
+                // Nothing was said, so there is nothing to keep.
+                return CommitAction::Preempted;
+            }
+        }
 
         self.charge_step_time(
             rt.step_started.unwrap_or_else(Instant::now),
@@ -471,6 +505,9 @@ impl Session {
             tx,
         );
 
+        if preempted {
+            return CommitAction::Preempted;
+        }
         let paused = finish_reason == pig_protocol::FinishReason::Pause;
         if tool_calls.is_empty() {
             if paused {
@@ -504,16 +541,21 @@ impl Session {
         let turn_id = turn_id.to_string();
         let config = config.clone();
         let paused = rt.paused;
-        self.execute_root_tools(
-            &calls,
-            &rt.step_item_ids,
-            &turn_id,
-            paused,
-            rt.media,
-            &config,
-            tx,
-            cancel,
-        )
-        .await
+        let outcome = self
+            .execute_root_tools(
+                &calls,
+                &rt.step_item_ids,
+                &turn_id,
+                paused,
+                rt.media,
+                &config,
+                tx,
+                cancel,
+            )
+            .await;
+        // A read that started during the stream either joined its wave here or
+        // was never reached; what is left is abandoned with the batch.
+        self.early_tools.clear();
+        outcome
     }
 }

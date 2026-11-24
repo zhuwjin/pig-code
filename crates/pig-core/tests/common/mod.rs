@@ -101,6 +101,13 @@ pub fn outside_dir(name: &str) -> PathBuf {
 #[allow(dead_code)]
 pub fn setup(name: &str) -> (PathBuf, PathBuf, PathBuf) {
     let port = mock::start_mock_server();
+    setup_on(name, port)
+}
+
+/// The `setup` workspace pointed at a mock server the test started itself
+/// (one carrying a request log, a header log or a stall observer).
+#[allow(dead_code)]
+pub fn setup_on(name: &str, port: u16) -> (PathBuf, PathBuf, PathBuf) {
     let dir = test_dir(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();

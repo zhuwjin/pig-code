@@ -340,6 +340,27 @@ async fn parallel_group_cancellation_persists_every_stopped_receipt() {
         .await
         .expect("both parallel FetchURL requests started")
         .expect("start notification");
+    // Read-only calls start while the model is still streaming, so both
+    // fetches are already in flight here. The interrupt under test must land
+    // inside the committed batch: wait for the wave's two cards to open.
+    let mut aborted = Vec::new();
+    let begun = tokio::time::Instant::now() + Duration::from_secs(10);
+    while aborted
+        .iter()
+        .filter(|event| matches!(event, Event::ToolCallBegin { .. }))
+        .count()
+        < 2
+    {
+        assert!(
+            tokio::time::Instant::now() < begun,
+            "the parallel wave never began: {aborted:#?}"
+        );
+        let Ok(Ok(event)) = tokio::time::timeout(Duration::from_secs(1), agent.events.recv()).await
+        else {
+            continue;
+        };
+        aborted.push(event);
+    }
     agent
         .ops
         .send(Op::Interrupt {
@@ -347,10 +368,12 @@ async fn parallel_group_cancellation_persists_every_stopped_receipt() {
         })
         .await
         .unwrap();
-    let aborted = recv_until(&agent.events, Duration::from_secs(20), |event| {
-        matches!(event, Event::TurnAborted { .. })
-    })
-    .await;
+    aborted.extend(
+        recv_until(&agent.events, Duration::from_secs(20), |event| {
+            matches!(event, Event::TurnAborted { .. })
+        })
+        .await,
+    );
     server.abort();
 
     assert!(

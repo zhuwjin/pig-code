@@ -135,6 +135,10 @@ impl Session {
             run_state: Default::default(),
             agent_seq: 0,
             tool_item_seq: 0,
+            repeat: Default::default(),
+            streamed_calls: Default::default(),
+            early_tools: Vec::new(),
+            steer_signal: None,
             runtime: parent.runtime.clone(),
             trust: parent.trust.clone(),
             plugin_tools: prep.plugin_tools,
@@ -621,21 +625,26 @@ impl Session {
                 .any(|outcome| matches!(outcome, Some(GatedToolOutcome::Cancelled)));
         for offset in 0..end - start {
             let call = &calls[start + offset];
+            // Model order: the wrap-up visits results in call order, so the
+            // streak never depends on which member of the wave finished first.
+            let repeat_streak = self.repeat.observe(call);
             let (mut message, edit) = match slots[offset].take() {
                 Some(GatedToolOutcome::Executed {
-                    output,
+                    mut output,
                     is_error,
                     edit,
                     images,
                     documents,
                     ..
                 }) => {
+                    crate::session::repeat::append_reminder(repeat_streak, &mut output);
                     let mut message = ChatMsg::tool_result_with_images(&call.id, output, images)
                         .with_error(is_error);
                     message.documents = documents;
                     (message, edit)
                 }
-                Some(GatedToolOutcome::Rejected { note }) => {
+                Some(GatedToolOutcome::Rejected { mut note }) => {
+                    crate::session::repeat::append_reminder(repeat_streak, &mut note);
                     (ChatMsg::tool_result(&call.id, note).with_error(true), None)
                 }
                 Some(GatedToolOutcome::Cancelled) => (Session::stopped_tool_result(&call.id), None),
@@ -746,6 +755,9 @@ impl Session {
                 }
             }
             let child_call = &calls[call_ix];
+            // Repeat breaker: every call counts in model order (a different
+            // call resets the streak); only a gated result carries the reminder.
+            let repeat_streak = self.repeat.observe(child_call);
             if let Err(error) =
                 persist_child_tool_starts(self, &calls, &rt.step_item_ids, call_ix, call_ix + 1)
             {
@@ -920,7 +932,8 @@ impl Session {
                     self.emit_child_conversation(rt, tx, reasoning_ms);
                     return crate::session::engine::StepOutcome::Cancelled;
                 }
-                GatedToolOutcome::Rejected { note } => {
+                GatedToolOutcome::Rejected { mut note } => {
+                    crate::session::repeat::append_reminder(repeat_streak, &mut note);
                     let mut message = ChatMsg::tool_result(&child_call.id, note).with_error(true);
                     if let Err(error) = persist_child_tool_result(
                         self,
@@ -935,13 +948,14 @@ impl Session {
                     self.agent.history.push(message);
                 }
                 GatedToolOutcome::Executed {
-                    output,
+                    mut output,
                     is_error,
                     edit,
                     images,
                     documents,
                     ..
                 } => {
+                    crate::session::repeat::append_reminder(repeat_streak, &mut output);
                     let mut message =
                         ChatMsg::tool_result_with_images(&child_call.id, output, images)
                             .with_error(is_error);
@@ -1135,6 +1149,26 @@ fn subagent_pause_limit(usage: (u64, u64, u64), turns: usize) -> SubagentResult 
     )
 }
 
+/// The child's tool loop outlived the repeat breaker's final reminder. The
+/// batch is durable by then, so the drive ends at a clean boundary.
+fn subagent_repeat_stop(
+    usage: (u64, u64, u64),
+    turns: usize,
+    stopped: &crate::session::repeat::StoppedRepeat,
+) -> SubagentResult {
+    let note = format!(
+        "Subagent stopped: {}",
+        crate::session::repeat::repeat_stop_detail(stopped)
+    );
+    SubagentResult::child(
+        crate::session::AgentRunStatus::Failed,
+        note.clone(),
+        note,
+        turns,
+        usage,
+    )
+}
+
 pub(super) fn unexpected_subagent_result() -> SubagentResult {
     SubagentResult::child(
         crate::session::AgentRunStatus::Failed,
@@ -1254,6 +1288,7 @@ impl Session {
         let mut last_text = String::new();
         let mut pause_continuations = 0usize;
         let max_turns = self.subagent.as_ref().expect("child session").max_turns;
+        self.repeat.reset();
         for step in 1..=max_turns {
             steps_run = step;
             if let Some(error) = self
@@ -1309,6 +1344,14 @@ impl Session {
             incomplete_reason = rt.incomplete_reason;
             match outcome {
                 crate::session::engine::StepOutcome::Continue => {
+                    if let Some(stopped) = self.repeat.tripped() {
+                        let usage = (
+                            self.run_state.input,
+                            self.run_state.cache_read,
+                            self.run_state.output,
+                        );
+                        return subagent_repeat_stop(usage, steps_run, stopped);
+                    }
                     let sub = self.subagent.as_mut().expect("child session");
                     if paused {
                         if pause_continuations >= MAX_PAUSE_CONTINUATIONS {
@@ -1332,6 +1375,9 @@ impl Session {
                     completed = true;
                     break;
                 }
+                // Children never subscribe to the steer signal; a preempted
+                // step cannot reach this loop.
+                crate::session::engine::StepOutcome::Preempted => {}
                 crate::session::engine::StepOutcome::Paused => {
                     let sub = self.subagent.as_mut().expect("child session");
                     if pause_continuations >= MAX_PAUSE_CONTINUATIONS {

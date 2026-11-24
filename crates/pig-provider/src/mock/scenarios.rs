@@ -24,6 +24,29 @@ pub const NATIVE_REASONING_REPLAY_TRIGGER: &str = "NATIVE_REASONING_REPLAY_SCENA
 
 pub const TOOL_ONLY_REPLAY_TRIGGER: &str = "TOOL_ONLY_REPLAY_SCENARIO";
 
+/// Every request of the turn that carries this trigger answers with the same
+/// `Read` call, whatever the history holds: only the core's repeat breaker
+/// can end such a turn (chat format).
+pub const REPEAT_LOOP_TRIGGER: &str = "REPEAT_LOOP_SCENARIO";
+
+/// Same, with three identical `Read` calls per response: the streak grows
+/// inside one parallel wave (chat format).
+pub const REPEAT_LOOP_PARALLEL_TRIGGER: &str = "REPEAT_LOOP_PARALLEL_SCENARIO";
+
+/// Chat-format scenario for early read execution: one complete `FetchURL` call
+/// for the URL named after the trigger, a held stream, then a second call.
+/// Only the first request of the turn plays it.
+pub const EARLY_TOOL_TRIGGER: &str = "EARLY_TOOL_SCENARIO";
+
+/// Chat-format steer scenarios: the response holds (observed stall) right
+/// after its first frame, which is one text delta (`STEER_STALL_TRIGGER`) or
+/// a tool call's id, name and first argument fragment
+/// (`STEER_TOOL_STALL_TRIGGER`). The rest arrives only after the release.
+pub const STEER_STALL_TRIGGER: &str = "STEER_STALL_SCENARIO";
+pub const STEER_STALL_TEXT: &str = "PARTIAL_BEFORE_STEER";
+pub const STEER_STALL_TAIL: &str = " and all of this arrived after the hold";
+pub const STEER_TOOL_STALL_TRIGGER: &str = "STEER_TOOL_STALL_SCENARIO";
+
 pub const EMPTY_LENGTH_TRIGGER: &str = "EMPTY_LENGTH_SCENARIO";
 
 /// Hosted-search native replay scenarios (Responses/Anthropic)

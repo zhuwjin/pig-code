@@ -104,6 +104,29 @@ impl ToolCallStream {
         }
     }
 
+    /// The wire closed this call's input (Anthropic `content_block_stop`):
+    /// deliver its unflushed tail now instead of at stream end, so a read-only
+    /// call can start before the message is complete. Nothing is finalized:
+    /// a later fragment is still accumulated.
+    pub(crate) async fn end_input(
+        &mut self,
+        index: usize,
+        tx: &tokio::sync::mpsc::Sender<ProviderEvent>,
+    ) {
+        self.grow_to(index);
+        if self.finalized[index] {
+            return;
+        }
+        if self.started[index] && !self.buffers[index].is_empty() {
+            let _ = tx
+                .send(ProviderEvent::ToolCallDelta {
+                    index,
+                    delta: std::mem::take(&mut self.buffers[index]),
+                })
+                .await;
+        }
+    }
+
     /// Authoritative reconciliation at `output_item.done` (Responses). The
     /// event order a live consumer saw is: Start, flushed batched deltas,
     /// possibly one unflushed tail. Finalization must therefore:

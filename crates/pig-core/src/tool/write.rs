@@ -56,7 +56,7 @@ impl Tool for WriteFile {
             "type": "function",
             "function": {
                 "name": "Write",
-                "description": "Write an entire file (parent directories are created automatically). Prefer Edit for localized changes to large files. A file inside a profile credential directory (~/.ssh, ~/.config, ...) needs the user's approval: the dialog names that one file, the whole file is replaced, and the approval is never remembered for the session. Edit cannot be used there because the sandbox keeps the content unreadable.",
+                "description": "Write an entire file (parent directories are created automatically). Prefer Edit for localized changes to large files. Overwriting an existing file replaces all of its content: read its current content first (with Read or a shell command) unless you have already seen it. A file inside a profile credential directory (~/.ssh, ~/.config, ...) needs the user's approval: the dialog names that one file, the whole file is replaced, and the approval is never remembered for the session. Edit cannot be used there because the sandbox keeps the content unreadable.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -123,12 +123,6 @@ impl Tool for WriteFile {
             } else {
                 fs.read_all(&full).ok()
             };
-            if !credential_write {
-                // A credential file has no readable state, so the freshness
-                // rule cannot be satisfied; every other existing file must have
-                // been read before it is overwritten.
-                check_fresh(ctx.state, &full, existing.is_some(), "writing")?;
-            }
             let (encoding, bom, line_ending, note) = match &existing {
                 Some(bytes) => match pig_utils::text::decode(bytes) {
                     Ok(doc) => {
@@ -168,8 +162,6 @@ impl Tool for WriteFile {
             let bytes = pig_utils::text::encode(content, encoding, bom, line_ending)?;
             fs.write_atomic(&full, &bytes)
                 .map_err(|e| format!("Failed to write {}: {e}", full.display()))?;
-            // Refresh freshness after the write: immediately editing the file just written must be legal
-            record_read_state(ctx.state, &full, &bytes, false, None);
             let file_change = if credential_write {
                 None
             } else {

@@ -90,6 +90,49 @@ pub(super) fn tool_call_response() -> Vec<String> {
     chunks
 }
 
+/// `REPEAT_LOOP_TRIGGER` (chat format): one `Read` of the mock file. Only the
+/// id differs between requests, so a turn made of these calls is a pure
+/// repeat streak for the core's breaker.
+pub(super) fn repeat_loop_response(tool_results: usize) -> Vec<String> {
+    let arguments = format!("{{\"path\": \"{MOCK_FILE_NAME}\"}}");
+    tool_call_chunks(
+        &format!("call_repeat_{tool_results}"),
+        "Read",
+        &arguments,
+        Some((60, 10, 70)),
+    )
+}
+
+/// `REPEAT_LOOP_PARALLEL_TRIGGER` (chat format): the same `Read` three times
+/// in one response. Ids stay unique per request and per slot, so the core
+/// sees three identical calls in one parallel wave, not duplicate ids.
+pub(super) fn repeat_loop_parallel_response(tool_results: usize) -> Vec<String> {
+    let arguments = format!("{{\"path\": \"{MOCK_FILE_NAME}\"}}");
+    let mut chunks = Vec::new();
+    for index in 0..3 {
+        chunks.push(sse_chunk(
+            serde_json::json!({"tool_calls": [{
+                "index": index,
+                "id": format!("call_repeat_{tool_results}_{index}"),
+                "function": {"name": "Read", "arguments": &arguments},
+            }]}),
+            None,
+        ));
+    }
+    chunks.push(format!(
+        "data: {}\n\n",
+        serde_json::json!({
+            "id": "chatcmpl-mock",
+            "object": "chat.completion.chunk",
+            "created": 0,
+            "model": "mock-model",
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+            "usage": {"prompt_tokens": 60, "completion_tokens": 10, "total_tokens": 70},
+        })
+    ));
+    chunks
+}
+
 /// Variable-speed script for the thinking ticker demo scenario: returns a
 /// sequence of (pre-chunk delay ms, thinking chunk). Rhythm design (paired
 /// with the UI vertical-scroll state machine's 800ms interval):

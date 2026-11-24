@@ -131,6 +131,10 @@ name = "fs_access"
 path = "tests/fs_access.rs"
 
 [[test]]
+name = "early_tools"
+path = "tests/early_tools.rs"
+
+[[test]]
 name = "prefix_cache"
 path = "tests/prefix_cache/main.rs"
 
@@ -139,12 +143,20 @@ name = "provider"
 path = "tests/provider.rs"
 
 [[test]]
+name = "repeat_breaker"
+path = "tests/repeat_breaker.rs"
+
+[[test]]
 name = "plugin_sessions"
 path = "tests/plugin_sessions.rs"
 
 [[test]]
 name = "session"
 path = "tests/session.rs"
+
+[[test]]
+name = "steer_preempt"
+path = "tests/steer_preempt.rs"
 
 [[test]]
 name = "tooling"
