@@ -8,6 +8,10 @@ pub(super) enum StepOutcome {
     /// executed local tools), but the turn continues with the same history.
     Paused,
     ToolsExecuted,
+    /// A steer message arrived while the model request was streaming and no
+    /// tool-call input had begun: the request was abandoned for it and the
+    /// turn continues from the boundary. Nothing was interrupted.
+    Preempted,
     /// The turn cannot continue: `aborted` distinguishes a user/internal
     /// cancel (TurnAborted emitted) from a provider failure
     Ended {

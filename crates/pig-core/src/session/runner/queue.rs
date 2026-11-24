@@ -184,6 +184,7 @@ pub(super) fn start_turn_inner(
     entry.retry = Some(control.clone());
     entry.steerable = !notification_only;
     let pending = entry.pending.clone();
+    let steer_signal = Some(entry.steer_signal.clone());
     let notifications = entry.notifications.clone();
     let tx = event_tx.clone();
     let config = config.clone();
@@ -197,6 +198,7 @@ pub(super) fn start_turn_inner(
                 &tx,
                 control,
                 pending,
+                steer_signal,
                 notifications,
                 notification_only,
             )
@@ -420,6 +422,10 @@ impl Manager {
                     recovered: false,
                 });
             persist_pending(&store, &session_id, &entry.pending);
+            if steer {
+                // The running turn may abandon its in-flight request for it.
+                entry.announce_steer();
+            }
             let queue_items = queue_snapshot(&entry.pending);
             emit(
                 &event_tx,
@@ -698,6 +704,9 @@ impl Manager {
         }
         pending[pos].steer = steer;
         drop(pending);
+        if steer {
+            entry.announce_steer();
+        }
         let queue_items = queue_snapshot(&entry.pending);
         emit(
             &event_tx,
@@ -1064,6 +1073,7 @@ mod tests {
             reasoning_level: None,
             last_permissions: Default::default(),
             pending: Arc::new(Mutex::new(Default::default())),
+            steer_signal: tokio::sync::watch::channel(0).0,
             notifications: Arc::new(Mutex::new(Default::default())),
             queue_seq: 0,
             auto_drain: true,

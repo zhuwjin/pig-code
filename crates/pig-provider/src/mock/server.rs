@@ -197,6 +197,111 @@ async fn stall_response(stream: &mut tokio::net::TcpStream, signal: Option<&Stal
     signal.wait_release().await;
 }
 
+/// `EARLY_TOOL_TRIGGER <url>` (chat format): the first call, a `FetchURL` of
+/// `<url>`, arrives complete, then the response holds until the test releases
+/// it, and only then do a second call and the finish frame arrive. The hold
+/// separates "this call's arguments are complete" from "the stream has
+/// ended"; the fetch is what makes an early start observable.
+async fn write_early_tool_scenario(
+    stream: &mut tokio::net::TcpStream,
+    body: &str,
+    stall_signal: Option<&StallSignal>,
+) {
+    let url = outside_path_after(body, EARLY_TOOL_TRIGGER).unwrap_or_default();
+    let first = sse_chunk(
+        serde_json::json!({"tool_calls": [{
+            "index": 0,
+            "id": "call_early_first",
+            "function": {
+                "name": "FetchURL",
+                "arguments": serde_json::json!({"url": url}).to_string(),
+            },
+        }]}),
+        None,
+    );
+    let second = sse_chunk(
+        serde_json::json!({"tool_calls": [{
+            "index": 1,
+            "id": "call_early_second",
+            "function": {
+                "name": "Read",
+                "arguments": serde_json::json!({"path": MOCK_FILE_NAME}).to_string(),
+            },
+        }]}),
+        None,
+    );
+    let _ = stream.write_all(first.as_bytes()).await;
+    let _ = stream.flush().await;
+    stall_response(stream, stall_signal).await;
+    let _ = stream.write_all(second.as_bytes()).await;
+    let finish = format!(
+        "data: {}\n\n",
+        serde_json::json!({
+            "id": "chatcmpl-mock",
+            "object": "chat.completion.chunk",
+            "created": 0,
+            "model": "mock-model",
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+            "usage": {"prompt_tokens": 60, "completion_tokens": 10, "total_tokens": 70},
+        })
+    );
+    let _ = stream.write_all(finish.as_bytes()).await;
+}
+
+/// The steer scenarios (chat format). `tool_input` picks the first frame: a
+/// tool call whose arguments are still open, instead of a text delta. The
+/// frames after the hold complete whatever the first one started.
+async fn write_steer_stall_scenario(
+    stream: &mut tokio::net::TcpStream,
+    tool_input: bool,
+    stall_signal: Option<&StallSignal>,
+) {
+    let finish = |reason: &str| {
+        format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "id": "chatcmpl-mock",
+                "object": "chat.completion.chunk",
+                "created": 0,
+                "model": "mock-model",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": reason}],
+                "usage": {"prompt_tokens": 60, "completion_tokens": 10, "total_tokens": 70},
+            })
+        )
+    };
+    let (first, rest, reason) = if tool_input {
+        (
+            sse_chunk(
+                serde_json::json!({"tool_calls": [{
+                    "index": 0,
+                    "id": "call_steer_hold",
+                    "function": {"name": "Read", "arguments": "{\"path\": \"REA"},
+                }]}),
+                None,
+            ),
+            sse_chunk(
+                serde_json::json!({"tool_calls": [{
+                    "index": 0,
+                    "function": {"arguments": "DME.mock.md\"}"},
+                }]}),
+                None,
+            ),
+            "tool_calls",
+        )
+    } else {
+        (
+            sse_chunk(serde_json::json!({"content": STEER_STALL_TEXT}), None),
+            sse_chunk(serde_json::json!({"content": STEER_STALL_TAIL}), None),
+            "stop",
+        )
+    };
+    let _ = stream.write_all(first.as_bytes()).await;
+    let _ = stream.flush().await;
+    stall_response(stream, stall_signal).await;
+    let _ = stream.write_all(rest.as_bytes()).await;
+    let _ = stream.write_all(finish(reason).as_bytes()).await;
+}
+
 /// Thinking ticker demo scenario (TICKER_SCENARIO): does not use the unified
 /// 50ms write loop — thinking chunks are written with the script's own delays,
 /// and the body reply returns to the normal rhythm.
@@ -655,6 +760,23 @@ async fn handle_connection(
         stall_response(&mut stream, stall_signal.as_ref()).await;
         return;
     }
+    // Early-execution scenario: the first call is complete and the stream is
+    // held before anything else arrives. Only the turn whose last user
+    // message carries the trigger plays it.
+    if tool_results == 0 && user_text.contains(EARLY_TOOL_TRIGGER) {
+        write_early_tool_scenario(&mut stream, &body, stall_signal.as_ref()).await;
+        return;
+    }
+    // Steer scenarios: the stream is held after one frame, so a test can send
+    // a steer while the model's answer is demonstrably still in flight.
+    if tool_results == 0 && user_text.contains(STEER_TOOL_STALL_TRIGGER) {
+        write_steer_stall_scenario(&mut stream, true, stall_signal.as_ref()).await;
+        return;
+    }
+    if tool_results == 0 && user_text.contains(STEER_STALL_TRIGGER) {
+        write_steer_stall_scenario(&mut stream, false, stall_signal.as_ref()).await;
+        return;
+    }
     // Thinking ticker demo scenario: variable-speed emission (each chunk
     // carries its own delay), not the unified 50ms write loop
     if !anthropic && body.contains(SCENARIO_TICKER_TRIGGER) {
@@ -867,6 +989,10 @@ async fn handle_connection(
         stream_args_response(tool_results)
     } else if body.contains(SCENARIO_B_TRIGGER) {
         scenario_b_response(tool_results, SCENARIO_B_FILE)
+    } else if user_text.contains(REPEAT_LOOP_PARALLEL_TRIGGER) {
+        repeat_loop_parallel_response(tool_results)
+    } else if user_text.contains(REPEAT_LOOP_TRIGGER) {
+        repeat_loop_response(tool_results)
     } else if tool_results > 0 {
         text_response()
     } else {

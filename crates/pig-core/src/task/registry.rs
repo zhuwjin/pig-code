@@ -11,22 +11,15 @@ use crate::tool::TodoHandle;
 
 use super::spill;
 
-/// File freshness state recorded by Read (same as ZCode read-file-state):
-/// Write/Edit compares it before writing, preventing external changes from
-/// being overwritten based on a stale view.
+/// What a Read showed: the hash of the bytes it rendered and the view
+/// parameters it used. A later Read with the same parameters and an unchanged
+/// hash answers "file unchanged" instead of repeating the text.
 #[derive(Debug, Clone)]
 pub struct ReadState {
-    pub mtime: Option<std::time::SystemTime>,
-    pub size: u64,
     /// DefaultHasher over the raw bytes
     pub hash: u64,
-    /// Whether this read was truncated by the budget (an incomplete view); explicit offset/limit paged reads do not count
-    pub partial: bool,
-    /// View parameters of the last successful Read (offset, limit, column_offset):
-    /// re-reading with the same parameters and an unchanged hash short-circuits
-    /// with "file unchanged" to save tokens. Internal refreshes done by
-    /// Write/Edit/check_fresh carry no view (None).
-    pub view: Option<(usize, usize, usize)>,
+    /// View parameters of that Read (offset, limit, column_offset)
+    pub view: (usize, usize, usize),
 }
 
 /// Rolling cap on in-registry output (truncated from the head on append).
@@ -417,7 +410,7 @@ pub(crate) fn release_agent_mailbox(state: &SessionToolState, owner: &str) {
 }
 
 /// Session-scoped shared tool state: todo list + task registry + TaskChange
-/// channel + task sequence + file freshness. All fields are
+/// channel + task sequence + file read views. All fields are
 /// Clone-able (Arc/atomic/sender); Session and agent_loop's SessionEntry each
 /// hold one shared copy.
 pub struct SessionToolState {
@@ -442,7 +435,8 @@ pub struct SessionToolState {
     data_dir: Option<PathBuf>,
     /// Task sequence generator (b1, b2... monotonically increasing; not reused after foreground tasks are removed on completion)
     pub task_seq: Arc<AtomicUsize>,
-    /// File freshness registered by Read (key = full path after resolve_checked)
+    /// What each Read showed, keyed by full path after resolve_checked: lets
+    /// an identical later Read answer "file unchanged" instead of the text
     pub read_states: Arc<Mutex<HashMap<PathBuf, ReadState>>>,
     /// Extra always-readable roots (canonicalized when possible at
     /// construction): the data_dir/sessions subtree (subagent result.md/context

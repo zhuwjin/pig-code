@@ -17,7 +17,7 @@
 //! *** End Patch
 //! ```
 //!
-//! All paths, policy gates, freshness checks, and hunk matches are validated in
+//! All paths, policy gates, and hunk matches are validated in
 //! memory before any file is written or removed on disk.
 
 use std::collections::HashSet;
@@ -647,7 +647,7 @@ impl Tool for ApplyPatchTool {
             "type": "function",
             "function": {
                 "name": APPLY_PATCH_TOOL,
-                "description": "Apply a multi-file, multi-hunk patch atomically using the standard patch envelope (`*** Begin Patch` ... `*** End Patch`). Supports `*** Add File: <path>`, `*** Update File: <path>` (with optional `*** Move to: <new_path>` and one or more `@@` hunks), and `*** Delete File: <path>`. All paths, freshness checks, and hunk matches are verified before writing any file; original encoding and line endings are preserved. Read existing files before updating or deleting them.",
+                "description": "Apply a multi-file, multi-hunk patch atomically using the standard patch envelope (`*** Begin Patch` ... `*** End Patch`). Supports `*** Add File: <path>`, `*** Update File: <path>` (with optional `*** Move to: <new_path>` and one or more `@@` hunks), and `*** Delete File: <path>`. All paths, policy checks, and hunk matches are verified before writing any file; original encoding and line endings are preserved. Hunks must match each file as it is on disk now: read its current content first (with Read or a shell command) unless you have already seen it, and give enough context to place each hunk.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -674,7 +674,7 @@ impl Tool for ApplyPatchTool {
             let hunks = parse_patch(patch_text)?;
             let fs = ctx.state.env.fs.as_ref();
 
-            // Phase 1: validate every target path, freshness, and hunk match in
+            // Phase 1: validate every target path and hunk match in
             // memory before mutating anything on disk.
             let mut planned: Vec<PlannedOp> = Vec::with_capacity(hunks.len());
             for hunk in hunks {
@@ -714,7 +714,6 @@ impl Tool for ApplyPatchTool {
                         }) {
                             return Err(err);
                         }
-                        check_fresh(ctx.state, &full, true, "deleting")?;
                         let bytes = fs
                             .read_all(&full)
                             .map_err(|e| read_io_error_with_fs(fs, &path, &full, e))?;
@@ -743,7 +742,6 @@ impl Tool for ApplyPatchTool {
                         }) {
                             return Err(err);
                         }
-                        check_fresh(ctx.state, &full, fs.exists(&full), "editing")?;
                         let bytes = fs
                             .read_all(&full)
                             .map_err(|e| read_io_error_with_fs(fs, &path, &full, e))?;
@@ -822,7 +820,6 @@ impl Tool for ApplyPatchTool {
                         ctx.tracker.snapshot_with_fs(fs, &full)?;
                         fs.write_atomic(&full, &encoded)
                             .map_err(|e| format!("Failed to write {}: {e}", full.display()))?;
-                        record_read_state(ctx.state, &full, &encoded, false, None);
                         if let Ok(change) = ctx.tracker.diff_with_fs(fs, ctx.cwd, &full) {
                             file_changes.push(change);
                         }
@@ -903,7 +900,6 @@ impl Tool for ApplyPatchTool {
                                 file_changes.push(change);
                             }
                         }
-                        record_read_state(ctx.state, &dest_full, &encoded, false, None);
                         if let Ok(change) = ctx.tracker.diff_with_fs(fs, ctx.cwd, &dest_full) {
                             file_changes.push(change);
                         }
@@ -1029,11 +1025,6 @@ mod tests {
         std::fs::write(&b, "one\ntwo\n").unwrap();
 
         let state = test_state();
-        let a_can = a.canonicalize().unwrap();
-        let b_can = b.canonicalize().unwrap();
-        record_read_state(&state, &a_can, b"alpha\nbeta\n", false, None);
-        record_read_state(&state, &b_can, b"one\ntwo\n", false, None);
-
         // First: patch where second hunk fails -> first file MUST stay untouched.
         let failing_patch = "\
 *** Begin Patch
@@ -1100,9 +1091,6 @@ mod tests {
         let f = dir.join("win.txt");
         std::fs::write(&f, "line1\r\nline2\r\n").unwrap();
         let state = test_state();
-        let f_can = f.canonicalize().unwrap();
-        record_read_state(&state, &f_can, b"line1\r\nline2\r\n", false, None);
-
         let patch = "\
 *** Begin Patch
 *** Update File: win.txt

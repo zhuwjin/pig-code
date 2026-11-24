@@ -97,8 +97,8 @@ async fn missing_usage_clears_the_anchor_before_a_large_tool_result() {
 async fn preflight_after_a_large_tool_result_compacts_before_sampling() {
     let server = start_server(ServerMode::Preflight);
     let (agent, session_id, _config, _dir, data_dir) =
-        new_agent_for(&server, "preflight", 31_000, 1_000).await;
-    // 6k-token older segment; keeps turn-start projection below the 17k trigger.
+        new_agent_for(&server, "preflight", 32_000, 1_000).await;
+    // 6k-token older segment; keeps turn-start projection below the 18k trigger.
     let older = format!("A_OLD_SEGMENT {}", "a".repeat(24_000));
     send_and_complete(&agent, &session_id, &older).await;
     // Step 1 reports used=16000; the ~4.5k-token tool result appended after it
@@ -139,11 +139,22 @@ async fn preflight_after_a_large_tool_result_compacts_before_sampling() {
         .expect("a request carrying the compact note");
     assert!(
         after_compact.contains("\"role\":\"tool\"") && after_compact.contains("tttt"),
-        "the kept newest segment still carries the tool result"
+        "the kept newest segment still carries the tool result: {after_compact}"
     );
     assert!(
         !after_compact.contains("A_OLD_SEGMENT"),
         "the older segment was omitted"
+    );
+    let rollout = std::fs::read_to_string(
+        data_dir
+            .join("sessions")
+            .join(format!("{session_id}.jsonl")),
+    )
+    .unwrap();
+    assert_eq!(
+        rollout.matches("\"type\":\"tool_execution_start\"").count(),
+        1,
+        "retaining the tool result avoids repeating the Read: {rollout}"
     );
     agent.shutdown();
 }

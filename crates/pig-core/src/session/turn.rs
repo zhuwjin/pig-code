@@ -117,9 +117,11 @@ impl Session {
         tx: &async_channel::Sender<Event>,
         control: pig_provider::CallControl,
         pending: PendingMailbox,
+        steer_signal: Option<tokio::sync::watch::Sender<u64>>,
         notifications: super::runner::entry::NotificationMailbox,
         notification_only: bool,
     ) -> TurnOutcome {
+        self.steer_signal = steer_signal;
         if !matches!(
             self.agent.run.as_ref().map(|run| run.status),
             Some(AgentRunStatus::Running)
@@ -207,6 +209,9 @@ impl Session {
             self.hook_context_stash.extend(effects.additional_contexts);
         }
         self.run_state.turn_counter += 1;
+        // Each turn starts with an empty repeat streak (Kimi's toolDedupe
+        // clears its records when a turn ends).
+        self.repeat.reset();
         // Unique across restarts (wall-clock nanos + counter): StepUsage and
         // TurnStats carry it so SQLite usage insertion is idempotent and crash
         // recovery reuses the same identity.
@@ -678,6 +683,11 @@ impl Session {
                     pause_pin = Some(self.agent.history.len().saturating_sub(1));
                     continue;
                 }
+                // A steer preempted the in-flight request. The paused step it
+                // may have been answering is still unanswered, so the pause
+                // state stays as it was: the loop injects the steer above and
+                // the next step is the same continuation, now with it.
+                StepOutcome::Preempted => continue,
                 StepOutcome::ToolsExecuted => {
                     pause_continuation = false;
                     pause_pin = None;
@@ -794,6 +804,11 @@ impl Session {
             control.clone(),
             preserve_latest,
             pause_pin,
+            // Subscribed per step: only a steer admitted after this point can
+            // preempt this request.
+            self.steer_signal
+                .as_ref()
+                .map(|signal| signal.subscribe()),
         );
         match super::engine::run_step(self, &mut runtime, step, tx, control.cancel_token()).await {
             super::engine::StepOutcome::Continue => StepOutcome::ToolsExecuted,
@@ -801,6 +816,7 @@ impl Session {
                 StepOutcome::TextOnly { finish_reason }
             }
             super::engine::StepOutcome::Paused => StepOutcome::Paused,
+            super::engine::StepOutcome::Preempted => StepOutcome::Preempted,
             super::engine::StepOutcome::Cancelled => StepOutcome::Ended { aborted: true },
             super::engine::StepOutcome::Failed => StepOutcome::Ended { aborted: false },
         }
@@ -900,6 +916,11 @@ impl Session {
                 }
                 continue;
             }
+            // Repeat breaker: this call counts in model order (a different
+            // call resets the streak); only a gated result carries the reminder.
+            // A wave counts its own members, and a lone parallel-safe call is a
+            // one-member wave, so this must stay below the wave branch.
+            let repeat_streak = self.repeat.observe(call);
             let item_id = item_ids[call_ix].clone();
             if let Err(error) =
                 self.persist_root_tool_starts(tool_calls, item_ids, call_ix, call_ix + 1)
@@ -1610,7 +1631,8 @@ impl Session {
                 .await;
             self.run_state.tool_ms += tool_started.elapsed().as_millis() as u64;
             match gated {
-                GatedToolOutcome::Rejected { note } => {
+                GatedToolOutcome::Rejected { mut note } => {
+                    super::repeat::append_reminder(repeat_streak, &mut note);
                     self.agent
                         .history
                         .push(ChatMsg::tool_result(&call.id, note.clone()).with_error(true));
@@ -1673,6 +1695,7 @@ impl Session {
                         &mut documents,
                         config.context_window,
                     );
+                    super::repeat::append_reminder(repeat_streak, &mut output);
                     let mut message =
                         ChatMsg::tool_result_with_images(&call.id, output.clone(), images)
                             .with_error(is_error);
@@ -1720,6 +1743,20 @@ impl Session {
                 }
             }
         }
+        // The whole batch is durable (every tool_use has its result), so the
+        // trip ends the turn at a clean boundary instead of dropping receipts.
+        if let Some(stopped) = self.repeat.tripped() {
+            let error = super::repeat::repeat_stop_error(stopped);
+            self.emit(
+                move |session_id| Event::Error {
+                    session_id: Some(session_id),
+                    error,
+                    fatal: true,
+                },
+                tx,
+            );
+            return engine::StepOutcome::Failed;
+        }
         if paused {
             engine::StepOutcome::Paused
         } else {
@@ -1765,6 +1802,12 @@ impl Session {
                 summary,
             });
         }
+        // Repeat breaker: count the whole wave in model order up front, so the
+        // reminder a member earns never depends on completion order.
+        let repeat_streaks: Vec<u32> = cards
+            .iter()
+            .map(|card| self.repeat.observe(&card.call))
+            .collect();
 
         // Concurrent execution: path-conflict scheduling guarantees no two
         // calls in this wave write overlapping paths or read a path written by
@@ -1774,6 +1817,13 @@ impl Session {
         self.plugin_tools.dispatcher().set_event_sender(tx.clone());
         let gate = self.gate_snapshot();
         let shared_tracker = self.tracker.foreground_child();
+        // A read that started during the stream joins its member here instead
+        // of running twice; taken before the batch so the closures below never
+        // both need the session.
+        let mut early: Vec<Option<super::early::EarlyTask>> = cards
+            .iter()
+            .map(|card| self.take_early_task(&card.call))
+            .collect();
         let tools = tool::all();
         let tools = &tools;
         let mut slots: Vec<Option<ParallelOutput>> = Vec::new();
@@ -1786,16 +1836,34 @@ impl Session {
                 let item_id = cards[index].item_id.clone();
                 let gate = gate.clone();
                 let mut tracker = shared_tracker.foreground_child();
+                let early = early[index].take();
                 async move {
                     let tool = tools
                         .iter()
                         .find(|tool| tool.name() == call.name)
                         .map(|tool| tool.as_ref());
                     let tool_started = Instant::now();
-                    let outcome = gate
-                        .exec_tool_gated(&call, tool, &item_id, turn_id, tx, cancel, &mut tracker)
-                        .await;
-                    let elapsed_ms = tool_started.elapsed().as_millis() as u64;
+                    let joined = match early {
+                        Some(task) => task.await.ok(),
+                        None => None,
+                    };
+                    let (outcome, elapsed_ms) = match joined {
+                        Some(joined) => joined,
+                        None => {
+                            let outcome = gate
+                                .exec_tool_gated(
+                                    &call,
+                                    tool,
+                                    &item_id,
+                                    turn_id,
+                                    tx,
+                                    cancel,
+                                    &mut tracker,
+                                )
+                                .await;
+                            (outcome, tool_started.elapsed().as_millis() as u64)
+                        }
+                    };
                     let empty = |stopped| ParallelOutput {
                         output: String::new(),
                         is_error: true,
@@ -1847,6 +1915,9 @@ impl Session {
                     &mut out.documents,
                     context_window,
                 );
+                if !out.stopped {
+                    super::repeat::append_reminder(repeat_streaks[index], &mut out.output);
+                }
                 self.emit(
                     |session_id| Event::ToolCallEnd {
                         session_id,

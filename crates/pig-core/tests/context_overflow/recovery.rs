@@ -5,7 +5,8 @@ use pig_provider::mock;
 
 use crate::common;
 use crate::fixtures::{
-    config, main_finishes, open_session, seed_old_segment, send_and_complete, workspace,
+    config, main_finishes, open_session, seed_old_segment, send_and_complete,
+    send_and_complete_approving, workspace,
 };
 use crate::server::{ServerMode, dir_path, new_agent_for, start_server};
 
@@ -575,7 +576,8 @@ async fn overflow_after_a_side_effect_never_replays_the_tool() {
         pig_core::spawn_agent_with_data_dir(Some(config.clone()), dir.clone(), data_dir.clone());
     open_session(&agent, &session_id).await;
 
-    let events = send_and_complete(&agent, &session_id, "write the overflow fixture once").await;
+    let events =
+        send_and_complete_approving(&agent, &session_id, "write the overflow fixture once").await;
     let target = dir.join("overflow-side-effect.txt");
     if !common::native_sandbox_usable() {
         assert!(

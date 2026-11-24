@@ -1,23 +1,21 @@
 use super::*;
 
-/// Record the read state under the opened canonical target **and** under the
-/// spelling a later Write/Edit will act on. For a final symlink these differ:
-/// the read followed the link, while the write replaces the link entry — both
-/// are the same model-facing "file", so the freshness rule must accept it
-/// (authorization was already decided on the canonical target above).
-fn record_read_state_for_spelling(
+/// Record what a Read showed under the opened canonical target **and** under
+/// the spelling the model used. For a final symlink these differ: the read
+/// followed the link, so a later Read of either spelling with the same
+/// parameters finds the record and can answer "file unchanged".
+fn record_read_view(
     ctx: &ToolContext<'_>,
     raw_path: &str,
     full: &Path,
     bytes: &[u8],
-    partial: bool,
-    view: Option<(usize, usize, usize)>,
+    view: (usize, usize, usize),
 ) {
-    record_read_state(ctx.state, full, bytes, partial, view);
+    record_read_state(ctx.state, full, bytes, view);
     if let Some(spelling) = super::paths::write_spelling(ctx.state.env.fs.as_ref(), ctx.cwd, raw_path)
         && spelling != *full
     {
-        record_read_state(ctx.state, &spelling, bytes, partial, view);
+        record_read_state(ctx.state, &spelling, bytes, view);
     }
 }
 
@@ -119,32 +117,23 @@ impl Tool for ReadFile {
                 }
             };
             if doc.text.is_empty() {
-                record_read_state_for_spelling(&ctx, path, &full, &bytes, false, None);
                 return Ok(ToolEffect::plain("(empty file)".to_string()));
             }
             let offset = args["offset"].as_u64().unwrap_or(1).max(1) as usize;
             let limit = args["limit"].as_u64().unwrap_or(MAX_READ_LINES as u64) as usize;
             let column_offset = args["column_offset"].as_u64().unwrap_or(0) as usize;
-            // Repeat-read short circuit (same as ZCode file_unchanged): same view parameters + unchanged content hash
-            // → skip re-outputting the full text, saving tokens. The refresh flow uses the same read_states record;
-            // an identical hash means the freshness information needs no update.
+            // Repeat-read short circuit (same as ZCode file_unchanged): the same
+            // view parameters and an unchanged content hash mean the model has
+            // already seen exactly this output, so it is not repeated. A
+            // different page, or bytes that changed since, is shown in full.
             let view = (offset, limit, column_offset);
             let unchanged = match ctx.state.read_states.lock() {
-                // Truncated output is deterministic for the same parameters, so
-                // budget-truncated reads can short-circuit too; the recorded
-                // partial flag rides along so the refresh below cannot turn an
-                // incomplete view into a complete one.
-                Ok(states) => states.get(&full).and_then(|r| {
-                    (r.hash == hash_bytes(&bytes) && r.view == Some(view)).then_some(r.partial)
+                Ok(states) => states.get(&full).is_some_and(|seen| {
+                    seen.hash == hash_bytes(&bytes) && seen.view == view
                 }),
-                Err(_) => None,
+                Err(_) => false,
             };
-            if let Some(partial) = unchanged {
-                // A short-circuited read must still key the model-facing
-                // spelling: otherwise a second spelling of the same target (a
-                // symlink alias) never gains a freshness entry and cannot be
-                // written or edited.
-                record_read_state_for_spelling(&ctx, path, &full, &bytes, partial, Some(view));
+            if unchanged {
                 return Ok(ToolEffect::plain(
                     "(File unchanged: same parameters as the last Read and identical content — no need to re-read)".to_string(),
                 ));
@@ -213,16 +202,7 @@ impl Tool for ReadFile {
             if doc.lossy {
                 out.push_str("\n[Warning: decoding produced replacement characters; the detected encoding may be wrong]");
             }
-            // ZCode semantics: only a "full read" truncated by the budget counts as partial; explicitly paged reads do not
-            let paged = args.get("offset").is_some() || args.get("limit").is_some();
-            record_read_state_for_spelling(
-                &ctx,
-                path,
-                &full,
-                &bytes,
-                !paged && end < total,
-                Some(view),
-            );
+            record_read_view(&ctx, path, &full, &bytes, view);
             Ok(ToolEffect::plain(out))
         })
     }
@@ -269,71 +249,19 @@ fn hash_bytes(bytes: &[u8]) -> u64 {
     hasher.finish()
 }
 
-/// Register on Read success / refresh the freshness state after Write/Edit hits the disk (mtime takes the new post-write value).
-/// view: Read carries this call's view parameters (for the repeat-read short circuit); internal refreshes pass None.
+/// Register what a Read showed: the hash of the bytes it rendered and the
+/// view parameters it used, for the repeat-read short circuit.
 pub(crate) fn record_read_state(
     state: &SessionToolState,
     full: &Path,
     bytes: &[u8],
-    partial: bool,
-    view: Option<(usize, usize, usize)>,
+    view: (usize, usize, usize),
 ) {
-    let mtime = state.env.fs.metadata(full).ok().and_then(|m| m.modified);
     let entry = crate::task::ReadState {
-        mtime,
-        size: bytes.len() as u64,
         hash: hash_bytes(bytes),
-        partial,
         view,
     };
     if let Ok(mut states) = state.read_states.lock() {
         states.insert(full.to_path_buf(), entry);
     }
-}
-
-/// Pre-write freshness check (same as ZCode read-file-state): a nonexistent file (new creation) is allowed;
-/// never read / last view was incomplete / disk modified externally after the read — all rejected.
-/// The hash is compared only when mtime or size changed; an identical hash (content verbatim unchanged) is allowed and the state is updated along the way.
-pub(crate) fn check_fresh(
-    state: &SessionToolState,
-    full: &Path,
-    file_exists: bool,
-    verb: &str,
-) -> Result<(), String> {
-    if !file_exists {
-        return Ok(());
-    }
-    let (read_mtime, read_size, read_hash, partial) = {
-        let states = state.read_states.lock().map_err(|e| e.to_string())?;
-        let Some(read) = states.get(full) else {
-            return Err(format!(
-                "File exists but has not been read in this session; Read it before {verb} to avoid overwriting others' changes"
-            ));
-        };
-        (read.mtime, read.size, read.hash, read.partial)
-    };
-    if partial {
-        return Err(
-            "The last Read was an incomplete view (output was truncated); finish it with offset/limit pages or a full Read before editing"
-                .to_string(),
-        );
-    }
-    let meta = state
-        .env
-        .fs
-        .metadata(full)
-        .map_err(|e| format!("Failed to stat {}: {e}", full.display()))?;
-    if meta.modified == read_mtime && meta.len == read_size {
-        return Ok(());
-    }
-    let bytes = state
-        .env
-        .fs
-        .read_all(full)
-        .map_err(|e| format!("Failed to read {}: {e}", full.display()))?;
-    if hash_bytes(&bytes) == read_hash {
-        record_read_state(state, full, &bytes, false, None);
-        return Ok(());
-    }
-    Err("The file was modified externally since the last Read; Read it again before editing (to avoid overwriting others' changes)".to_string())
 }

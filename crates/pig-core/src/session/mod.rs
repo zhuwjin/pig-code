@@ -26,6 +26,7 @@ mod approval;
 mod batch;
 mod catalog;
 mod compact;
+mod early;
 mod effects;
 mod engine;
 mod estimate;
@@ -42,6 +43,7 @@ mod outcome;
 mod pending;
 mod persistence;
 mod replay;
+mod repeat;
 mod reviewer;
 mod run_state;
 mod runner;
@@ -221,6 +223,19 @@ pub struct Session {
     /// on the wire and in history; this only keeps duplicate provider ids from
     /// aliasing two invocations.
     tool_item_seq: u64,
+    /// Repeat-call breaker for the current turn (root turns reset it at turn
+    /// start; a child drive starts clean). It holds no model-visible state:
+    /// reminders ride the tool results and the trip ends the turn.
+    repeat: repeat::RepeatBreaker,
+    /// Root stream bookkeeping for early read execution (see `early`): calls
+    /// whose input streamed during the current attempt, and the read-only ones
+    /// already executing before the assistant message commits.
+    streamed_calls: std::collections::BTreeMap<usize, early::StreamedCall>,
+    early_tools: Vec<early::EarlyTool>,
+    /// Root only: the runner's steer admission signal. A step that is still
+    /// streaming its model request subscribes to it, so a steer can preempt
+    /// the request instead of waiting for the step boundary.
+    steer_signal: Option<tokio::sync::watch::Sender<u64>>,
     /// The one resolved runtime view of this workspace: effective config
     /// (trusted project layer included), workspace trust, project sandbox
     /// layer and provider/model endpoint capabilities. Root model resolution,

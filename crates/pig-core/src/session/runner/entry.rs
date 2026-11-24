@@ -93,6 +93,12 @@ pub(super) struct SessionEntry {
     /// Held items (paused-queue confirmation) live here too so nothing can
     /// overwrite them.
     pub(super) pending: PendingMailbox,
+    /// Tells the running turn that a steer item entered `pending` while it was
+    /// streaming: the in-flight model request may then be abandoned for it
+    /// (see `engine::stream_attempt`). The value counts admissions; every step
+    /// subscribes afresh, so an item a boundary already drained never
+    /// preempts the next request.
+    pub(super) steer_signal: tokio::sync::watch::Sender<u64>,
     /// Terminal notification IDs awaiting model delivery; the SQLite outbox is
     /// their durable source of truth.
     pub(super) notifications: NotificationMailbox,
@@ -119,6 +125,15 @@ pub(super) struct SessionEntry {
     /// A plugin snapshot changed while a turn owned the Session: the
     /// wrap-up refreshes hooks/skills/profiles/tools/MCP before the next turn.
     pub(super) plugin_surfaces_stale: bool,
+}
+
+impl SessionEntry {
+    /// A fresh steer item is waiting in `pending`: wake the running turn's
+    /// step if it is still streaming its model request.
+    pub(super) fn announce_steer(&self) {
+        self.steer_signal
+            .send_modify(|admissions| *admissions = admissions.wrapping_add(1));
+    }
 }
 
 pub(super) type TurnFuture =

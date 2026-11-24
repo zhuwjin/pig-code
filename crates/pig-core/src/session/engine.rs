@@ -30,6 +30,9 @@ pub(crate) enum StepOutcome {
         finish_reason: Option<FinishReason>,
     },
     Paused,
+    /// A steer message preempted the streaming request; the turn continues
+    /// from the boundary once the caller injected it.
+    Preempted,
     Cancelled,
     Failed,
 }
@@ -45,6 +48,9 @@ pub(crate) enum AttemptAction {
 pub(crate) enum CommitAction {
     TextOnly { finish_reason: Option<FinishReason> },
     Paused,
+    /// The preempted step committed what the user had already seen (if
+    /// anything); the caller injects the steer and samples again.
+    Preempted,
     Tools(Vec<ToolCall>),
     Terminal(StepOutcome),
 }
@@ -81,6 +87,9 @@ pub(crate) struct StepRuntime {
     pub(crate) reasoning_item: String,
     /// Provider streaming index -> (provider call id, internal item id).
     pub(crate) live_tool_inputs: HashMap<usize, (String, String)>,
+    /// Root only: subscribed when the step began to the runner's steer
+    /// admissions; `None` for children and turns launched without a signal.
+    pub(crate) steer: Option<tokio::sync::watch::Receiver<u64>>,
     pub(crate) step_item_ids: Vec<String>,
     /// Step-scoped model clock; set once after the preflight compaction.
     pub(crate) step_started: Option<Instant>,
@@ -109,6 +118,7 @@ impl StepRuntime {
         control: pig_provider::CallControl,
         preserve_latest: bool,
         pause_pin: Option<usize>,
+        steer: Option<tokio::sync::watch::Receiver<u64>>,
     ) -> Self {
         Self {
             mode: StepMode::Root {
@@ -118,6 +128,7 @@ impl StepRuntime {
                 preserve_latest,
                 pause_pin,
             },
+            steer,
             ..Self::empty(StepMode::Child)
         }
     }
@@ -135,6 +146,7 @@ impl StepRuntime {
             text_item: String::new(),
             reasoning_item: String::new(),
             live_tool_inputs: HashMap::new(),
+            steer: None,
             step_item_ids: Vec::new(),
             step_started: None,
             step_first_token_at: None,
@@ -184,6 +196,9 @@ pub(crate) async fn run_step(
     cancel: &CancellationToken,
 ) -> StepOutcome {
     session.prepare_step(rt, step, tx, cancel).await;
+    // One subscription per step, kept across the attempt's retries: a steer that
+    // arrived during any of them preempts the request still in flight.
+    let mut steer = rt.steer.take();
     'attempt: loop {
         if let Some(error) = session.durable_history_failure() {
             session.emit(
@@ -211,8 +226,21 @@ pub(crate) async fn run_step(
                 reasoning_started_ms: None,
                 text_started_ms: None,
             };
-            stream_attempt(&mut rx, cancel, &mut api_tracker, &mut sink).await
+            stream_attempt(
+                &mut rx,
+                cancel,
+                &mut api_tracker,
+                &mut sink,
+                steer.as_mut(),
+            )
+            .await
         };
+        // A preempted request is abandoned, not finished: its provider task is
+        // still reading a stream nobody will consume (the turn goes on, so the
+        // cancel token must stay untouched).
+        if attempt.preempted {
+            task.abort();
+        }
         match session
             .record_step_attempt(
                 rt,
@@ -234,6 +262,7 @@ pub(crate) async fn run_step(
                 task.abort();
                 return outcome;
             }
+            AttemptAction::Continue if attempt.preempted => {}
             AttemptAction::Continue => {
                 let _ = task.await;
             }
@@ -257,6 +286,7 @@ pub(crate) async fn run_step(
                 return StepOutcome::TextOnly { finish_reason };
             }
             CommitAction::Paused => return StepOutcome::Paused,
+            CommitAction::Preempted => return StepOutcome::Preempted,
             CommitAction::Tools(calls) => {
                 // Boxed to break the type-level cycle: a root tool batch can
                 // spawn a child, whose own loop re-enters this engine.
@@ -392,6 +422,7 @@ impl AttemptSink for SessionAttemptSink<'_> {
         self.runtime
             .live_tool_inputs
             .insert(index, (id.to_string(), item_id));
+        self.session.note_tool_started(index, id, name);
     }
 
     fn tool_delta(&mut self, index: usize, _id: &str, name: &str, arguments: &str, delta: &str) {
@@ -427,6 +458,10 @@ impl AttemptSink for SessionAttemptSink<'_> {
                 self.tx,
             );
         }
+        // A call whose arguments just became a complete JSON value may start
+        // its read now, while the model keeps streaming.
+        self.session
+            .note_tool_arguments(index, arguments, self.runtime, self.tx);
     }
 
     fn retry(&mut self, notice: &RetryNotice) {
@@ -471,6 +506,10 @@ pub(crate) struct AttemptOutcome {
     pub tool_calls: Vec<ToolCall>,
     pub finish_reason: FinishReason,
     pub failure: Option<CoreError>,
+    /// A steer arrived mid-stream and no tool-call input had begun: the
+    /// request was abandoned for it. `failure` is None and nothing was
+    /// cancelled.
+    pub preempted: bool,
     /// Any model-authored content reached the UI/history; a transparent retry
     /// is only safe when this is false.
     pub forwarded_content: bool,
@@ -481,12 +520,16 @@ pub(crate) struct AttemptOutcome {
 }
 
 /// Drain one provider request. The caller owns spawning/aborting
-/// `stream_chat`; this engine owns the event semantics.
+/// `stream_chat`; this engine owns the event semantics. `steer` resolving
+/// abandons the request for a steering message, but only while no tool-call
+/// input is streaming (Kimi's rule): half-received arguments cannot be
+/// dropped safely, so a later steer waits for the step boundary.
 pub(crate) async fn stream_attempt<S: AttemptSink + ?Sized>(
     rx: &mut tokio::sync::mpsc::Receiver<ProviderEvent>,
     cancel: &CancellationToken,
     api_tracker: &mut ApiCallTracker,
     sink: &mut S,
+    mut steer: Option<&mut tokio::sync::watch::Receiver<u64>>,
 ) -> AttemptOutcome {
     let mut text = String::new();
     let mut reasoning = String::new();
@@ -499,14 +542,34 @@ pub(crate) async fn stream_attempt<S: AttemptSink + ?Sized>(
     let mut reasoning_started: Option<Instant> = None;
     let mut reasoning_ms = None;
     let mut usage = None;
+    let mut preempted = false;
     // Tool-call name/arguments per streaming index, used to give the sink the
     // full accumulated arguments on every delta.
     let mut live_tools: HashMap<usize, (String, String, String)> = HashMap::new();
 
+    // Set when a steer arrived while this request was streaming. The decision
+    // is taken at the top of the loop, once the events the stream already
+    // delivered were processed, so a response that finished in the meantime
+    // is never dropped.
+    let mut steer_pending = false;
     loop {
+        if steer_pending && rx.is_empty() {
+            if cancel.is_cancelled() {
+                // The cancellation path below owns the wrap-up.
+            } else if live_tools.is_empty() {
+                preempted = true;
+                break;
+            } else {
+                steer_pending = false;
+            }
+        }
         let event = tokio::select! {
             event = rx.recv() => event,
             _ = cancel.cancelled() => None,
+            _ = steer_admitted(steer.as_deref_mut()) => {
+                steer_pending = true;
+                continue;
+            }
         };
         let Some(event) = event else {
             if !cancel.is_cancelled() {
@@ -606,10 +669,24 @@ pub(crate) async fn stream_attempt<S: AttemptSink + ?Sized>(
         tool_calls,
         finish_reason,
         failure,
+        preempted,
         forwarded_content,
         first_token_at,
         reasoning_ms,
         usage,
+    }
+}
+
+/// Resolves once a steer is admitted to the turn; without a receiver (child
+/// steps, turns launched without a signal) it never resolves. It is created
+/// afresh for every `select!`, so a change that arrived while another branch
+/// ran is seen on the next poll, and a finished future is never polled again.
+async fn steer_admitted(receiver: Option<&mut tokio::sync::watch::Receiver<u64>>) {
+    match receiver {
+        Some(receiver) => {
+            let _ = receiver.changed().await;
+        }
+        None => std::future::pending::<()>().await,
     }
 }
 
@@ -696,7 +773,14 @@ mod tests {
         let mut tracker = ApiCallTracker::default();
         let mut sink = RecordingSink::default();
         let outcome =
-            stream_attempt(&mut rx, &CancellationToken::new(), &mut tracker, &mut sink).await;
+            stream_attempt(
+                &mut rx,
+                &CancellationToken::new(),
+                &mut tracker,
+                &mut sink,
+                None,
+            )
+            .await;
 
         assert_eq!(outcome.text, "answer");
         assert_eq!(outcome.reasoning, "think");

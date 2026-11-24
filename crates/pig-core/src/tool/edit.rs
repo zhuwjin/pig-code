@@ -14,7 +14,7 @@ impl Tool for EditFile {
             "type": "function",
             "function": {
                 "name": "Edit",
-                "description": "Perform an exact text replacement in a file. old_string must appear exactly once in the file (replace_all=true replaces every occurrence); Read the file to confirm its content before editing. Tolerant matching covers common slips — line-number prefixes, curly vs straight quotes, and literal \\n escape sequences (the output notes when one kicks in). The file's original encoding and line endings are preserved. Files over 50MB are refused (use Bash sed/awk for large files). Files inside a profile credential directory cannot be edited (their content is unreadable) — use Write for those.",
+                "description": "Perform an exact text replacement in a file. old_string must appear exactly once in the file (replace_all=true replaces every occurrence) and is matched against the file as it is on disk now: read its current content first (with Read or a shell command) unless you have already seen it. Tolerant matching covers common slips — line-number prefixes, curly vs straight quotes, and literal \\n escape sequences (the output notes when one kicks in). The file's original encoding and line endings are preserved. Files over 50MB are refused (use Bash sed/awk for large files). Files inside a profile credential directory cannot be edited (their content is unreadable) — use Write for those.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -59,7 +59,7 @@ impl Tool for EditFile {
             }
             // Edit locates the change by matching existing text, which requires
             // reading the file — and a credential file is not readable. Refuse
-            // with the way out instead of failing at the freshness check.
+            // with the way out instead of failing when the content cannot be read.
             if crate::task::credential_grant(ctx.state, &full) == crate::task::CredentialGrant::File
             {
                 return Err(format!(
@@ -79,7 +79,7 @@ impl Tool for EditFile {
             if let Some(message) = super::paths::read_through_rejection(&ctx, &full) {
                 return Err(message);
             }
-            // The size guard runs before the freshness check: oversized files are rejected outright, never entering whole-read/whole-write
+            // The size guard runs before the whole-file read: oversized files are rejected outright, never entering whole-read/whole-write
             let fs = ctx.state.env.fs.as_ref();
             if let Some(err) = fs.metadata(&full).ok().and_then(|m| {
                 file_size_error(
@@ -90,7 +90,6 @@ impl Tool for EditFile {
             }) {
                 return Err(err);
             }
-            check_fresh(ctx.state, &full, fs.exists(&full), "editing")?;
             let bytes = fs
                 .read_all(&full)
                 .map_err(|e| read_io_error_with_fs(fs, path, &full, e))?;
@@ -136,8 +135,6 @@ impl Tool for EditFile {
             let encoded = pig_utils::text::encode(&after, doc.encoding, doc.bom, doc.line_ending)?;
             fs.write_atomic(&full, &encoded)
                 .map_err(|e| format!("Failed to write {}: {e}", full.display()))?;
-            // Refresh freshness after the write: immediately editing the file just written must be legal
-            record_read_state(ctx.state, &full, &encoded, false, None);
             let file_change = ctx.tracker.diff_with_fs(fs, ctx.cwd, &full).ok();
             let edit_diff = Some(per_edit_diff(ctx.cwd, &full, &content, &after));
             let output = if replace_all {

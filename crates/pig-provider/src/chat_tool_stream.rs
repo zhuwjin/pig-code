@@ -328,13 +328,38 @@ impl ChatToolStream {
         let Some(fragment) = arguments.filter(|fragment| !fragment.is_empty()) else {
             return;
         };
-        let call = &mut self.calls[slot];
-        call.call.arguments.push_str(fragment);
-        call.argument_state.append(fragment);
-        if call.started {
+        // A closed top-level JSON value ends this call's input: deliver the
+        // tail now instead of at stream end, so a read-only call can start
+        // before the message is complete.
+        let (complete, started) = {
+            let call = &mut self.calls[slot];
+            call.call.arguments.push_str(fragment);
+            call.argument_state.append(fragment);
+            (
+                call.argument_state.has_complete_structured_value(),
+                call.started,
+            )
+        };
+        if started {
             self.push_live_delta(slot, fragment, tx).await;
+            if complete {
+                self.flush_slot(slot, tx).await;
+            }
         } else {
-            call.deferred_deltas.push(fragment.to_string());
+            self.calls[slot].deferred_deltas.push(fragment.to_string());
+        }
+    }
+
+    /// Deliver one call's unflushed argument tail.
+    async fn flush_slot(&mut self, slot: usize, tx: &tokio::sync::mpsc::Sender<ProviderEvent>) {
+        let buffer = &mut self.calls[slot].delta_buffer;
+        if !buffer.is_empty() {
+            let _ = tx
+                .send(ProviderEvent::ToolCallDelta {
+                    index: slot,
+                    delta: std::mem::take(buffer),
+                })
+                .await;
         }
     }
 
@@ -574,15 +599,76 @@ mod tests {
         );
         let events = collect(&mut rx);
         assert_eq!(starts(&events), vec![(0, "dup".into(), "Write".into())]);
-        assert!(deltas(&events).is_empty());
+        // The name unlocked the deferred fragments and the closing brace
+        // completed the input: its whole text is delivered with the start,
+        // not held back until the finish boundary.
+        assert_eq!(deltas(&events), vec![(0, r#"{"path":"a.txt"}"#.into())]);
+        assert_eq!(events.len(), 2, "one start and one delta");
 
         let calls = stream.finish(&tx).await.expect("named call finishes");
-        let events = collect(&mut rx);
-        assert_eq!(deltas(&events), vec![(0, r#"{"path":"a.txt"}"#.into())]);
-        assert_eq!(events.len(), 1, "no ToolCalls or Finished boundary");
+        assert!(collect(&mut rx).is_empty(), "nothing is left to flush");
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].id, "dup");
         assert_eq!(calls[0].arguments, r#"{"path":"a.txt"}"#);
+    }
+
+    /// A closed top-level JSON value ends a call's input: the unflushed tail
+    /// goes out at once, so a read-only call can start before the message is
+    /// complete. Nothing is re-sent at the finish boundary.
+    #[tokio::test]
+    async fn a_closed_json_value_delivers_its_tail_before_the_finish() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(256);
+        let mut stream = ChatToolStream::new();
+        push!(
+            &mut stream,
+            Some(0),
+            Some("call_1"),
+            Some("Read"),
+            Some(r#"{"path":"a"#),
+            &tx
+        );
+        let events = collect(&mut rx);
+        assert_eq!(starts(&events), vec![(0, "call_1".into(), "Read".into())]);
+        assert!(deltas(&events).is_empty(), "an open value is still batching");
+
+        push!(
+            &mut stream,
+            Some(0),
+            None,
+            None,
+            Some(r#".txt"}"#),
+            &tx
+        );
+        let events = collect(&mut rx);
+        assert_eq!(deltas(&events), vec![(0, r#"{"path":"a.txt"}"#.into())]);
+
+        let calls = stream.finish(&tx).await.expect("complete call finishes");
+        assert!(collect(&mut rx).is_empty(), "the tail was already delivered");
+        assert_eq!(calls[0].arguments, r#"{"path":"a.txt"}"#);
+    }
+
+    /// Two calls in one response: each delivers its own tail when its input
+    /// closes, so the first is whole while the second is still streaming.
+    #[tokio::test]
+    async fn each_call_delivers_its_own_tail_as_it_closes() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(256);
+        let mut stream = ChatToolStream::new();
+        push!(&mut stream, Some(0), Some("c1"), Some("Read"), Some(r#"{"path":"one"}"#), &tx);
+        let events = collect(&mut rx);
+        assert_eq!(deltas(&events), vec![(0, r#"{"path":"one"}"#.into())]);
+
+        push!(&mut stream, Some(1), Some("c2"), Some("Grep"), Some(r#"{"pattern":"x"#), &tx);
+        let events = collect(&mut rx);
+        assert!(deltas(&events).is_empty(), "the second call is still open");
+        push!(&mut stream, Some(1), None, None, Some("\"}"), &tx);
+        let events = collect(&mut rx);
+        assert_eq!(deltas(&events), vec![(1, r#"{"pattern":"x"}"#.into())]);
+
+        let calls = stream.finish(&tx).await.expect("both calls finish");
+        assert!(collect(&mut rx).is_empty());
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].arguments, r#"{"path":"one"}"#);
+        assert_eq!(calls[1].arguments, r#"{"pattern":"x"}"#);
     }
 
     #[tokio::test]

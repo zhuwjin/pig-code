@@ -749,6 +749,7 @@ async fn exhausted_history_stops_before_model_execution_and_preserves_the_rollou
             &tx,
             pig_provider::CallControl::new(CancellationToken::new()),
             Default::default(),
+            None,
             Default::default(),
             false,
         )
