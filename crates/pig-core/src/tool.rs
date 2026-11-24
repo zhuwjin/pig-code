@@ -240,7 +240,7 @@ pub use tool_search::{
     CALL_TOOL, DeferredToolEntry, DeferredToolRegistry, TOOL_SEARCH_TOOL, unwrap_call_tool,
     validate_tool_arguments,
 };
-pub use tracker::{ChangeTracker, TurnRevertOutcome, snapshot_from_store, snapshot_to_store};
+pub use tracker::{ChangeTracker, snapshot_from_store, snapshot_to_store};
 
 pub use pig_protocol::{TodoItem, TodoStatus};
 

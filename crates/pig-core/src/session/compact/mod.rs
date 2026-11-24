@@ -500,8 +500,6 @@ impl Session {
         self.sync_rollout();
         self.report_rollout_failure(tx);
         self.agent.history = next_history;
-        let keep_checkpoints: Vec<bool> = next_user_ixs.iter().map(Option::is_some).collect();
-        self.tracker.clear_compacted_checkpoints(&keep_checkpoints);
         self.user_ixs = next_user_ixs;
         // Reset the usage watermark to an estimate of the compacted history
         // (corrected by the next real sample): without the reset the watermark

@@ -331,7 +331,6 @@ impl Session {
             .collect();
         let mut tracker = ChangeTracker::default();
         tracker.restore(originals);
-        tracker.seed_empty_turn_checkpoints(user_ixs.len());
         // After resume, take over the same JSONL and keep appending; failure
         // must be loud (setting None would silently drop all subsequent
         // records). The handle was opened above before tool recovery.
