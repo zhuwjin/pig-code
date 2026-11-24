@@ -731,6 +731,8 @@ fn dangerous_command_blacklist_hits() {
         ("chmod -R 777 /", "chmod -R 777 /"),
         ("chown -R root /", "chown -R /"),
         ("echo ok; rm -rf /", "rm after a semicolon"),
+        ("git push --force", "force-pushing git history"),
+        ("git push -f", "force-pushing git history"),
     ] {
         assert!(
             tool::is_dangerous_command(cmd).is_some(),
@@ -747,8 +749,6 @@ fn dangerous_command_blacklist_allows() {
         "dd if=x of=/dev/null",
         "dd if=x of=/dev/zero",
         "dd if=x of=/dev/urandom bs=1 count=4",
-        "git push --force",
-        "git push -f",
         "chmod 755 script.sh",
         "chmod -R 755 src",
         "echo shutdown", // not in command position

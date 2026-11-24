@@ -118,11 +118,7 @@ pub(crate) async fn open_session(agent: &pig_core::AgentHandle, session_id: &str
     .await;
 }
 
-pub(crate) async fn send_and_complete(
-    agent: &pig_core::AgentHandle,
-    session_id: &str,
-    text: &str,
-) -> Vec<Event> {
+async fn send(agent: &pig_core::AgentHandle, session_id: &str, text: &str) {
     agent
         .ops
         .send(Op::SendMessage {
@@ -135,6 +131,14 @@ pub(crate) async fn send_and_complete(
         })
         .await
         .unwrap();
+}
+
+pub(crate) async fn send_and_complete(
+    agent: &pig_core::AgentHandle,
+    session_id: &str,
+    text: &str,
+) -> Vec<Event> {
+    send(agent, session_id, text).await;
     common::recv_until(&agent.events, Duration::from_secs(30), |event| {
         matches!(
             event,
@@ -142,6 +146,40 @@ pub(crate) async fn send_and_complete(
         )
     })
     .await
+}
+
+pub(crate) async fn send_and_complete_approving(
+    agent: &pig_core::AgentHandle,
+    session_id: &str,
+    text: &str,
+) -> Vec<Event> {
+    send(agent, session_id, text).await;
+    let start = std::time::Instant::now();
+    let mut collected = Vec::new();
+    while start.elapsed() < Duration::from_secs(30) {
+        let event = tokio::time::timeout(Duration::from_secs(1), agent.events.recv()).await;
+        let Ok(Ok(event)) = event else { continue };
+        if let Event::ApprovalRequested { request_id, .. } = &event {
+            agent
+                .ops
+                .send(Op::ApprovalReply {
+                    request_id: request_id.clone(),
+                    decision: pig_protocol::ApprovalDecision::Allow,
+                    feedback: None,
+                })
+                .await
+                .unwrap();
+        }
+        let finished = matches!(
+            event,
+            Event::TurnComplete { .. } | Event::TurnAborted { .. } | Event::Error { .. }
+        );
+        collected.push(event);
+        if finished {
+            return collected;
+        }
+    }
+    panic!("timed out waiting for the approved turn: {collected:#?}");
 }
 
 pub(crate) fn main_finishes(data_dir: &std::path::Path, session_id: &str) -> Vec<(String, i64)> {

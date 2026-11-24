@@ -402,7 +402,7 @@ async fn parallel_group_cancellation_persists_every_stopped_receipt() {
         vec![
             ("FetchURL", true, true),
             ("FetchURL", true, true),
-            ("Write", true, true),
+            ("ExecCommand", true, true),
         ],
         "{records:#?}"
     );

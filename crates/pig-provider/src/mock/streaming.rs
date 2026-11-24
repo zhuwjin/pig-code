@@ -1303,16 +1303,17 @@ pub(super) fn anthropic_parallel_slow_followup(body: &str, tool_results: usize) 
         {
             anthropic_tool_call(&mut out, index, call_id, "FetchURL", &fetch_arguments);
         }
-        let write_arguments = serde_json::json!({
-            "path": "cancel-parallel-followup-must-not-exist.txt",
-            "content": "must not execute",
-        })
-        .to_string();
+        let command = if cfg!(windows) {
+            "[System.IO.File]::WriteAllText('cancel-parallel-followup-must-not-exist.txt', 'must not execute')"
+        } else {
+            "printf 'must not execute' > cancel-parallel-followup-must-not-exist.txt"
+        };
+        let write_arguments = serde_json::json!({"command": command}).to_string();
         anthropic_tool_call(
             &mut out,
             2,
             "call_unexecuted_write",
-            "Write",
+            "ExecCommand",
             &write_arguments,
         );
     } else {
