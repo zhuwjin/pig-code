@@ -110,6 +110,7 @@ pub(super) fn make_child_session(
             cwd: cwd.clone(),
             delegation_depth: 1,
             config: Some(config),
+            provider_session: pig_provider::ProviderSession::new(),
             history,
             tools: vec![],
             schemas: vec![],

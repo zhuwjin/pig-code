@@ -33,6 +33,7 @@ mod registry;
 mod resilience;
 mod responses;
 mod retry;
+mod session;
 mod sidecar;
 mod sse;
 mod stream;
@@ -50,7 +51,7 @@ pub use chat::{
 pub use endpoint::{
     anthropic_cache_supported, chat_token_limit_key, is_official_anthropic, is_official_openai,
     native_search_replay_supported, native_web_search_enabled, prompt_cache_key_supported,
-    session_prompt_cache_key, subagent_prompt_cache_key,
+    responses_ws_supported, session_prompt_cache_key, subagent_prompt_cache_key,
 };
 pub use events::{CallControl, CallError, ProviderEvent, RetryNotice, RetryReason};
 pub use metadata::{ProviderResponseMetadata, ProviderUsage};
@@ -64,6 +65,7 @@ pub use resilience::{
 pub use responses::{
     RESPONSES_WS_BETA_HEADER, ResponsesWsSession, responses_web_search_tool, responses_ws_url,
 };
+pub use session::ProviderSession;
 pub use sidecar::{
     CompleteCall, CompleteCallError, StructuredOutput, complete_messages, complete_text,
     test_provider,

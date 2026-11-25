@@ -9,6 +9,7 @@
 //!
 //! legacy SSE (2024-11-05 dual-endpoint HTTP+SSE) is not supported -- the config layer already rejects that shape.
 
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
@@ -60,11 +61,41 @@ pub struct HttpTransport {
     closed: AtomicBool,
 }
 
-fn build_oauth_manager(cfg: &McpOAuthConfig) -> Result<Arc<OAuthTokenManager>, CoreError> {
+/// Default on-disk token bundle path for an OAuth-enabled remote MCP server
+/// when `tokenFile` is omitted in `mcp.json`.
+pub(crate) fn default_oauth_token_path(data_dir: &Path, server_name: &str) -> PathBuf {
+    let sanitized: String = server_name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let stem = if sanitized.is_empty() {
+        "server".to_string()
+    } else {
+        sanitized
+    };
+    data_dir.join("oauth").join(format!("mcp-{stem}.json"))
+}
+
+pub(crate) fn build_oauth_manager_for_server(
+    server_name: &str,
+    cfg: &McpOAuthConfig,
+    data_dir: Option<&Path>,
+) -> Result<Arc<OAuthTokenManager>, CoreError> {
     reqwest::Url::parse(&cfg.token_url).map_err(|e| CoreError::McpInvalidUrl {
         detail: format!("invalid OAuth token_url: {e}"),
     })?;
-    let store: Arc<dyn OAuthTokenStore> = if let Some(path) = &cfg.token_file {
+    let resolved_token_file: Option<PathBuf> = cfg
+        .token_file
+        .as_ref()
+        .map(PathBuf::from)
+        .or_else(|| data_dir.map(|dir| default_oauth_token_path(dir, server_name)));
+    let store: Arc<dyn OAuthTokenStore> = if let Some(path) = resolved_token_file {
         let file_store = FileTokenStore::new(path);
         if file_store.load().ok().flatten().is_none()
             && (cfg.access_token.is_some() || cfg.refresh_token.is_some())
@@ -103,11 +134,22 @@ fn build_oauth_manager(cfg: &McpOAuthConfig) -> Result<Arc<OAuthTokenManager>, C
 }
 
 impl HttpTransport {
+    #[cfg(test)]
     pub fn new(
         name: &str,
         config: &McpHttpConfig,
         timeout: Duration,
         elicitation: Option<ElicitationHandler>,
+    ) -> Result<Self, CoreError> {
+        Self::new_with_data_dir(name, config, timeout, elicitation, None)
+    }
+
+    pub fn new_with_data_dir(
+        name: &str,
+        config: &McpHttpConfig,
+        timeout: Duration,
+        elicitation: Option<ElicitationHandler>,
+        data_dir: Option<&Path>,
     ) -> Result<Self, CoreError> {
         // The config layer only validates the URL scheme; parse it fully here (a failure skips this server)
         reqwest::Url::parse(&config.url).map_err(|e| CoreError::McpInvalidUrl {
@@ -126,7 +168,7 @@ impl HttpTransport {
             headers.insert(name, value);
         }
         let oauth = match &config.oauth {
-            Some(cfg) => Some(build_oauth_manager(cfg)?),
+            Some(cfg) => Some(build_oauth_manager_for_server(name, cfg, data_dir)?),
             None => None,
         };
         Ok(Self {

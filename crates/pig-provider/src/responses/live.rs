@@ -55,6 +55,10 @@ impl LiveSegment {
 }
 
 impl LiveResponsesText {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.segments.is_empty()
+    }
+
     fn take_sequence(&mut self) -> usize {
         let sequence = self.next_sequence;
         self.next_sequence += 1;

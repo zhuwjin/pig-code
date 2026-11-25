@@ -69,6 +69,15 @@ pub fn is_official_openai(base_url: &str) -> bool {
     host_matches(base_url, &["api.openai.com"])
 }
 
+/// Whether the endpoint supports OpenAI Responses WebSocket v2 (`ws://` /
+/// `wss://` explicitly, or the official OpenAI API host which upgrades from
+/// `https://api.openai.com` to `wss://api.openai.com/v1/responses`).
+pub fn responses_ws_supported(base_url: &str) -> bool {
+    base_url.starts_with("ws://")
+        || base_url.starts_with("wss://")
+        || is_official_openai(base_url)
+}
+
 /// `api.anthropic.com` (the official first-party endpoint).
 pub fn is_official_anthropic(base_url: &str) -> bool {
     host_matches(base_url, &["api.anthropic.com"])

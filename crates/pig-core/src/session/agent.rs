@@ -24,6 +24,10 @@ pub(crate) struct Agent {
     /// Resolved model for this agent. Root sessions set it at each step
     /// (model/provider can switch); child agents set it at preparation.
     pub(crate) config: Option<ResolvedModel>,
+    /// Opaque session-scoped provider transport (manages persistent Responses
+    /// WebSocket v2 connections and continuation chains without leaking
+    /// provider/format branches into `session/`).
+    pub(crate) provider_session: pig_provider::ProviderSession,
     pub(crate) history: Vec<ChatMsg>,
     pub(crate) tools: Vec<Box<dyn tool::Tool>>,
     pub(crate) schemas: Vec<serde_json::Value>,

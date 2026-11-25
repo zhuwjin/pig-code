@@ -142,6 +142,7 @@ fn assemble_session(parts: SessionParts, frozen: SessionFrozen) -> Session {
             cwd: parts.cwd,
             delegation_depth: 0,
             config: None,
+            provider_session: pig_provider::ProviderSession::new(),
             history: parts.history,
             tools: Vec::new(),
             schemas: Vec::new(),

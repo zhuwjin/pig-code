@@ -8,6 +8,9 @@
 //!   and [`super::stream::finish_responses_stream`] so text, reasoning, tool
 //!   calls, citations, usage, and metadata semantics stay identical to HTTP/SSE.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash as _, Hasher as _};
+
 use futures_util::{SinkExt as _, StreamExt as _};
 use pig_protocol::CoreError;
 use tokio::net::TcpStream;
@@ -20,13 +23,57 @@ use crate::chat::{ChatMsg, ResolvedModel};
 use crate::events::{CallControl, CallError, ProviderEvent};
 
 use super::live::LiveResponsesText;
-use super::request::build_responses_body;
+use super::request::{build_responses_body, to_responses_input};
 use super::stream::{finish_responses_stream, handle_frame};
 
 /// OpenAI Responses WebSocket v2 beta header (aligned with Codex `codex-api`).
 pub const RESPONSES_WS_BETA_HEADER: &str = "responses_websockets=2026-02-06";
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+fn hash_messages(messages: &[ChatMsg]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    messages.len().hash(&mut hasher);
+    for msg in messages {
+        if let Ok(encoded) = serde_json::to_string(msg) {
+            encoded.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+fn hash_turn_config(
+    config: &ResolvedModel,
+    messages: &[ChatMsg],
+    tools: &[serde_json::Value],
+    structured: Option<&crate::StructuredOutput<'_>>,
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    config.base_url.hash(&mut hasher);
+    config.model.hash(&mut hasher);
+    if let Some(params) = &config.reasoning_params
+        && let Ok(encoded) = serde_json::to_string(params)
+    {
+        encoded.hash(&mut hasher);
+    }
+    config.prompt_cache_key.hash(&mut hasher);
+    config.cap_web_search.hash(&mut hasher);
+    config.tool_settings.parallel_tool_calls.hash(&mut hasher);
+    // System messages hoist into top-level `instructions`; any system-prompt change breaks chain continuity.
+    for msg in messages.iter().filter(|m| m.role == "system") {
+        msg.content.hash(&mut hasher);
+    }
+    if let Ok(encoded) = serde_json::to_string(tools) {
+        encoded.hash(&mut hasher);
+    }
+    if let Some(output) = structured {
+        output.name.hash(&mut hasher);
+        if let Ok(encoded) = serde_json::to_string(&output.schema) {
+            encoded.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
 
 /// Build the WebSocket endpoint URL from `config.base_url`.
 /// Converts `http://` -> `ws://`, `https://` -> `wss://`, keeps `ws://`/`wss://`,
@@ -48,23 +95,23 @@ pub fn responses_ws_url(base_url: &str) -> String {
 }
 
 /// Build the `response.create` client WebSocket payload.
+///
+/// When `previous_response_id` and `skip_messages` are supplied, `instructions`
+/// and request metadata are still derived from the full conversation while
+/// `input` carries only the newly appended messages `&messages[skip_messages..]`.
 fn build_ws_create_event(
     config: &ResolvedModel,
     messages: &[ChatMsg],
     tools: &[serde_json::Value],
     structured: Option<&crate::StructuredOutput<'_>>,
     previous_response_id: Option<&str>,
-    incremental_from_input_len: Option<usize>,
+    skip_messages: Option<usize>,
     prewarm: bool,
-) -> Result<(serde_json::Value, usize), CallError> {
+) -> Result<serde_json::Value, CallError> {
     let mut body = build_responses_body(config, messages, tools, true)?;
     if let Some(output) = structured {
         crate::sidecar::apply_structured(&mut body, config.api_format, output);
     }
-    let total_input_len = body["input"]
-        .as_array()
-        .map(|items| items.len())
-        .unwrap_or(0);
     if let serde_json::Value::Object(map) = &mut body {
         // WebSocket v2 frames use `type: "response.create"` instead of `stream: true`.
         map.remove("stream");
@@ -81,17 +128,16 @@ fn build_ws_create_event(
                 serde_json::Value::String(prev_id.to_string()),
             );
             // When continuing an existing server-side response chain, send only
-            // the newly appended input items since the last turn.
-            if let Some(prev_len) = incremental_from_input_len
-                && prev_len <= total_input_len
-                && let Some(serde_json::Value::Array(items)) = map.get_mut("input")
+            // the newly appended input items after the server's last response.
+            if let Some(skip) = skip_messages
+                && skip < messages.len()
             {
-                let suffix = items.split_off(prev_len);
-                *items = suffix;
+                let (_, suffix_input) = to_responses_input(config, &messages[skip..]);
+                map.insert("input".to_string(), serde_json::Value::Array(suffix_input));
             }
         }
     }
-    Ok((body, total_input_len))
+    Ok(body)
 }
 
 async fn connect_ws(config: &ResolvedModel, control: &CallControl) -> Result<WsStream, CallError> {
@@ -148,7 +194,10 @@ async fn connect_ws(config: &ResolvedModel, control: &CallControl) -> Result<WsS
 pub struct ResponsesWsSession {
     socket: Option<WsStream>,
     previous_response_id: Option<String>,
-    last_input_len: usize,
+    last_messages_len: usize,
+    last_turn_was_generated: bool,
+    last_prefix_hash: Option<u64>,
+    last_config_hash: Option<u64>,
 }
 
 impl Default for ResponsesWsSession {
@@ -162,7 +211,10 @@ impl ResponsesWsSession {
         Self {
             socket: None,
             previous_response_id: None,
-            last_input_len: 0,
+            last_messages_len: 0,
+            last_turn_was_generated: false,
+            last_prefix_hash: None,
+            last_config_hash: None,
         }
     }
 
@@ -174,7 +226,56 @@ impl ResponsesWsSession {
     /// Clear continuation state (for example after history compaction or fork).
     pub fn reset_chain(&mut self) {
         self.previous_response_id = None;
-        self.last_input_len = 0;
+        self.last_messages_len = 0;
+        self.last_turn_was_generated = false;
+        self.last_prefix_hash = None;
+        self.last_config_hash = None;
+    }
+
+    /// Resolve whether `messages` is a strict continuation of the previous
+    /// turn/prewarm on the same endpoint/config. Returns `(previous_response_id,
+    /// skip_messages)` when incremental continuation is safe, or `(None, None)`
+    /// after resetting stale chain state.
+    fn resolve_continuation(
+        &mut self,
+        config_hash: u64,
+        messages: &[ChatMsg],
+    ) -> (Option<String>, Option<usize>) {
+        let Some(prev_id) = self.previous_response_id.clone() else {
+            return (None, None);
+        };
+        if self.last_config_hash != Some(config_hash) {
+            self.reset_chain();
+            return (None, None);
+        }
+        if self.last_messages_len == 0 || messages.len() <= self.last_messages_len {
+            self.reset_chain();
+            return (None, None);
+        }
+        if self.last_prefix_hash != Some(hash_messages(&messages[..self.last_messages_len])) {
+            self.reset_chain();
+            return (None, None);
+        }
+        let skip_messages = if self.last_turn_was_generated {
+            // The server already owns the assistant output produced by `prev_id`.
+            // Skip that assistant message and transmit only subsequent user/tool messages.
+            if messages
+                .get(self.last_messages_len)
+                .is_some_and(|m| m.role == "assistant")
+            {
+                self.last_messages_len + 1
+            } else {
+                self.reset_chain();
+                return (None, None);
+            }
+        } else {
+            self.last_messages_len
+        };
+        if skip_messages >= messages.len() {
+            self.reset_chain();
+            return (None, None);
+        }
+        (Some(prev_id), Some(skip_messages))
     }
 
     /// Prewarm the server-side prompt cache (`generate: false`) so the first
@@ -189,8 +290,8 @@ impl ResponsesWsSession {
         if self.socket.is_none() {
             self.socket = Some(connect_ws(config, control).await?);
         }
-        let (payload, total_input_len) =
-            build_ws_create_event(config, messages, tools, None, None, None, true)?;
+        let config_hash = hash_turn_config(config, messages, tools, None);
+        let payload = build_ws_create_event(config, messages, tools, None, None, None, true)?;
         let ws = self.socket.as_mut().expect("connected ws");
         if let Err(error) = ws.send(Message::Text(payload.to_string().into())).await {
             self.socket = None;
@@ -230,7 +331,10 @@ impl ResponsesWsSession {
                     match value["type"].as_str().unwrap_or("") {
                         "response.completed" | "response.incomplete" => {
                             self.previous_response_id = response_id.clone();
-                            self.last_input_len = total_input_len;
+                            self.last_messages_len = messages.len();
+                            self.last_turn_was_generated = false;
+                            self.last_prefix_hash = Some(hash_messages(messages));
+                            self.last_config_hash = Some(config_hash);
                             return Ok(response_id);
                         }
                         "response.failed" | "error" => {
@@ -275,17 +379,21 @@ impl ResponsesWsSession {
         control: &CallControl,
     ) -> Result<(), CallError> {
         let mut reconnected = false;
+        let mut retried_without_chain = false;
+        let config_hash = hash_turn_config(config, &messages, &tools, control.structured_output());
         loop {
             if self.socket.is_none() {
                 self.socket = Some(connect_ws(config, control).await?);
             }
-            let (payload, total_input_len) = build_ws_create_event(
+            let (prev_id, skip_messages) = self.resolve_continuation(config_hash, &messages);
+            let used_chain = prev_id.is_some();
+            let payload = build_ws_create_event(
                 config,
                 &messages,
                 &tools,
                 control.structured_output(),
-                self.previous_response_id.as_deref(),
-                self.previous_response_id.as_ref().map(|_| self.last_input_len),
+                prev_id.as_deref(),
+                skip_messages,
                 false,
             )?;
 
@@ -294,9 +402,6 @@ impl ResponsesWsSession {
                 self.socket = None;
                 if !reconnected && !control.is_cancelled() {
                     reconnected = true;
-                    // Reconnecting on a fresh socket keeps the server-side
-                    // previous_response_id intact if the server supports it, or
-                    // caller can reset_chain on error.
                     continue;
                 }
                 return Err(CoreError::Network {
@@ -318,6 +423,7 @@ impl ResponsesWsSession {
             let mut finish_reason = None;
             let mut completed_output = None;
             let idle = control.idle_timeout();
+            let mut frame_error: Option<CallError> = None;
 
             loop {
                 let msg = tokio::select! {
@@ -342,7 +448,7 @@ impl ResponsesWsSession {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         api.raw_line(&text);
-                        if handle_frame(
+                        match handle_frame(
                             text.trim(),
                             tx,
                             &mut tool_stream,
@@ -354,28 +460,38 @@ impl ResponsesWsSession {
                             &mut response_metadata,
                             &mut completed_output,
                         )
-                        .await?
+                        .await
                         {
-                            if control.is_cancelled() {
-                                api.finish("cancelled", tool_stream.calls());
-                                self.socket = None;
-                                return Ok(());
+                            Ok(true) => {
+                                if control.is_cancelled() {
+                                    api.finish("cancelled", tool_stream.calls());
+                                    self.socket = None;
+                                    return Ok(());
+                                }
+                                if let Some(id) = response_metadata.response_id.clone() {
+                                    self.previous_response_id = Some(id);
+                                    self.last_messages_len = messages.len();
+                                    self.last_turn_was_generated = true;
+                                    self.last_prefix_hash = Some(hash_messages(&messages));
+                                    self.last_config_hash = Some(config_hash);
+                                }
+                                return finish_responses_stream(
+                                    tool_stream,
+                                    replay_items,
+                                    live,
+                                    finish_reason,
+                                    completed_output,
+                                    config,
+                                    &mut api,
+                                    tx,
+                                )
+                                .await;
                             }
-                            if let Some(id) = response_metadata.response_id.clone() {
-                                self.previous_response_id = Some(id);
-                                self.last_input_len = total_input_len;
+                            Ok(false) => {}
+                            Err(err) => {
+                                frame_error = Some(err);
+                                break;
                             }
-                            return finish_responses_stream(
-                                tool_stream,
-                                replay_items,
-                                live,
-                                finish_reason,
-                                completed_output,
-                                config,
-                                &mut api,
-                                tx,
-                            )
-                            .await;
                         }
                     }
                     Some(Ok(Message::Ping(data))) => {
@@ -396,13 +512,33 @@ impl ResponsesWsSession {
                 }
             }
 
+            if let Some(err) = frame_error {
+                // If an incremental `previous_response_id` request failed before
+                // emitting any content (e.g., server evicted the cached response),
+                // reset the chain and retry once with full conversation input.
+                let emitted_anything =
+                    !live.is_empty() || !tool_stream.calls().is_empty() || !replay_items.is_empty();
+                if used_chain && !retried_without_chain && !emitted_anything && !control.is_cancelled() {
+                    tracing::warn!(
+                        "Responses WS incremental turn failed before output; resetting chain and retrying with full input"
+                    );
+                    self.reset_chain();
+                    retried_without_chain = true;
+                    continue;
+                }
+                return Err(err);
+            }
+
             if control.is_cancelled() {
                 api.finish("cancelled", tool_stream.calls());
                 return Ok(());
             }
             if let Some(id) = response_metadata.response_id.clone() {
                 self.previous_response_id = Some(id);
-                self.last_input_len = total_input_len;
+                self.last_messages_len = messages.len();
+                self.last_turn_was_generated = true;
+                self.last_prefix_hash = Some(hash_messages(&messages));
+                self.last_config_hash = Some(config_hash);
             }
             return finish_responses_stream(
                 tool_stream,

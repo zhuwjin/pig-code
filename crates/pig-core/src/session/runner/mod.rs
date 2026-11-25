@@ -362,6 +362,14 @@ impl Manager {
                 self.clear_provider_api_key(event_tx, provider_id)
             }
             Op::ListMcpServers { session_id } => self.list_mcp_servers(event_tx, session_id),
+            Op::StartMcpOAuth {
+                session_id,
+                server_name,
+            } => self.start_mcp_oauth(event_tx, session_id, server_name),
+            Op::ClearMcpOAuth {
+                session_id,
+                server_name,
+            } => self.clear_mcp_oauth(event_tx, session_id, server_name),
             Op::TrustProjectHooks { session_id } => self.trust_project_hooks(event_tx, session_id),
             Op::SyncPlugins { packages } => self.sync_plugins(event_tx, packages),
             Op::SetPluginEnabled {

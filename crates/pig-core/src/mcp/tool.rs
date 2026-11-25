@@ -169,7 +169,7 @@ fn render_result(result: &Value) -> (String, bool) {
 }
 
 /// Over-budget head/tail preview (same idea as Bash; MCP has no spill file, the omitted section is simply dropped)
-fn truncate_output(text: String) -> String {
+pub(super) fn truncate_output(text: String) -> String {
     let total = text.chars().count();
     if total <= MAX_MCP_OUTPUT_CHARS {
         return text;

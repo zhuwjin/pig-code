@@ -336,6 +336,18 @@ pub enum Op {
     ListMcpServers {
         session_id: String,
     },
+    /// Start an interactive OAuth 2.0 + PKCE loopback authorization flow for a
+    /// configured remote MCP HTTP server. Emits `Event::McpOAuthUrl` with the
+    /// browser authorization URL and `Event::McpOAuthComplete` when finished.
+    StartMcpOAuth {
+        session_id: String,
+        server_name: String,
+    },
+    /// Clear persisted OAuth tokens for a configured remote MCP HTTP server.
+    ClearMcpOAuth {
+        session_id: String,
+        server_name: String,
+    },
     /// Trust the current workspace's project hooks (.pigcode/hooks.toml): the
     /// canonical root is persisted into hooks.trusted_projects and the live
     /// session's project hooks become active from the next event on; replies

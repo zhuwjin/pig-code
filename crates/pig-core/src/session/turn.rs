@@ -25,18 +25,30 @@ impl Session {
     /// negligible cost; a single server failure does not affect the others.
     /// A normal step and a manual compaction share this snapshot so both price
     /// and send the same tool schemas.
-    pub(crate) async fn ensure_mcp_connected(&mut self) {
+    pub(crate) async fn ensure_mcp_connected(&mut self, tx: &async_channel::Sender<Event>) {
         if self.mcp.is_none() {
+            let elicitation = crate::mcp::build_session_elicitation_handler(
+                self.event_session_id().to_string(),
+                self.pending_questions.clone(),
+                tx.clone(),
+            );
             self.mcp = Some(Arc::new(
-                crate::mcp::McpManager::connect_all_with_trust(
+                crate::mcp::McpManager::connect_all_with_trust_and_elicitation(
                     &self.agent.cwd,
                     &self.data_dir,
                     &self.trust,
                     &self.plugin_tools.registry(),
+                    Some(elicitation),
                 )
                 .await,
             ));
         }
+    }
+
+    /// Drop the cached MCP manager so the next step lazily reconnects (e.g.,
+    /// after OAuth login or token clearing).
+    pub(crate) fn reset_mcp(&mut self) {
+        self.mcp = None;
     }
 
     /// Steer boundary: move every steer-lane item of the pending list into

@@ -1047,6 +1047,124 @@ impl Manager {
             },
         );
     }
+
+    pub(super) fn start_mcp_oauth(
+        &mut self,
+        event_tx: async_channel::Sender<Event>,
+        session_id: String,
+        server_name: String,
+    ) {
+        let (cwd, trust) = match self.sessions.get_mut(&session_id) {
+            Some(entry) => {
+                // Drop cached MCP connections so the next turn reconnects with fresh OAuth tokens.
+                entry.mcp_status = None;
+                if let Some(session) = entry.session.as_mut() {
+                    session.reset_mcp();
+                }
+                let trust = entry
+                    .runtime
+                    .as_ref()
+                    .map(|rt| rt.trust().clone())
+                    .unwrap_or_else(|| crate::config::WorkspaceTrust::untrusted(&entry.cwd));
+                (entry.cwd.clone(), trust)
+            }
+            None => {
+                let cwd = self.default_cwd.clone();
+                let trust = crate::config::WorkspaceTrust::untrusted(&cwd);
+                (cwd, trust)
+            }
+        };
+        let data_dir = self.data_dir.clone();
+        let plugins = self.plugins.clone();
+        let cancel = CancellationToken::new();
+        tokio::spawn(async move {
+            let tx_url = event_tx.clone();
+            let sid_url = session_id.clone();
+            let srv_url = server_name.clone();
+            let result = crate::mcp::McpManager::start_oauth(
+                &cwd,
+                &data_dir,
+                &trust,
+                &plugins,
+                &server_name,
+                std::time::Duration::from_secs(5 * 60),
+                cancel,
+                move |url| {
+                    let tx = tx_url.clone();
+                    let sid = sid_url.clone();
+                    let srv = srv_url.clone();
+                    tokio::spawn(async move {
+                        let _ = tx
+                            .send(Event::McpOAuthUrl {
+                                session_id: sid,
+                                server_name: srv,
+                                url,
+                            })
+                            .await;
+                    });
+                },
+            )
+            .await;
+            let (ok, error) = match result {
+                Ok(()) => (true, None),
+                Err(err) => (false, Some(err)),
+            };
+            let _ = event_tx
+                .send(Event::McpOAuthComplete {
+                    session_id,
+                    server_name,
+                    ok,
+                    error,
+                })
+                .await;
+        });
+    }
+
+    pub(super) fn clear_mcp_oauth(
+        &mut self,
+        event_tx: async_channel::Sender<Event>,
+        session_id: String,
+        server_name: String,
+    ) {
+        let (cwd, trust) = match self.sessions.get_mut(&session_id) {
+            Some(entry) => {
+                entry.mcp_status = None;
+                if let Some(session) = entry.session.as_mut() {
+                    session.reset_mcp();
+                }
+                let trust = entry
+                    .runtime
+                    .as_ref()
+                    .map(|rt| rt.trust().clone())
+                    .unwrap_or_else(|| crate::config::WorkspaceTrust::untrusted(&entry.cwd));
+                (entry.cwd.clone(), trust)
+            }
+            None => {
+                let cwd = self.default_cwd.clone();
+                let trust = crate::config::WorkspaceTrust::untrusted(&cwd);
+                (cwd, trust)
+            }
+        };
+        let (ok, error) = match crate::mcp::McpManager::clear_oauth(
+            &cwd,
+            &self.data_dir,
+            &trust,
+            &self.plugins,
+            &server_name,
+        ) {
+            Ok(()) => (true, None),
+            Err(err) => (false, Some(err)),
+        };
+        emit(
+            &event_tx,
+            Event::McpOAuthComplete {
+                session_id,
+                server_name,
+                ok,
+                error,
+            },
+        );
+    }
     pub(super) fn trust_project_hooks(
         &mut self,
         event_tx: async_channel::Sender<Event>,

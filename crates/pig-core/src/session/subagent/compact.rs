@@ -211,6 +211,7 @@ pub(super) async fn compact_child_context(
     }
     let pin_after = installed.pin_after(pause_pin);
     session.agent.history = installed.history;
+    session.agent.provider_session.reset();
     tracing::info!(
         agent_id = %session.agent.id,
         trigger = ?trigger,

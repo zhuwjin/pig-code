@@ -157,6 +157,7 @@ impl Session {
             Some(context_window),
         );
         self.agent.history = history;
+        self.agent.provider_session.reset();
         self.user_ixs = user_ixs;
         self.io_last_input = Vec::new();
         self.run_state.usage_anchor = None;
@@ -262,6 +263,7 @@ impl Session {
         // the file/reload consistent.
         if let Some(ix) = entry {
             self.agent.history.truncate(ix);
+            self.agent.provider_session.reset();
             // The model-io trace's delta baseline no longer matches the
             // history; reset it so the next trace falls back to a full
             // snapshot (the same self-healing as after resume)

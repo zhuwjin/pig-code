@@ -125,6 +125,7 @@ pub struct McpClient {
     name: String,
     config: Option<McpServerConfig>,
     workspace_root: PathBuf,
+    data_dir: Option<PathBuf>,
     elicitation: Option<ElicitationHandler>,
     transport: tokio::sync::RwLock<Transport>,
     generation: AtomicU64,
@@ -163,12 +164,25 @@ impl McpClient {
         workspace_root: &Path,
         elicitation: Option<ElicitationHandler>,
     ) -> Result<(Arc<Self>, Vec<McpToolSpec>), CoreError> {
+        Self::connect_with_options(config, workspace_root, elicitation, None).await
+    }
+
+    /// Connect with optional elicitation handler and app `data_dir` (used as
+    /// the default persistent store directory for OAuth-enabled HTTP servers).
+    pub async fn connect_with_options(
+        config: &McpServerConfig,
+        workspace_root: &Path,
+        elicitation: Option<ElicitationHandler>,
+        data_dir: Option<&Path>,
+    ) -> Result<(Arc<Self>, Vec<McpToolSpec>), CoreError> {
         let (transport, capabilities) =
-            Self::open_and_initialize(config, workspace_root, elicitation.clone()).await?;
+            Self::open_and_initialize(config, workspace_root, elicitation.clone(), data_dir)
+                .await?;
         let client = Arc::new(Self {
             name: config.name.clone(),
             config: Some(config.clone()),
             workspace_root: workspace_root.to_path_buf(),
+            data_dir: data_dir.map(Path::to_path_buf),
             elicitation,
             transport: tokio::sync::RwLock::new(transport),
             generation: AtomicU64::new(1),
@@ -189,6 +203,7 @@ impl McpClient {
         config: &McpServerConfig,
         workspace_root: &Path,
         elicitation: Option<ElicitationHandler>,
+        data_dir: Option<&Path>,
     ) -> Result<(Transport, McpServerCapabilities), CoreError> {
         let transport = match &config.transport {
             McpTransport::Stdio(stdio) => Transport::Stdio(
@@ -201,12 +216,15 @@ impl McpClient {
                 )
                 .await?,
             ),
-            McpTransport::Http(http) => Transport::Http(super::http::HttpTransport::new(
-                &config.name,
-                http,
-                config.timeout,
-                elicitation.clone(),
-            )?),
+            McpTransport::Http(http) => {
+                Transport::Http(super::http::HttpTransport::new_with_data_dir(
+                    &config.name,
+                    http,
+                    config.timeout,
+                    elicitation.clone(),
+                    data_dir,
+                )?)
+            }
         };
         let announced = transport.protocol_version();
         let client_capabilities = if elicitation.is_some() {
@@ -295,8 +313,13 @@ impl McpClient {
             old.shutdown().await;
         }
 
-        match Self::open_and_initialize(config, &self.workspace_root, self.elicitation.clone())
-            .await
+        match Self::open_and_initialize(
+            config,
+            &self.workspace_root,
+            self.elicitation.clone(),
+            self.data_dir.as_deref(),
+        )
+        .await
         {
             Ok((fresh, caps)) => {
                 *self.transport.write().await = fresh;
@@ -539,6 +562,7 @@ impl McpClient {
             name: name.to_string(),
             config: None,
             workspace_root: PathBuf::from("."),
+            data_dir: None,
             elicitation: None,
             transport: tokio::sync::RwLock::new(Transport::Noop),
             generation: AtomicU64::new(1),

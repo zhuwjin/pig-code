@@ -70,6 +70,7 @@ impl Session {
                 cwd: prep.cwd,
                 delegation_depth: prep.policy.delegation_depth,
                 config: Some(prep.policy.model),
+                provider_session: pig_provider::ProviderSession::new(),
                 history: prep.history,
                 tools: prep.tools,
                 schemas: prep.schemas,
@@ -318,13 +319,14 @@ impl Session {
             control = control.with_structured_output(schema);
         }
         let (child_tx, child_rx) = tokio::sync::mpsc::channel(256);
-        let task = tokio::spawn(pig_provider::stream_chat(
-            request_config,
-            self.agent.history.clone(),
-            self.agent.schemas.clone(),
-            child_tx,
-            control,
-        ));
+        let provider_session = self.agent.provider_session.clone();
+        let history = self.agent.history.clone();
+        let schemas = self.agent.schemas.clone();
+        let task = tokio::spawn(async move {
+            provider_session
+                .stream_turn(request_config, history, schemas, child_tx, control)
+                .await;
+        });
         (child_rx, task)
     }
 

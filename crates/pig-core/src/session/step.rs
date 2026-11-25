@@ -28,7 +28,7 @@ impl Session {
         let (turn_id, config, _, _, _) = rt.root_parts();
         let turn_id = turn_id.to_string();
         let config = config.clone();
-        self.ensure_mcp_connected().await;
+        self.ensure_mcp_connected(tx).await;
         self.select_plugin_tools(&config, tx).await;
         self.agent.config = Some(config.clone());
         rt.schemas = self.root_schemas();
@@ -113,13 +113,14 @@ impl Session {
             request_config.prompt_cache_key = Some(self.root_prompt_cache_key());
         }
         let (event_tx, event_rx) = tokio::sync::mpsc::channel(256);
-        let task = tokio::spawn(pig_provider::stream_chat(
-            request_config,
-            self.agent.history.clone(),
-            rt.schemas.clone(),
-            event_tx,
-            control,
-        ));
+        let provider_session = self.agent.provider_session.clone();
+        let history = self.agent.history.clone();
+        let schemas = rt.schemas.clone();
+        let task = tokio::spawn(async move {
+            provider_session
+                .stream_turn(request_config, history, schemas, event_tx, control)
+                .await;
+        });
         (event_rx, task)
     }
 

@@ -252,7 +252,7 @@ impl Session {
         }
         // Manual /compact must price and send the same tool set as a normal
         // step, so connect the lazy MCP snapshot before schemas are built.
-        self.ensure_mcp_connected().await;
+        self.ensure_mcp_connected(tx).await;
         let leading_tokens = estimate_leading_system_tokens(&self.agent.history);
         let schemas = config.map(|_| self.root_schemas());
         let tools_tokens = schemas
@@ -500,6 +500,7 @@ impl Session {
         self.sync_rollout();
         self.report_rollout_failure(tx);
         self.agent.history = next_history;
+        self.agent.provider_session.reset();
         self.user_ixs = next_user_ixs;
         // Reset the usage watermark to an estimate of the compacted history
         // (corrected by the next real sample): without the reset the watermark

@@ -343,6 +343,22 @@ pub enum Event {
         session_id: String,
         servers: Option<Vec<McpServerStatus>>,
     },
+    /// Emitted when an interactive OAuth 2.0 + PKCE flow for a remote MCP
+    /// server has started and is awaiting browser authorization at `url`.
+    McpOAuthUrl {
+        session_id: String,
+        server_name: String,
+        url: String,
+    },
+    /// Emitted when an interactive OAuth 2.0 + PKCE flow for a remote MCP
+    /// server finishes (success or error/cancellation).
+    McpOAuthComplete {
+        session_id: String,
+        server_name: String,
+        ok: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     FileSearchResults {
         session_id: String,
         query: String,
@@ -894,6 +910,8 @@ impl Event {
             | Self::SessionReplayComplete { session_id, .. }
             | Self::SessionTitleChanged { session_id, .. }
             | Self::McpServerList { session_id, .. }
+            | Self::McpOAuthUrl { session_id, .. }
+            | Self::McpOAuthComplete { session_id, .. }
             | Self::FileSearchResults { session_id, .. }
             | Self::QueueChanged { session_id, .. }
             | Self::QueueDrainChanged { session_id, .. }

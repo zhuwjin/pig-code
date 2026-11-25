@@ -11,17 +11,114 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::TcpListener;
+use tokio_util::sync::CancellationToken;
 
 use crate::retry::http_client;
 
 /// Refresh tokens proactively this many seconds before their advertised expiry.
 pub const DEFAULT_EXPIRY_LEEWAY_SECS: u64 = 60;
+
+/// Generate a high-entropy URL-safe OAuth 2.0 `state` token for CSRF protection.
+pub fn generate_state() -> String {
+    let mut raw = [0u8; 16];
+    fill_entropy(&mut raw);
+    URL_SAFE_NO_PAD.encode(raw)
+}
+
+/// Discovered OAuth 2.0 server metadata (RFC 9728 / RFC 8414).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthMetadata {
+    #[serde(default)]
+    pub authorization_endpoint: Option<String>,
+    #[serde(default)]
+    pub token_endpoint: Option<String>,
+    #[serde(default)]
+    pub registration_endpoint: Option<String>,
+    #[serde(default)]
+    pub resource: Option<String>,
+}
+
+/// Discover OAuth 2.0 authorization & token endpoints for a resource server
+/// using RFC 9728 (`/.well-known/oauth-protected-resource`) and RFC 8414
+/// (`/.well-known/oauth-authorization-server`).
+pub async fn discover_oauth_metadata(server_url: &str) -> Result<OAuthMetadata, String> {
+    let parsed = reqwest::Url::parse(server_url)
+        .map_err(|e| format!("Invalid server URL `{server_url}` for OAuth discovery: {e}"))?;
+    let origin = parsed.origin().ascii_serialization();
+    if origin == "null" {
+        return Err(format!("Server URL `{server_url}` has no valid HTTP origin"));
+    }
+    let client = http_client();
+    let mut auth_origin = origin.clone();
+    let mut resource = None;
+
+    // 1. Try RFC 9728 Protected Resource Metadata on the resource server origin.
+    let prm_url = format!("{origin}/.well-known/oauth-protected-resource");
+    if let Ok(resp) = client
+        .get(&prm_url)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+        && resp.status().is_success()
+        && let Ok(body) = resp.json::<serde_json::Value>().await
+    {
+        if let Some(res) = body["resource"].as_str().filter(|s| !s.is_empty()) {
+            resource = Some(res.to_string());
+        }
+        if let Some(as_url) = body["authorization_servers"]
+            .as_array()
+            .and_then(|arr| arr.first())
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            auth_origin = as_url.trim_end_matches('/').to_string();
+        }
+    }
+
+    // 2. Fetch RFC 8414 Authorization Server Metadata.
+    let as_metadata_url = format!("{auth_origin}/.well-known/oauth-authorization-server");
+    let resp = client
+        .get(&as_metadata_url)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| format!("OAuth metadata discovery failed for `{as_metadata_url}`: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!(
+            "OAuth metadata discovery at `{as_metadata_url}` returned HTTP {}",
+            resp.status()
+        ));
+    }
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Invalid JSON from `{as_metadata_url}`: {e}"))?;
+    Ok(OAuthMetadata {
+        authorization_endpoint: body["authorization_endpoint"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        token_endpoint: body["token_endpoint"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        registration_endpoint: body["registration_endpoint"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        resource,
+    })
+}
 
 /// RFC 7636 PKCE verifier + S256 challenge pair.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -265,6 +362,17 @@ impl OAuthTokenManager {
         pkce: &PkceChallenge,
         state: &str,
     ) -> Result<String, String> {
+        self.build_authorization_url_with_redirect(pkce, state, self.config.redirect_uri.as_deref())
+    }
+
+    /// Build the browser authorization URL using an explicit `redirect_uri`
+    /// override (such as an ephemeral `http://127.0.0.1:<port>/callback`).
+    pub fn build_authorization_url_with_redirect(
+        &self,
+        pkce: &PkceChallenge,
+        state: &str,
+        redirect_uri: Option<&str>,
+    ) -> Result<String, String> {
         let base = self
             .config
             .authorization_url
@@ -279,7 +387,7 @@ impl OAuthTokenManager {
             query.append_pair("code_challenge", &pkce.challenge);
             query.append_pair("code_challenge_method", pkce.method);
             query.append_pair("state", state);
-            if let Some(redirect) = &self.config.redirect_uri {
+            if let Some(redirect) = redirect_uri {
                 query.append_pair("redirect_uri", redirect);
             }
             if !self.config.scopes.is_empty() {
@@ -298,6 +406,18 @@ impl OAuthTokenManager {
         code: &str,
         pkce: &PkceChallenge,
     ) -> Result<OAuthTokenSet, String> {
+        self.exchange_code_with_redirect(code, pkce, self.config.redirect_uri.as_deref())
+            .await
+    }
+
+    /// Exchange an authorization code + PKCE verifier using an explicit
+    /// `redirect_uri` (matching the loopback URI sent during authorization).
+    pub async fn exchange_code_with_redirect(
+        &self,
+        code: &str,
+        pkce: &PkceChallenge,
+        redirect_uri: Option<&str>,
+    ) -> Result<OAuthTokenSet, String> {
         let _guard = self.refresh_lock.lock().await;
         let mut form = vec![
             ("grant_type".to_string(), "authorization_code".to_string()),
@@ -308,8 +428,8 @@ impl OAuthTokenManager {
         if let Some(secret) = &self.config.client_secret {
             form.push(("client_secret".to_string(), secret.clone()));
         }
-        if let Some(redirect) = &self.config.redirect_uri {
-            form.push(("redirect_uri".to_string(), redirect.clone()));
+        if let Some(redirect) = redirect_uri {
+            form.push(("redirect_uri".to_string(), redirect.to_string()));
         }
         if let Some(resource) = &self.config.resource {
             form.push(("resource".to_string(), resource.clone()));
@@ -317,6 +437,51 @@ impl OAuthTokenManager {
         let tokens = self.post_token_form(&form, None).await?;
         self.store.save(&tokens)?;
         Ok(tokens)
+    }
+
+    /// Clear any persisted tokens in the underlying store.
+    pub fn clear_tokens(&self) -> Result<(), String> {
+        self.store.clear()
+    }
+
+    /// Run a complete interactive OAuth 2.0 + PKCE loopback authorization flow:
+    /// 1. Binds a loopback listener on `127.0.0.1` (reusing the configured
+    ///    loopback port/path from `config.redirect_uri`, or an ephemeral port
+    ///    with `/callback`).
+    /// 2. Generates a fresh S256 [`PkceChallenge`] and CSRF `state`, builds the
+    ///    authorization URL, and hands it to `on_authorize_url`.
+    /// 3. Awaits the browser callback on the loopback path, validates `state`,
+    ///    responds with a clean HTML page, and exchanges the code for persisted
+    ///    tokens.
+    pub async fn authorize_with_loopback<F>(
+        &self,
+        timeout: Duration,
+        cancel: CancellationToken,
+        on_authorize_url: F,
+    ) -> Result<OAuthTokenSet, String>
+    where
+        F: FnOnce(String),
+    {
+        let (bind_addr, callback_path, configured_host) =
+            parse_loopback_redirect(self.config.redirect_uri.as_deref())?;
+        let listener = TcpListener::bind(&bind_addr)
+            .await
+            .map_err(|e| format!("Failed to bind OAuth loopback listener on {bind_addr}: {e}"))?;
+        let bound = listener
+            .local_addr()
+            .map_err(|e| format!("Failed to inspect OAuth loopback address: {e}"))?;
+        let redirect_uri = format!("http://{configured_host}:{}{callback_path}", bound.port());
+
+        let pkce = PkceChallenge::generate();
+        let state = generate_state();
+        let auth_url =
+            self.build_authorization_url_with_redirect(&pkce, &state, Some(&redirect_uri))?;
+        on_authorize_url(auth_url);
+
+        let code = await_loopback_callback(&listener, &callback_path, &state, timeout, cancel)
+            .await?;
+        self.exchange_code_with_redirect(&code, &pkce, Some(&redirect_uri))
+            .await
     }
 
     /// Return a valid access token, refreshing transactionally once if expired.
@@ -432,6 +597,182 @@ impl OAuthTokenManager {
             expires_at,
             scope,
         })
+    }
+}
+
+fn parse_loopback_redirect(redirect_uri: Option<&str>) -> Result<(String, String, String), String> {
+    let Some(raw) = redirect_uri.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok((
+            "127.0.0.1:0".to_string(),
+            "/callback".to_string(),
+            "127.0.0.1".to_string(),
+        ));
+    };
+    let parsed = reqwest::Url::parse(raw)
+        .map_err(|e| format!("Invalid OAuth redirect_uri `{raw}`: {e}"))?;
+    if parsed.scheme() != "http" {
+        return Err(format!(
+            "OAuth loopback redirect_uri must use http://, got `{raw}`"
+        ));
+    }
+    let host = parsed.host_str().unwrap_or("");
+    if host != "127.0.0.1" && !host.eq_ignore_ascii_case("localhost") {
+        return Err(format!(
+            "OAuth loopback redirect_uri must target 127.0.0.1 or localhost, got `{host}`"
+        ));
+    }
+    let port = parsed.port().unwrap_or(0);
+    let path = if parsed.path().is_empty() {
+        "/callback".to_string()
+    } else {
+        parsed.path().to_string()
+    };
+    Ok((format!("127.0.0.1:{port}"), path, host.to_string()))
+}
+
+async fn write_http_html(
+    socket: &mut tokio::net::TcpStream,
+    status: &str,
+    title: &str,
+    message: &str,
+) {
+    let body = format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>{title}</title></head>\
+         <body style=\"font-family:system-ui,sans-serif;max-width:480px;margin:48px auto;padding:0 16px\">\
+         <h2>{title}</h2><p>{message}</p></body></html>"
+    );
+    let response = format!(
+        "HTTP/1.1 {status}\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let _ = socket.write_all(response.as_bytes()).await;
+    let _ = socket.shutdown().await;
+}
+
+async fn await_loopback_callback(
+    listener: &TcpListener,
+    callback_path: &str,
+    expected_state: &str,
+    timeout: Duration,
+    cancel: CancellationToken,
+) -> Result<String, String> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err("OAuth authorization timed out waiting for browser callback".to_string());
+        }
+        let accepted = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                return Err("OAuth authorization cancelled".to_string());
+            }
+            res = tokio::time::timeout(remaining, listener.accept()) => match res {
+                Ok(Ok((socket, _))) => socket,
+                Ok(Err(e)) => return Err(format!("OAuth loopback accept failed: {e}")),
+                Err(_) => return Err("OAuth authorization timed out waiting for browser callback".to_string()),
+            }
+        };
+        let mut socket = accepted;
+        let mut buf = [0u8; 8192];
+        let n = match tokio::time::timeout(Duration::from_secs(5), socket.read(&mut buf)).await {
+            Ok(Ok(n)) if n > 0 => n,
+            _ => continue,
+        };
+        let request = String::from_utf8_lossy(&buf[..n]);
+        let Some(first_line) = request.lines().next() else {
+            continue;
+        };
+        let mut parts = first_line.split_whitespace();
+        let method = parts.next().unwrap_or("");
+        let target = parts.next().unwrap_or("");
+        if method != "GET" {
+            write_http_html(
+                &mut socket,
+                "405 Method Not Allowed",
+                "Method not allowed",
+                "Expected a GET OAuth redirect.",
+            )
+            .await;
+            continue;
+        }
+        let Ok(url) = reqwest::Url::parse(&format!("http://127.0.0.1{target}")) else {
+            write_http_html(
+                &mut socket,
+                "400 Bad Request",
+                "Invalid callback request",
+                "Could not parse OAuth callback URL.",
+            )
+            .await;
+            continue;
+        };
+        if url.path() != callback_path {
+            write_http_html(
+                &mut socket,
+                "404 Not Found",
+                "Not found",
+                "Waiting for OAuth callback.",
+            )
+            .await;
+            continue;
+        }
+        let mut code: Option<String> = None;
+        let mut state: Option<String> = None;
+        let mut error: Option<String> = None;
+        let mut error_description: Option<String> = None;
+        for (k, v) in url.query_pairs() {
+            match k.as_ref() {
+                "code" => code = Some(v.into_owned()),
+                "state" => state = Some(v.into_owned()),
+                "error" => error = Some(v.into_owned()),
+                "error_description" => error_description = Some(v.into_owned()),
+                _ => {}
+            }
+        }
+        if let Some(err) = error {
+            let detail = error_description
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(|d| format!("{err}: {d}"))
+                .unwrap_or(err);
+            write_http_html(
+                &mut socket,
+                "400 Bad Request",
+                "Authorization failed",
+                "The OAuth provider returned an error. You may close this tab.",
+            )
+            .await;
+            return Err(format!("OAuth provider rejected authorization: {detail}"));
+        }
+        if state.as_deref() != Some(expected_state) {
+            write_http_html(
+                &mut socket,
+                "400 Bad Request",
+                "Invalid OAuth state",
+                "State mismatch detected; authorization aborted.",
+            )
+            .await;
+            return Err("OAuth callback state mismatch (possible CSRF)".to_string());
+        }
+        let Some(code) = code.filter(|s| !s.is_empty()) else {
+            write_http_html(
+                &mut socket,
+                "400 Bad Request",
+                "Missing authorization code",
+                "The callback URL did not include a code parameter.",
+            )
+            .await;
+            return Err("OAuth callback did not include an authorization code".to_string());
+        };
+        write_http_html(
+            &mut socket,
+            "200 OK",
+            "Authorization complete",
+            "You may close this browser tab and return to Pig Code.",
+        )
+        .await;
+        return Ok(code);
     }
 }
 
@@ -607,5 +948,218 @@ mod tests {
         assert_eq!(persisted.access_token, "fresh-token-2");
         assert_eq!(persisted.refresh_token.as_deref(), Some("rotated-refresh-2"));
         let _ = store.clear();
+    }
+
+    #[tokio::test]
+    async fn loopback_pkce_flow_verifies_s256_ignores_favicon_and_persists_tokens() {
+        let token_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind token");
+        let token_addr = token_listener.local_addr().expect("token addr");
+        let expected_challenge: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let challenge_srv = Arc::clone(&expected_challenge);
+
+        tokio::spawn(async move {
+            let Ok((mut socket, _)) = token_listener.accept().await else {
+                return;
+            };
+            let mut buf = [0u8; 8192];
+            let n = socket.read(&mut buf).await.unwrap_or(0);
+            let raw = String::from_utf8_lossy(&buf[..n]);
+            let form_body = raw.split("\r\n\r\n").nth(1).unwrap_or("");
+            let params: std::collections::HashMap<String, String> =
+                reqwest::Url::parse(&format!("http://127.0.0.1/?{form_body}"))
+                    .unwrap()
+                    .query_pairs()
+                    .into_owned()
+                    .collect();
+            let verifier = params.get("code_verifier").cloned().unwrap_or_default();
+            let derived = PkceChallenge::from_verifier(verifier).challenge;
+            let expected = challenge_srv.lock().unwrap().clone().unwrap_or_default();
+            let (status, body) = if params.get("code").map(String::as_str) == Some("auth-code-42")
+                && !expected.is_empty()
+                && derived == expected
+            {
+                (
+                    "200 OK",
+                    serde_json::json!({
+                        "access_token": "pkce-access-token",
+                        "refresh_token": "pkce-refresh-token",
+                        "token_type": "Bearer",
+                        "expires_in": 3600
+                    })
+                    .to_string(),
+                )
+            } else {
+                (
+                    "400 Bad Request",
+                    serde_json::json!({ "error": "invalid_grant" }).to_string(),
+                )
+            };
+            let resp = format!(
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = socket.write_all(resp.as_bytes()).await;
+            let _ = socket.shutdown().await;
+        });
+
+        let tmp_file = std::env::temp_dir().join(format!(
+            "pig-oauth-pkce-{}-{}.json",
+            std::process::id(),
+            now_nanos()
+        ));
+        let store = Arc::new(FileTokenStore::new(&tmp_file));
+        let mgr = OAuthTokenManager::new(
+            OAuthConfig {
+                client_id: "pig-desktop".into(),
+                client_secret: None,
+                authorization_url: Some("https://auth.example.com/authorize".into()),
+                token_url: format!("http://{token_addr}/token"),
+                redirect_uri: None,
+                scopes: vec!["mcp:tools".into()],
+                resource: Some("https://mcp.example.com".into()),
+            },
+            store.clone(),
+        );
+
+        let challenge_capture = Arc::clone(&expected_challenge);
+        let tokens = mgr
+            .authorize_with_loopback(
+                Duration::from_secs(5),
+                CancellationToken::new(),
+                move |auth_url| {
+                    let parsed = reqwest::Url::parse(&auth_url).expect("parse auth url");
+                    let qp: std::collections::HashMap<String, String> =
+                        parsed.query_pairs().into_owned().collect();
+                    assert_eq!(qp.get("code_challenge_method").map(String::as_str), Some("S256"));
+                    *challenge_capture.lock().unwrap() = qp.get("code_challenge").cloned();
+                    let redirect = qp.get("redirect_uri").cloned().expect("redirect_uri");
+                    let state = qp.get("state").cloned().expect("state");
+                    tokio::spawn(async move {
+                        let client = reqwest::Client::new();
+                        // Unrelated browser request (/favicon.ico) must not abort the flow.
+                        let origin = reqwest::Url::parse(&redirect)
+                            .unwrap()
+                            .origin()
+                            .ascii_serialization();
+                        let _ = client.get(format!("{origin}/favicon.ico")).send().await;
+                        let callback = format!("{redirect}?code=auth-code-42&state={state}");
+                        let resp = client.get(&callback).send().await.expect("callback");
+                        assert!(resp.status().is_success());
+                    });
+                },
+            )
+            .await
+            .expect("pkce loopback flow");
+
+        assert_eq!(tokens.access_token, "pkce-access-token");
+        assert_eq!(tokens.refresh_token.as_deref(), Some("pkce-refresh-token"));
+        assert_eq!(
+            store.load().unwrap().unwrap().access_token,
+            "pkce-access-token"
+        );
+        let _ = store.clear();
+    }
+
+    #[tokio::test]
+    async fn loopback_pkce_rejects_csrf_state_mismatch() {
+        let mgr = OAuthTokenManager::new(
+            OAuthConfig {
+                client_id: "pig-desktop".into(),
+                client_secret: None,
+                authorization_url: Some("https://auth.example.com/authorize".into()),
+                token_url: "http://127.0.0.1:1/token".into(),
+                redirect_uri: None,
+                scopes: vec![],
+                resource: None,
+            },
+            Arc::new(MemoryTokenStore::default()),
+        );
+        let err = mgr
+            .authorize_with_loopback(
+                Duration::from_secs(5),
+                CancellationToken::new(),
+                |auth_url| {
+                    let parsed = reqwest::Url::parse(&auth_url).unwrap();
+                    let redirect = parsed
+                        .query_pairs()
+                        .find(|(k, _)| k == "redirect_uri")
+                        .unwrap()
+                        .1
+                        .into_owned();
+                    tokio::spawn(async move {
+                        let _ = reqwest::Client::new()
+                            .get(format!("{redirect}?code=abc&state=wrong-state"))
+                            .send()
+                            .await;
+                    });
+                },
+            )
+            .await
+            .expect_err("wrong state must fail");
+        assert!(err.contains("state mismatch"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn discover_oauth_metadata_reads_protected_resource_and_auth_server() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let origin = format!("http://{addr}");
+        let origin_srv = origin.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let origin = origin_srv.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let path = req
+                        .lines()
+                        .next()
+                        .and_then(|l| l.split_whitespace().nth(1))
+                        .unwrap_or("");
+                    let body = match path {
+                        "/.well-known/oauth-protected-resource" => serde_json::json!({
+                            "resource": format!("{origin}/mcp"),
+                            "authorization_servers": [origin]
+                        })
+                        .to_string(),
+                        "/.well-known/oauth-authorization-server" => serde_json::json!({
+                            "authorization_endpoint": format!("{origin}/oauth/authorize"),
+                            "token_endpoint": format!("{origin}/oauth/token")
+                        })
+                        .to_string(),
+                        _ => "{}".to_string(),
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+
+        let meta = discover_oauth_metadata(&format!("{origin}/mcp"))
+            .await
+            .expect("discover metadata");
+        assert_eq!(
+            meta.authorization_endpoint.as_deref(),
+            Some(format!("{origin}/oauth/authorize").as_str())
+        );
+        assert_eq!(
+            meta.token_endpoint.as_deref(),
+            Some(format!("{origin}/oauth/token").as_str())
+        );
+        assert_eq!(
+            meta.resource.as_deref(),
+            Some(format!("{origin}/mcp").as_str())
+        );
     }
 }
