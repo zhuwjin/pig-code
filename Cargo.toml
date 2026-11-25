@@ -13,6 +13,7 @@ nsh-core = "0.7.0"
 nsh-base = "0.7.0"
 nsh-engine = "0.7.0"
 pig-core = { path = "crates/pig-core" }
+pig-daemon = { path = "crates/pig-daemon" }
 pig-protocol = { path = "crates/pig-protocol" }
 pig-provider = { path = "crates/pig-provider" }
 pig-utils = { path = "crates/pig-utils" }

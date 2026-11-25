@@ -10,6 +10,21 @@ static SELFTEST_ID: AtomicU64 = AtomicU64::new(0);
 
 struct SelftestDir(PathBuf);
 
+#[derive(Clone)]
+enum AgentConnection {
+    Local(pig_core::AgentHandle),
+    Remote(pig_daemon::DaemonClient),
+}
+
+impl AgentConnection {
+    fn ops(&self) -> &async_channel::Sender<Op> {
+        match self {
+            Self::Local(handle) => &handle.ops,
+            Self::Remote(client) => &client.ops,
+        }
+    }
+}
+
 impl Drop for SelftestDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
@@ -19,7 +34,7 @@ impl Drop for SelftestDir {
 /// The native connection to the Pig agent core.
 #[class]
 pub struct Agent {
-    handle: pig_core::AgentHandle,
+    handle: AgentConnection,
     cwd: PathBuf,
     data_dir: PathBuf,
     plugins: crate::plugin_system::PluginSystemManager,
@@ -88,27 +103,41 @@ default_reasoning_level = "low"
             .expect("write selftest config");
             cwd = workspace.clone();
             (
-                pig_core::spawn_agent_with_data_dir(Some(config_path), workspace, data_dir.clone()),
+                AgentConnection::Local(pig_core::spawn_agent_with_data_dir(
+                    Some(config_path),
+                    workspace,
+                    data_dir.clone(),
+                )),
                 Some(SelftestDir(root)),
                 data_dir,
             )
         } else {
             let data_dir = pig_utils::data_dir();
-            (pig_core::spawn_agent(None, cwd.clone()), None, data_dir)
+            let client =
+                pig_daemon::DaemonClient::connect_or_spawn(pig_daemon::DaemonConnectConfig {
+                    data_dir: data_dir.clone(),
+                    cwd: cwd.clone(),
+                    config_path: None,
+                })
+                .unwrap_or_else(|error| panic!("failed to attach pig-daemon: {error}"));
+            (AgentConnection::Remote(client), None, data_dir)
         };
-        // The native UI consumes the ordered EventJournal exclusively; closing
-        // the legacy raw receiver avoids buffering or cloning duplicate events.
-        handle.events.close();
-        for op in [Op::ListSessions, Op::ListWorkspaces, Op::GetConfig] {
-            let _ = handle.ops.try_send(op);
+        if let AgentConnection::Local(handle) = &handle {
+            // The native UI consumes the ordered EventJournal exclusively; closing
+            // the legacy raw receiver avoids buffering or cloning duplicate events.
+            handle.events.close();
         }
-        let _ = handle.ops.try_send(Op::SyncPlugins {
+        let ops = handle.ops().clone();
+        for op in [Op::ListSessions, Op::ListWorkspaces, Op::GetConfig] {
+            let _ = ops.try_send(op);
+        }
+        let _ = ops.try_send(Op::SyncPlugins {
             packages: crate::plugin_system::installed_sources(&data_dir),
         });
         Self {
             plugins: crate::plugin_system::PluginSystemManager::new(
                 data_dir.clone(),
-                handle.ops.clone(),
+                ops,
                 cwd.clone(),
             ),
             handle,
@@ -430,44 +459,71 @@ default_reasoning_level = "low"
             .map_err(|error| error.to_string())
     }
 
-    /// Streams ordered JSON arrays of core events until the agent stops.
+    /// Streams ordered JSON arrays of core events until the client disconnects.
     pub async fn listen(this: Instance<Self>, #[args(events)] listener: Callback<String>) {
-        let events = this.with(|agent| agent.handle.journal.clone());
+        let connection = this.with(|agent| agent.handle.clone());
         let plugins = this.with(|agent| agent.plugins.clone());
-        let mut projection = crate::conversation_projection::ProjectionRegistry::new();
-        while let Ok(first) = events.recv().await {
-            let mut batch = vec![first];
-            while batch.len() < 128 {
-                match events.try_recv() {
-                    Ok(event) => batch.push(event),
-                    Err(_) => break,
+        match connection {
+            AgentConnection::Local(handle) => {
+                let events = handle.journal.clone();
+                let mut projection = pig_core::conversation_projection::ProjectionRegistry::new();
+                while let Ok(first) = events.recv().await {
+                    let mut batch = vec![first];
+                    while batch.len() < 128 {
+                        match events.try_recv() {
+                            Ok(event) => batch.push(event),
+                            Err(_) => break,
+                        }
+                    }
+                    for envelope in &batch {
+                        plugins.handle_core_event(&envelope.event);
+                    }
+                    let mut ui_batch = Vec::with_capacity(batch.len());
+                    for envelope in &batch {
+                        if let Err(error) = synchronize_projection(
+                            &mut projection,
+                            &events,
+                            envelope,
+                            &mut ui_batch,
+                            |session_id| {
+                                let Some(session_id) = session_id else {
+                                    return Err(
+                                        "global projection resync requires a journal snapshot"
+                                            .into(),
+                                    );
+                                };
+                                this.with(|agent| agent.send_op(Op::OpenSession { session_id }))
+                            },
+                        ) {
+                            report_projection_error(&listener, error);
+                            return;
+                        }
+                    }
+                    if !ui_batch.is_empty() {
+                        listener.post(encode_batch(&ui_batch));
+                    }
                 }
             }
-            for envelope in &batch {
-                plugins.handle_core_event(&envelope.event);
-            }
-            let mut ui_batch = Vec::with_capacity(batch.len());
-            for envelope in &batch {
-                if let Err(error) = synchronize_projection(
-                    &mut projection,
-                    &events,
-                    envelope,
-                    &mut ui_batch,
-                    |session_id| {
-                        let Some(session_id) = session_id else {
-                            return Err(
-                                "global projection resync requires a journal snapshot".into()
-                            );
-                        };
-                        this.with(|agent| agent.send_op(Op::OpenSession { session_id }))
-                    },
-                ) {
-                    report_projection_error(&listener, error);
-                    return;
+            AgentConnection::Remote(client) => {
+                while let Ok(message) = client.recv().await {
+                    let ui_batch = match message {
+                        pig_daemon::DaemonMessage::Batch(batch) => batch.events,
+                        pig_daemon::DaemonMessage::Snapshot(snapshot) => {
+                            pig_daemon::snapshot_events(&snapshot)
+                        }
+                        pig_daemon::DaemonMessage::Subscription { .. } => continue,
+                        pig_daemon::DaemonMessage::Error { detail } => {
+                            report_projection_error(&listener, detail);
+                            return;
+                        }
+                    };
+                    for event in &ui_batch {
+                        plugins.handle_core_event(event);
+                    }
+                    if !ui_batch.is_empty() {
+                        listener.post(encode_batch(&ui_batch));
+                    }
                 }
-            }
-            if !ui_batch.is_empty() {
-                listener.post(encode_batch(&ui_batch));
             }
         }
     }
@@ -476,7 +532,7 @@ default_reasoning_level = "low"
 impl Agent {
     fn send_op(&self, op: Op) -> Result<(), String> {
         self.handle
-            .ops
+            .ops()
             .try_send(op)
             .map_err(|error| error.to_string())
     }
@@ -516,7 +572,7 @@ impl Agent {
 }
 
 fn synchronize_projection(
-    projection: &mut crate::conversation_projection::ProjectionRegistry,
+    projection: &mut pig_core::conversation_projection::ProjectionRegistry,
     journal: &pig_core::EventJournal,
     envelope: &pig_protocol::EventEnvelope,
     output: &mut Vec<Event>,
@@ -545,10 +601,10 @@ fn synchronize_projection(
 }
 
 fn append_projected(
-    projection: &mut crate::conversation_projection::ProjectionRegistry,
+    projection: &mut pig_core::conversation_projection::ProjectionRegistry,
     envelope: &pig_protocol::EventEnvelope,
     output: &mut Vec<Event>,
-) -> Option<crate::conversation_projection::ProjectionResync> {
+) -> Option<pig_core::conversation_projection::ProjectionResync> {
     let projected = projection.project(envelope);
     output.extend(projected.events);
     if projected.pass {
@@ -572,7 +628,10 @@ impl Drop for Agent {
         let Some(directory) = self._selftest_dir.take() else {
             return;
         };
-        let handle = self.handle.clone();
+        let AgentConnection::Local(handle) = &self.handle else {
+            return;
+        };
+        let handle = handle.clone();
         std::thread::spawn(move || {
             if let Err(error) = handle.close_blocking() {
                 tracing::warn!(%error, "selftest runtime cleanup failed");
@@ -585,7 +644,7 @@ impl Drop for Agent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::conversation_projection::ProjectionRegistry;
+    use pig_core::conversation_projection::ProjectionRegistry;
 
     async fn session_journal_fixture(
         name: &str,

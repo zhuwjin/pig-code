@@ -334,9 +334,21 @@ pub fn build_session_elicitation_handler(
                         .lock()
                         .expect("pending questions lock")
                         .remove(&request_id);
+                    let _ = tx
+                        .send(Event::QuestionResolved {
+                            session_id: session_id.clone(),
+                            request_id: request_id.clone(),
+                        })
+                        .await;
                     return McpElicitationResponse::cancel();
                 }
             };
+            let _ = tx
+                .send(Event::QuestionResolved {
+                    session_id: session_id.clone(),
+                    request_id,
+                })
+                .await;
             answers_to_elicitation_response(&fields, reply)
         })
     })

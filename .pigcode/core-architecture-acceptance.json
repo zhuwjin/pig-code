@@ -36,6 +36,11 @@
       "acceptance": ["R07", "R09", "R14"],
       "public_surface": ["config", "AppConfig"]
     },
+    "conversation_projection.rs": {
+      "paths": ["crates/pig-core/src/conversation_projection.rs"],
+      "acceptance": ["R05"],
+      "public_surface": ["conversation_projection", "ProjectionRegistry", "ProjectionResync", "Projected"]
+    },
     "credentials.rs": {
       "paths": ["crates/pig-core/src/credentials.rs"],
       "acceptance": ["R09", "R14", "R15"],
@@ -192,9 +197,9 @@
       "area": "Control journal, projections and consistent resync",
       "reference_semantics": "DeepSeek RemoteJournalStream publishes a cursor-bound snapshot before live entries, repairs gaps and rejects discontinuous or old generations; Kimi buffers live events while the initial page is read, then flushes them in order.",
       "pig_invariants": ["All catalog, task, conversation, UI and plugin views derive from ordered run/sequence facts; a resync snapshot and its cursor are committed atomically.", "Duplicate, out-of-order and stale-epoch input cannot regress projections; replayable cursors continue in order and expired cursors return ResyncRequired with one consistent snapshot."],
-      "automated_tests": ["runtime_extensions::catalog_projection_registers_and_resyncs_without_core_changes", "agent::ipc::tests::failed_journal_write_does_not_publish_or_advance_cursor"],
+      "automated_tests": ["runtime_extensions::catalog_projection_registers_and_resyncs_without_core_changes", "agent::ipc::tests::failed_journal_write_does_not_publish_or_advance_cursor", "server::tests::first_attach_switches_from_replay_to_one_atomic_snapshot", "daemon::multi_client_attach_resolution_and_background_survival"],
       "references": [{"project": "deepseek-harness", "path": "packages/api/gateway/src/client/journal-stream.ts"}, {"project": "kimi-code", "path": "packages/kap-server/src/transport/ws/v1/sessionEventBroadcaster.ts"}],
-      "existing_evidence": ["crates/pig-core/src/journal.rs", "crates/pig-core/src/agent/runtime/projection.rs", "src/conversation_projection.rs", "src/agent.rs", "crates/pig-core/tests/runtime_extensions.rs"],
+      "existing_evidence": ["crates/pig-core/src/journal.rs", "crates/pig-core/src/agent/runtime/projection.rs", "crates/pig-core/src/conversation_projection.rs", "src/agent.rs", "crates/pig-core/tests/runtime_extensions.rs", "crates/pig-protocol/src/daemon.rs", "crates/pig-daemon/src/server.rs", "crates/pig-daemon/tests/daemon.rs"],
       "missing_proof": [],
       "status": "verified"
     },

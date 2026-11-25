@@ -1552,6 +1552,13 @@ impl Session {
                             .lock()
                             .expect("pending questions lock")
                             .remove(&request_id);
+                        self.emit(
+                            |session_id| Event::QuestionResolved {
+                                session_id,
+                                request_id: request_id.clone(),
+                            },
+                            tx,
+                        );
                         self.settle_cancelled_tool(
                             CancelledTool {
                                 call,
@@ -1569,6 +1576,13 @@ impl Session {
                 return engine::StepOutcome::Cancelled;
                     }
                 };
+                self.emit(
+                    |session_id| Event::QuestionResolved {
+                        session_id,
+                        request_id: request_id.clone(),
+                    },
+                    tx,
+                );
                 let note = match &reply {
                     Some(answers) => {
                         let mut text = "The user answered:\n".to_string();

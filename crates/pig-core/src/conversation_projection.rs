@@ -20,12 +20,12 @@ struct ConversationState {
     next_id: u64,
 }
 
-pub(crate) struct ProjectionResync {
+pub struct ProjectionResync {
     pub cursor: u64,
     pub session_id: Option<String>,
 }
 
-pub(crate) struct Projected {
+pub struct Projected {
     pub pass: bool,
     pub events: Vec<Event>,
     pub resync: Option<ProjectionResync>,
@@ -63,7 +63,7 @@ struct RunStatus {
     running: bool,
 }
 
-pub(crate) struct ConversationProjection {
+pub struct ConversationProjection {
     sessions: HashMap<String, ConversationState>,
     subagents: HashMap<String, HashMap<String, ConversationState>>,
     run_status: HashMap<(String, String), RunStatus>,
@@ -72,14 +72,14 @@ pub(crate) struct ConversationProjection {
 
 /// Entry point for journal-driven projections. Cursor state is delivery
 /// deduplication only; domain state remains in the individual projection.
-pub(crate) struct ProjectionRegistry {
+pub struct ProjectionRegistry {
     conversation: ConversationProjection,
     epoch: Option<String>,
     cursor: u64,
 }
 
 impl ProjectionRegistry {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             conversation: ConversationProjection::new(),
             epoch: None,
@@ -87,11 +87,29 @@ impl ProjectionRegistry {
         }
     }
 
-    pub(crate) fn cursor(&self) -> u64 {
+    pub fn cursor(&self) -> u64 {
         self.cursor
     }
 
-    pub(crate) fn project(&mut self, envelope: &EventEnvelope) -> Projected {
+    pub fn epoch(&self) -> Option<&str> {
+        self.epoch.as_deref()
+    }
+
+    pub fn session_items(&self, session_id: &str) -> Vec<ConversationItem> {
+        self.conversation
+            .sessions
+            .get(session_id)
+            .map_or_else(Vec::new, |state| state.items.clone())
+    }
+
+    pub fn session_running(&self, session_id: &str) -> bool {
+        self.conversation
+            .sessions
+            .get(session_id)
+            .is_some_and(|state| state.active_turn.is_some())
+    }
+
+    pub fn project(&mut self, envelope: &EventEnvelope) -> Projected {
         if self
             .epoch
             .as_deref()
@@ -110,10 +128,7 @@ impl ProjectionRegistry {
         self.conversation.project(&envelope.event)
     }
 
-    pub(crate) fn reset_with_snapshot(
-        &mut self,
-        snapshot: &pig_core::JournalSnapshot,
-    ) -> Result<(), String> {
+    pub fn reset_with_snapshot(&mut self, snapshot: &crate::JournalSnapshot) -> Result<(), String> {
         self.conversation = ConversationProjection::new();
         self.epoch = Some(snapshot.epoch.clone());
         self.cursor = snapshot.oldest.saturating_sub(1);
@@ -130,7 +145,7 @@ impl ProjectionRegistry {
 }
 
 impl ConversationProjection {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             sessions: HashMap::new(),
             subagents: HashMap::new(),
@@ -139,7 +154,7 @@ impl ConversationProjection {
         }
     }
 
-    pub(crate) fn project(&mut self, event: &Event) -> Projected {
+    pub fn project(&mut self, event: &Event) -> Projected {
         match event {
             Event::SessionReplayComplete { session_id } => {
                 let Some(state) = self.sessions.get(session_id) else {
@@ -1358,7 +1373,7 @@ mod tests {
             },
         };
         assert!(registry.project(&envelope(1)).pass);
-        let snapshot = pig_core::JournalSnapshot {
+        let snapshot = crate::JournalSnapshot {
             epoch: "journal-test".into(),
             cursor: 3,
             oldest: 3,

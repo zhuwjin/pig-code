@@ -1329,6 +1329,7 @@ export class AgentStore {
           });
         } else {
           this.items.update((all) => ({ ...all, [sessionId!]: items }));
+          this.setRunning(sessionId!, data.running ?? false);
         }
         break;
       }
@@ -1568,11 +1569,22 @@ export class AgentStore {
           return next;
         });
         break;
+      case "ApprovalResolved":
+        this.approvals.update((all) => ({
+          ...all,
+          [sessionId!]: (all[sessionId!] ?? []).filter((item) => item.requestId !== data.request_id),
+        }));
+        break;
       case "QuestionRequested":
         this.questions.update((all) => ({
           ...all,
           [sessionId!]: { requestId: data.request_id, questions: data.questions },
         }));
+        break;
+      case "QuestionResolved":
+        if (this.questions()[sessionId!]?.requestId === data.request_id) {
+          this.questions.update((all) => ({ ...all, [sessionId!]: null }));
+        }
         break;
       case "PermissionsChanged":
         this.updateConfigurationFor(sessionId!, { permissions: data.permissions });

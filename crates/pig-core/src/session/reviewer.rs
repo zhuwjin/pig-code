@@ -93,7 +93,14 @@ impl ApprovalReviewer for UserApprovalReviewer {
                     available_decisions: request.available_decisions,
                 }
             });
-            let (decision, feedback) = reply_rx.await.map_err(|_| ApprovalReviewError {
+            let reply = reply_rx.await;
+            emit_bg(&request.session_id, &events, |session_id| {
+                Event::ApprovalResolved {
+                    session_id,
+                    request_id: request.request_id.clone(),
+                }
+            });
+            let (decision, feedback) = reply.map_err(|_| ApprovalReviewError {
                 detail: "the user approval channel closed without a decision".to_string(),
             })?;
             Ok(ApprovalReply { decision, feedback })

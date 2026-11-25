@@ -11,12 +11,14 @@
 pub mod agent;
 mod api_usage;
 pub mod config;
+pub mod conversation_projection;
 pub mod credentials;
 pub mod files;
 pub mod fonts;
 pub mod git;
 pub mod hooks;
 mod journal;
+pub use conversation_projection::{Projected, ProjectionRegistry, ProjectionResync};
 pub use journal::{
     EventJournal, JournalReplayError, JournalResyncReason, JournalResyncRequired, JournalSnapshot,
 };

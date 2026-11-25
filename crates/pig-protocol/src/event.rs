@@ -644,6 +644,10 @@ pub enum Event {
         #[serde(default)]
         available_decisions: Vec<crate::ApprovalDecision>,
     },
+    ApprovalResolved {
+        session_id: String,
+        request_id: String,
+    },
     /// core changed the session's permissions on its own (after ExitPlanMode
     /// approval): the UI syncs the permission chip
     PermissionsChanged {
@@ -669,6 +673,10 @@ pub enum Event {
         session_id: String,
         request_id: String,
         questions: Vec<QuestionItem>,
+    },
+    QuestionResolved {
+        session_id: String,
+        request_id: String,
     },
     FileChanged {
         session_id: String,
@@ -938,9 +946,11 @@ impl Event {
             | Self::CompactStarted { session_id, .. }
             | Self::ContextCompacted { session_id, .. }
             | Self::ApprovalRequested { session_id, .. }
+            | Self::ApprovalResolved { session_id, .. }
             | Self::PermissionsChanged { session_id, .. }
             | Self::PlanModeChanged { session_id, .. }
             | Self::QuestionRequested { session_id, .. }
+            | Self::QuestionResolved { session_id, .. }
             | Self::FileChanged { session_id, .. }
             | Self::FileReverted { session_id, .. }
             | Self::TodoListChanged { session_id, .. }

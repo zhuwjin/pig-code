@@ -19,6 +19,7 @@ pub struct PendingImage {
 }
 
 mod config;
+mod daemon;
 mod error;
 mod event;
 mod op;
@@ -26,6 +27,7 @@ mod plugin;
 mod plugin_runtime;
 
 pub use config::*;
+pub use daemon::*;
 pub use error::*;
 pub use event::*;
 pub use op::*;
