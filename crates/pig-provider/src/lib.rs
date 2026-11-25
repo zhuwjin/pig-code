@@ -30,7 +30,6 @@ mod identity;
 mod metadata;
 mod openai;
 mod registry;
-mod resilience;
 mod responses;
 mod retry;
 mod session;
@@ -58,9 +57,6 @@ pub use metadata::{ProviderResponseMetadata, ProviderUsage};
 pub use registry::{
     AnthropicMessagesDriver, OpenAiChatDriver, OpenAiResponsesHttpDriver, OpenAiResponsesWsDriver,
     ProviderDriver, ProviderRegistry,
-};
-pub use resilience::{
-    CircuitBreakerConfig, CircuitState, EndpointHealthRegistry, stream_chat_with_fallback,
 };
 pub use responses::{
     RESPONSES_WS_BETA_HEADER, ResponsesWsSession, responses_web_search_tool, responses_ws_url,
