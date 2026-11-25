@@ -1,6 +1,6 @@
 # NSH 新版本待办
 
-当前项目的 `nsh-core`、`nsh-base`、`nsh-engine`、`nsh-platform-windows` 和 `nsh-testing` 均使用 `0.6.1`（见 `Cargo.toml`）。
+当前项目的 `nsh-core`、`nsh-base`、`nsh-engine`、`nsh-platform-windows` 和 `nsh-testing` 均使用 `0.7.0`（见 `Cargo.toml`）。
 
 本文只记录尚未完成的、依赖 NSH 新版本的事项，不记录 Pig Code 自己的功能 TODO，也不记录已经接入的历史。已完成的历史记录见 [NSH_UPSTREAM_HISTORY.md](./NSH_UPSTREAM_HISTORY.md)。NSH main 中存在某项实现，不代表它已经发布，也不代表可以直接替换当前版本；升级时必须重新检查公开 API 和兼容性。
 
@@ -13,6 +13,8 @@
 `docs/PLUGIN_SYSTEM.md` 已明确：NSH 尚未公开按 Engine 查询真实总内存与 CPU 用量的接口。当前资源预算只能作为上限，不能伪装成实际用量。
 
 0.6.0 复核：`nsh_engine::perf::PerfMonitor` 可以按 Engine 提供 JS 堆、JS 对象、节点和 Engine 线程忙碌时间；`ProcessSampler` 的 CPU 与实际内存则是整个宿主进程的数据，不能归因给某个插件 Engine。因此这些接口仍不满足本项的完整验收条件。
+
+0.7.0 复核：上述接口的归属和语义未变，仍不能提供每个插件 Engine 的真实总内存与 CPU 用量。
 
 **升级后的处理**
 
@@ -62,6 +64,8 @@ nsh run examples/repros/InputScrollRepro.tsx --target macos --window-size 900x70
 
 0.6.0 已加入针对性改动：`scroll.rs` 的 `apply_offset` 在滚动子树包含原生 Input 时（`input_count != 0`）逐帧调用 `commit_bounds`，让 AppKit 的可见区域跟随实时偏移，不再对这些 Input 使用图层位移加延迟提交。`COMMIT_MS` 和 `REST_WAIT` 仍用于不含 Input 的普通滚动。该改动直接对应文字空白的原因，但当前升级环境是 Windows，仍须在 macOS 上运行同一复现页并完成下方验收后才能关闭本项。
 
+0.7.0 的 macOS `scroll.rs` 保留了上述 Input 逐帧提交逻辑；本项仍需按同一复现页进行人工视觉验收，不能只凭源码或自动化节点断言关闭。
+
 **升级后的处理**
 
 - 检查新版是否修改滚动时的图层变换、bounds 提交时机或原生输入框同步方式。
@@ -95,7 +99,7 @@ NSH 0.6.0 的 `crates/nsh-base/src/term/vt.rs` 仍在 `csi_dispatch` 中通过 `
 
 **当前规避**
 
-`src/terminal.rs` 的 `filter_kitty_keyboard` 在 PTY 输出进入官方 Terminal 前丢弃带 `<`、`>` 或 `=` 中间字节、以 `u` 结尾的 CSI 序列，并用 `filter_carry` 处理跨读取块的拆分。`terminal::tests` 覆盖完整序列、拆分序列和真正的 `CSI u` 恢复光标。上游修复后应删除此过滤。
+`src/terminal.rs` 的 `filter_kitty_keyboard` 在 PTY 输出进入官方 Terminal 前丢弃带 `<`、`>` 或 `=` 中间字节、以 `u` 结尾的 CSI 序列，并用 `filter_carry` 处理跨读取块的拆分。`terminal::tests` 覆盖完整序列、拆分序列和真正的 `CSI u` 恢复光标。0.7.0 的 `vt.rs` 仍未为 `s` / `u` 增加 `intermediates.is_empty()` 条件，因此继续保留此过滤；上游修复后应删除。
 
 ## 升级检查
 

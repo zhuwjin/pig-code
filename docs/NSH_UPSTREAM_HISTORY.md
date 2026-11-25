@@ -50,6 +50,16 @@ Agent 卡片由 `SubagentActivity` 分配完成序号，Swarm 按完成优先及
 
 0.4.0 期间曾使用 `maintainVisibleContentPosition={{ autoscrollToBottomThreshold: 120 }}`，后来把阈值降到 0 仍存在用户上滚与流式新增行的时序竞态，最终改为应用侧延迟跟随。0.5.0 已按 Noop 的写法接入 `alignment="bottom"` + `maintainVisibleContentPosition`，见下面的「0.5.0 升级与窗口」。
 
+## 0.7.0 升级
+
+### 1. 升级到 0.7.0（已完成）
+
+CLI 和 `nsh-core` / `nsh-base` / `nsh-engine` / `nsh-platform-windows` / `nsh-testing` 从 0.6.1 升级到 0.7.0，GitHub Actions 安装的 CLI 同步升级，`Cargo.lock` 中的 NSH 配套 crate 一并更新。当前用法不需要产品代码的公开 API 迁移；独立窗口、Speech 迁移和 Rust 公共结构体新增字段均未影响本项目。
+
+升级后的完整测试初次发现三个依赖异步完成时序的测试问题：会话搜索和撤回需要等待回合完成，插件主题停用再启用需要等待运行时进入 `active` 及停用状态同步。相关测试已改为等待明确状态，没有使用固定延时，也没有改动产品行为。`cargo check --all-targets`、`cargo test --workspace`、`nsh check` 和 `nsh test` 的 204 项测试通过。
+
+0.7.0 仍只提供进程级 CPU 和实际内存；macOS Input 的逐帧 bounds 提交逻辑保留，但仍需人工视觉验收；VT 对带中间字节的 `CSI < u` 仍缺少 `intermediates.is_empty()` 防护，因此 `src/terminal.rs` 的过滤继续保留。详见 [NSH_UPSTREAM_PENDING.md](./NSH_UPSTREAM_PENDING.md)。
+
 ## 0.6.0 升级与视图分批挂载
 
 ### 1. 升级到 0.6.0（已完成）

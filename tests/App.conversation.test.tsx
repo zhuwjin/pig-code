@@ -336,6 +336,7 @@ test("searches within the transcript", async () => {
   await app.type("id:composer-input", "read the mock file again");
   await app.press("id:send-button");
   await app.waitFor("label:跳转到回合 2", { timeout: 20000 });
+  await app.waitUntil(() => app.count("label:复制回答") === 2);
 
   expect(app.count("label:跳转到回合 1")).toBe(1);
   expect(app.count("label:跳转到回合 2")).toBe(1);
@@ -355,6 +356,7 @@ test("copies and recalls the latest user message through the original action con
   await app.type("id:composer-input", "read the mock file");
   await app.press("id:send-button");
   await app.waitFor("Conclusion: MOCK_REPLY_OK", { timeout: 20000 });
+  await app.waitFor("label:复制回答");
   await app.hover("text:read the mock file");
   await app.press("label:复制用户消息");
   await app.waitUntil(() => app.clipboard() === "read the mock file");

@@ -39,6 +39,7 @@ async function installMoon(app: Awaited<ReturnType<typeof openApp>>) {
   await app.press("id:plugin-install");
   await app.waitFor("text:/com.pigcode.plugins.moon/", { timeout: 10000 });
   await app.press("id:theme-package-com.pigcode.plugins.moon");
+  await app.waitFor("text:active", { timeout: 10000 });
   await app.press("id:settings-back");
 }
 
@@ -406,9 +407,11 @@ test("loads, applies, disables and restores plugin themes", async () => {
 
   await app.press("id:settings-plugins");
   await app.press("id:theme-package-com.pigcode.plugins.moon");
+  await app.waitFor("label:启用插件 月亮 Agent");
   await app.waitFor("id:theme-option-moon", { state: "gone" });
   expect(app.spanStyle("id:title-bar >> text:Pig Code v0.1.0").color).toBe("#d4d4d4ff");
   await app.press("id:theme-package-com.pigcode.plugins.moon");
+  await app.waitFor("text:active", { timeout: 10000 });
   await app.press("id:settings-appearance");
   await app.waitFor("id:theme-option-moon");
 });
