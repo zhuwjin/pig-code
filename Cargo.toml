@@ -9,9 +9,9 @@ members = ["crates/*"]
 resolver = "2"
 
 [dependencies]
-nsh-core = "0.7.0"
-nsh-base = "0.7.0"
-nsh-engine = "0.7.0"
+nsh-core = "0.7.1"
+nsh-base = "0.7.1"
+nsh-engine = "0.7.1"
 pig-core = { path = "crates/pig-core" }
 pig-daemon = { path = "crates/pig-daemon" }
 pig-protocol = { path = "crates/pig-protocol" }
@@ -28,7 +28,7 @@ async-channel = "2"
 tokio = { version = "1", features = ["rt", "macros"] }
 
 [target.'cfg(windows)'.dependencies]
-nsh-platform-windows = { version = "0.7.0", default-features = false }
+nsh-platform-windows = { version = "0.7.1", default-features = false }
 
 [dev-dependencies]
-nsh-testing = { version = "0.7.0", features = ["bundle"] }
+nsh-testing = { version = "0.7.1", features = ["bundle"] }

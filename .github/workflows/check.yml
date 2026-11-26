@@ -27,7 +27,7 @@ jobs:
       - name: Install NSH (macOS and Linux)
         if: runner.os != 'Windows'
         env:
-          NSH_VERSION: v0.7.0
+          NSH_VERSION: v0.7.1
         run: |
           curl -fsSL https://nsh.dev/install.sh | sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
@@ -35,7 +35,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         env:
-          NSH_VERSION: v0.7.0
+          NSH_VERSION: v0.7.1
         run: |
           irm https://nsh.dev/install.ps1 | iex
           Add-Content -Path $env:GITHUB_PATH -Value "$env:LOCALAPPDATA\nsh\bin"
