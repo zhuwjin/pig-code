@@ -2,7 +2,9 @@ use std::io::{Write as _, stdout};
 use std::path::PathBuf;
 
 use crossterm::cursor::{Hide, MoveTo, Show};
-use crossterm::event::{Event as TerminalEvent, EventStream, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    Event as TerminalEvent, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+};
 use crossterm::style::Print;
 use crossterm::terminal::{
     Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
@@ -14,6 +16,7 @@ use pig_daemon::{DaemonClient, DaemonConnectConfig, DaemonMessage, snapshot_even
 use pig_protocol::{
     ApprovalDecision, ConversationItem, Event, ExecMode, MessageDelivery, Op, PermissionSettings,
 };
+use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
 
 struct TerminalGuard;
 
@@ -97,6 +100,8 @@ struct Tui {
     cwd: PathBuf,
     session_id: Option<String>,
     auto_open: bool,
+    awaiting_new_session: bool,
+    show_sessions_once: bool,
     running: bool,
     items: Vec<ConversationItem>,
     notices: Vec<String>,
@@ -111,12 +116,18 @@ impl Tui {
             cwd: options.connect.cwd.clone(),
             session_id: options.session_id.clone(),
             auto_open: !options.new_session && options.session_id.is_none(),
+            awaiting_new_session: options.new_session,
+            show_sessions_once: false,
             running: false,
             items: Vec::new(),
             notices: Vec::new(),
             input: String::new(),
             permissions: ExecMode::Auto.permissions(),
         }
+    }
+
+    fn matches_session(&self, session_id: &str) -> bool {
+        self.session_id.as_deref() == Some(session_id)
     }
 
     fn apply(&mut self, event: Event) {
@@ -127,20 +138,32 @@ impl Tui {
                 permissions,
                 ..
             } => {
+                if !self.awaiting_new_session && !self.matches_session(&session_id) {
+                    return;
+                }
                 if self.session_id.as_deref() != Some(session_id.as_str()) {
                     self.items.clear();
+                    self.running = false;
                 }
                 self.session_id = Some(session_id);
+                self.awaiting_new_session = false;
                 self.auto_open = false;
                 self.cwd = cwd;
                 self.permissions = permissions;
             }
             Event::SessionList { sessions } => {
-                self.notices.extend(
-                    sessions
-                        .iter()
-                        .map(|session| format!("{}  {}", session.id, session.title)),
-                );
+                if self.show_sessions_once {
+                    self.show_sessions_once = false;
+                    if sessions.is_empty() {
+                        self.notices.push("no sessions".to_string());
+                    } else {
+                        self.notices.extend(
+                            sessions
+                                .iter()
+                                .map(|session| format!("{}  {}", session.id, session.title)),
+                        );
+                    }
+                }
                 if self.auto_open
                     && self.session_id.is_none()
                     && let Some(session) = sessions.first()
@@ -152,13 +175,19 @@ impl Tui {
                     });
                 }
             }
+            Event::PermissionsChanged {
+                session_id,
+                permissions,
+            } if self.matches_session(&session_id) => {
+                self.permissions = permissions;
+            }
             Event::ConversationSnapshot {
                 session_id,
                 agent_id: None,
                 items,
                 running,
                 ..
-            } if self.session_id.as_deref() == Some(session_id.as_str()) => {
+            } if self.matches_session(&session_id) => {
                 self.items = items;
                 self.running = running;
             }
@@ -167,7 +196,7 @@ impl Tui {
                 agent_id: None,
                 item,
                 ..
-            } if self.session_id.as_deref() == Some(session_id.as_str()) => {
+            } if self.matches_session(&session_id) => {
                 upsert(&mut self.items, item);
             }
             Event::ConversationRemove {
@@ -175,29 +204,39 @@ impl Tui {
                 agent_id: None,
                 item_ids,
                 ..
-            } if self.session_id.as_deref() == Some(session_id.as_str()) => {
+            } if self.matches_session(&session_id) => {
                 self.items
                     .retain(|item| !item_ids.iter().any(|id| id == item.id()));
             }
-            Event::TurnStarted { .. } => self.running = true,
-            Event::TurnComplete { .. } | Event::TurnAborted { .. } => self.running = false,
+            Event::TurnStarted { session_id, .. } if self.matches_session(&session_id) => {
+                self.running = true;
+            }
+            Event::TurnComplete { session_id, .. } | Event::TurnAborted { session_id, .. }
+                if self.matches_session(&session_id) =>
+            {
+                self.running = false;
+            }
             Event::ApprovalRequested {
+                session_id,
                 request_id,
                 tool,
                 detail,
                 ..
-            } => self.notices.push(format!(
+            } if self.matches_session(&session_id) => self.notices.push(format!(
                 "/allow {request_id} | /deny {request_id}\n{tool}: {detail}"
             )),
-            Event::ApprovalResolved { request_id, .. } => {
+            Event::ApprovalResolved {
+                session_id,
+                request_id,
+            } if self.matches_session(&session_id) => {
                 self.notices
                     .push(format!("approval resolved: {request_id}"));
             }
             Event::QuestionRequested {
+                session_id,
                 request_id,
                 questions,
-                ..
-            } => {
+            } if self.matches_session(&session_id) => {
                 let text = questions
                     .iter()
                     .map(|question| question.question.clone())
@@ -207,11 +246,21 @@ impl Tui {
                     "/answer {request_id} ANSWER [| ANSWER...] | /skip {request_id}\n{text}"
                 ));
             }
-            Event::QuestionResolved { request_id, .. } => {
+            Event::QuestionResolved {
+                session_id,
+                request_id,
+            } if self.matches_session(&session_id) => {
                 self.notices
                     .push(format!("question resolved: {request_id}"));
             }
-            Event::Error { error, .. } => self.notices.push(format!("{error:?}")),
+            Event::Error {
+                session_id, error, ..
+            } if session_id
+                .as_deref()
+                .is_none_or(|id| self.matches_session(id)) =>
+            {
+                self.notices.push(format!("{error:?}"));
+            }
             _ => {}
         }
         const MAX_NOTICES: usize = 100;
@@ -236,10 +285,12 @@ impl Tui {
             return Ok(());
         }
         if input == "/sessions" {
+            self.show_sessions_once = true;
             return self.client.send_op(Op::ListSessions);
         }
         if input == "/new" || input.starts_with("/new ") {
             self.auto_open = false;
+            self.awaiting_new_session = true;
             self.items.clear();
             let cwd = input
                 .strip_prefix("/new ")
@@ -260,8 +311,10 @@ impl Tui {
                 return Err("/open requires an id".to_string());
             }
             self.auto_open = false;
+            self.awaiting_new_session = false;
             self.session_id = Some(session_id.to_string());
             self.items.clear();
+            self.running = false;
             return self.client.send_op(Op::OpenSession {
                 session_id: session_id.to_string(),
             });
@@ -353,30 +406,33 @@ impl Tui {
             self.session_id.as_deref().unwrap_or("no session"),
             if self.running { "running" } else { "idle" }
         );
-        queue!(output, Print(truncate(&status, width as usize)))
+        let width_usize = width as usize;
+        queue!(output, Print(truncate(&status, width_usize)))
             .map_err(|error| error.to_string())?;
         let body_height = height as usize - 4;
-        let width = width as usize;
         let lines = self
             .lines()
             .iter()
-            .flat_map(|line| wrap(line, width))
+            .flat_map(|line| wrap(line, width_usize))
             .collect::<Vec<_>>();
         let start = lines.len().saturating_sub(body_height);
         for (row, line) in lines[start..].iter().enumerate() {
             queue!(output, MoveTo(0, row as u16 + 1), Print(line))
                 .map_err(|error| error.to_string())?;
         }
+        let help = truncate(
+            "/open /new /sessions /stop /allow /deny /answer /quit",
+            width_usize,
+        );
+        let input_budget = width_usize.saturating_sub(3);
+        let (visible_input, visible_width) = tail_within_width(&self.input, input_budget);
         queue!(
             output,
             MoveTo(0, height - 3),
-            Print("/open /new /sessions /stop /allow /deny /answer /quit"),
+            Print(help),
             MoveTo(0, height - 2),
-            Print(format!("> {}", self.input)),
-            MoveTo(
-                (self.input.chars().count() as u16 + 2).min(width as u16 - 1),
-                height - 2
-            )
+            Print(format!("> {visible_input}")),
+            MoveTo((visible_width as u16 + 2).min(width - 1), height - 2)
         )
         .map_err(|error| error.to_string())?;
         output.flush().map_err(|error| error.to_string())
@@ -414,22 +470,58 @@ fn render_item(item: &ConversationItem) -> String {
     }
 }
 
-fn truncate(text: &str, limit: usize) -> String {
-    if text.chars().count() <= limit {
+fn truncate(text: &str, max_width: usize) -> String {
+    if text.width() <= max_width {
         return text.to_string();
     }
-    text.chars().take(limit).collect::<String>() + "..."
+    if max_width <= 3 {
+        return ".".repeat(max_width);
+    }
+    let budget = max_width - 3;
+    let mut used = 0;
+    let mut output = String::new();
+    for ch in text.chars() {
+        let ch_width = ch.width().unwrap_or(0);
+        if used + ch_width > budget {
+            break;
+        }
+        output.push(ch);
+        used += ch_width;
+    }
+    output.push_str("...");
+    output
+}
+
+fn tail_within_width(text: &str, max_width: usize) -> (&str, usize) {
+    let mut used = 0;
+    let mut start_byte = text.len();
+    for (byte_index, ch) in text.char_indices().rev() {
+        let ch_width = ch.width().unwrap_or(0);
+        if used + ch_width > max_width {
+            break;
+        }
+        used += ch_width;
+        start_byte = byte_index;
+    }
+    (&text[start_byte..], used)
 }
 
 fn wrap(line: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
     let mut rows = Vec::new();
     for line in line.split('\n') {
         let mut current = String::new();
+        let mut current_width = 0;
         for character in line.chars() {
-            if current.chars().count() == width {
+            let ch_width = character.width().unwrap_or(0);
+            if current_width > 0 && current_width + ch_width > width {
                 rows.push(std::mem::take(&mut current));
+                current_width = 0;
             }
             current.push(character);
+            current_width += ch_width;
         }
         rows.push(current);
     }
@@ -442,6 +534,7 @@ async fn run(mut tui: Tui) -> Result<(), String> {
     tui.draw()?;
     loop {
         tokio::select! {
+            biased;
             message = tui.client.recv() => {
                 match message {
                     Ok(DaemonMessage::Subscription { resync_required: true, .. }) => {
@@ -466,7 +559,10 @@ async fn run(mut tui: Tui) -> Result<(), String> {
             }
             event = terminal_events.next() => {
                 match event {
-                    Some(Ok(TerminalEvent::Key(KeyEvent { code, modifiers, .. }))) => {
+                    Some(Ok(TerminalEvent::Key(KeyEvent { code, modifiers, kind, .. }))) => {
+                        if kind == KeyEventKind::Release {
+                            continue;
+                        }
                         if modifiers.contains(KeyModifiers::CONTROL)
                             && matches!(code, KeyCode::Char('c') | KeyCode::Char('d'))
                         {
@@ -532,9 +628,90 @@ async fn main() {
 mod tests {
     use super::*;
 
+    fn test_tui(session_id: Option<&str>, new_session: bool) -> Tui {
+        let (ops, _ops_rx) = async_channel::bounded(16);
+        let (_msg_tx, messages) = async_channel::bounded(16);
+        let client = DaemonClient::from_channels(ops, messages);
+        let options = Options {
+            connect: DaemonConnectConfig {
+                data_dir: PathBuf::from("."),
+                cwd: PathBuf::from("."),
+                config_path: None,
+            },
+            session_id: session_id.map(str::to_string),
+            new_session,
+        };
+        Tui::new(client, &options)
+    }
+
+    fn configured(session_id: &str) -> Event {
+        Event::SessionConfigured {
+            session_id: session_id.to_string(),
+            cwd: PathBuf::from("/workspace"),
+            model: "model".to_string(),
+            provider_name: "provider".to_string(),
+            provider_id: Some("provider".to_string()),
+            model_id: Some("model".to_string()),
+            reasoning_level: None,
+            permissions: PermissionSettings::default(),
+            plan_enabled: false,
+        }
+    }
+
     #[test]
-    fn wrap_preserves_text_and_respects_width() {
+    fn wrap_preserves_text_and_respects_display_width() {
         assert_eq!(wrap("abcdef", 3), vec!["abc", "def"]);
         assert_eq!(wrap("a\nb", 3), vec!["a", "b"]);
+        // CJK characters occupy 2 terminal columns each.
+        assert_eq!(wrap("你好世界", 4), vec!["你好", "世界"]);
+        assert_eq!(wrap("a你好b", 4), vec!["a你", "好b"]);
+    }
+
+    #[test]
+    fn truncate_and_tail_respect_cjk_display_width() {
+        assert_eq!(truncate("你好世界", 7), "你好...");
+        assert_eq!(truncate("你好", 4), "你好");
+        assert_eq!(tail_within_width("你好世界", 4), ("世界", 4));
+        assert_eq!(tail_within_width("ab你好", 5), ("b你好", 5));
+    }
+
+    #[test]
+    fn other_session_events_do_not_hijack_tui() {
+        let mut tui = test_tui(Some("s1"), false);
+        tui.apply(configured("s1"));
+        tui.apply(Event::ConversationUpdate {
+            session_id: "s1".to_string(),
+            agent_id: None,
+            run_id: None,
+            item: ConversationItem::User {
+                id: "u1".to_string(),
+                text: "keep me".to_string(),
+                files: Vec::new(),
+                image_nums: Vec::new(),
+                sent_at_ms: 1,
+            },
+        });
+
+        // Another client creates/opens s2 and runs a turn with an approval prompt.
+        tui.apply(configured("s2"));
+        tui.apply(Event::TurnStarted {
+            session_id: "s2".to_string(),
+            turn_id: "t1".to_string(),
+            run: None,
+        });
+        tui.apply(Event::ApprovalRequested {
+            session_id: "s2".to_string(),
+            request_id: "req-other".to_string(),
+            tool: "ExecCommand".to_string(),
+            detail: "rm -rf".to_string(),
+            danger_key: None,
+            requested_write_roots: Vec::new(),
+            available_decisions: Vec::new(),
+        });
+
+        assert_eq!(tui.session_id.as_deref(), Some("s1"));
+        assert_eq!(tui.items.len(), 1);
+        assert!(!tui.running);
+        assert!(tui.notices.is_empty());
     }
 }

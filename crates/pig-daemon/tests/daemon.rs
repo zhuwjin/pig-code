@@ -447,3 +447,119 @@ async fn multi_client_attach_resolution_and_background_survival() {
     drop(reopened);
     assert!(daemon.child.try_wait().unwrap().is_none());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn websocket_ping_frames_stay_connected_and_client_reconnects_after_daemon_restart() {
+    use futures_util::{SinkExt as _, StreamExt as _};
+    use pig_daemon::{DaemonConnectConfig, DaemonRequest};
+    use tokio_tungstenite::tungstenite::Message;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+    use tokio_tungstenite::tungstenite::http::HeaderValue;
+    use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
+
+    let (mut daemon, workspace, data_dir) = DaemonProcess::spawn();
+    let endpoint = daemon.endpoint(&data_dir);
+
+    // Raw WebSocket client sends Ping before and after Subscribe and must receive Pong without dropping.
+    let url = format!("ws://{}/", endpoint.address);
+    let mut request = url.into_client_request().expect("client request");
+    request.headers_mut().insert(
+        AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {}", endpoint.token)).expect("auth header"),
+    );
+    let (mut ws, _) = tokio_tungstenite::connect_async(request)
+        .await
+        .expect("connect raw websocket");
+    ws.send(Message::Ping(b"pre".to_vec().into()))
+        .await
+        .expect("send pre-subscribe ping");
+    let pong = tokio::time::timeout(Duration::from_secs(5), ws.next())
+        .await
+        .expect("pong timeout")
+        .expect("ws open")
+        .expect("pong frame");
+    assert!(matches!(pong, Message::Pong(payload) if payload.as_ref() == b"pre"));
+
+    let subscribe = serde_json::to_string(&DaemonRequest::Subscribe {
+        after: None,
+        session_ids: None,
+    })
+    .expect("encode subscribe");
+    ws.send(Message::text(subscribe))
+        .await
+        .expect("send subscribe");
+    let subscribed = tokio::time::timeout(Duration::from_secs(5), ws.next())
+        .await
+        .expect("subscription timeout")
+        .expect("ws open")
+        .expect("subscription frame");
+    assert!(matches!(subscribed, Message::Text(_)));
+
+    ws.send(Message::Ping(b"post".to_vec().into()))
+        .await
+        .expect("send post-subscribe ping");
+    let pong = tokio::time::timeout(Duration::from_secs(5), ws.next())
+        .await
+        .expect("post pong timeout")
+        .expect("ws open")
+        .expect("post pong frame");
+    assert!(matches!(pong, Message::Pong(payload) if payload.as_ref() == b"post"));
+    drop(ws);
+
+    // Managed client via connect_or_spawn automatically reconnects and signals resync after daemon crash.
+    let config_path = daemon.root.join("config.toml");
+    // Point connect_or_spawn to the compiled pig-daemon binary via PIG_DAEMON_BIN only when needed:
+    // here we manually kill and respawn on the same data_dir so reconnect discovers the fresh daemon.
+    let client = tokio::task::spawn_blocking({
+        let data_dir = data_dir.clone();
+        let workspace = workspace.clone();
+        let config_path = config_path.clone();
+        move || {
+            DaemonClient::connect_or_spawn(DaemonConnectConfig {
+                data_dir,
+                cwd: workspace,
+                config_path: Some(config_path),
+            })
+        }
+    })
+    .await
+    .expect("join connect_or_spawn")
+    .expect("connect managed client");
+
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(5), client.recv())
+            .await
+            .expect("initial subscription"),
+        Ok(DaemonMessage::Subscription {
+            resync_required: false,
+            ..
+        })
+    ));
+
+    // Kill the running daemon and launch a fresh one on the same data_dir.
+    let _ = daemon.child.kill();
+    let _ = daemon.child.wait();
+    let _ = std::fs::remove_file(data_dir.join("daemon").join("endpoint.json"));
+    daemon.child = daemon_command()
+        .arg(format!("--data-dir={}", data_dir.display()))
+        .arg(format!("--cwd={}", workspace.display()))
+        .arg(format!("--config={}", config_path.display()))
+        .env("PIG_SELFTEST", "1")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("respawn pig-daemon");
+    let _ = daemon.endpoint(&data_dir);
+
+    let reconnected = tokio::time::timeout(Duration::from_secs(10), client.recv())
+        .await
+        .expect("reconnect subscription timeout")
+        .expect("client stream remained open across reconnect");
+    assert!(matches!(
+        reconnected,
+        DaemonMessage::Subscription {
+            resync_required: true,
+            ..
+        }
+    ));
+}

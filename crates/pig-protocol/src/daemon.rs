@@ -39,6 +39,16 @@ pub struct SessionConfigurationSnapshot {
     pub plan_enabled: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextUsageSnapshot {
+    pub used: u64,
+    pub total: u64,
+    #[serde(default)]
+    pub cache_read_total: u64,
+    #[serde(default)]
+    pub input_total: u64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionStateSnapshot {
     pub session_id: String,
@@ -49,6 +59,16 @@ pub struct SessionStateSnapshot {
     pub steer_queue: Vec<QueueItem>,
     pub pending_approvals: Vec<PendingApprovalRequest>,
     pub pending_questions: Vec<PendingQuestionRequest>,
+    #[serde(default)]
+    pub todos: Vec<TodoItem>,
+    #[serde(default)]
+    pub tasks: Vec<TaskSummary>,
+    #[serde(default)]
+    pub task_notifications: Vec<TaskNotification>,
+    #[serde(default)]
+    pub context_usage: Option<ContextUsageSnapshot>,
+    #[serde(default)]
+    pub context_breakdown: Option<ContextBreakdown>,
     pub running: bool,
     pub cursor: EventCursor,
 }
@@ -83,8 +103,14 @@ impl ProjectedEventBatch {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DaemonRequest {
-    Subscribe { after: Option<EventCursor> },
-    Op { op: Op },
+    Subscribe {
+        after: Option<EventCursor>,
+        #[serde(default)]
+        session_ids: Option<Vec<String>>,
+    },
+    Op {
+        op: Op,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

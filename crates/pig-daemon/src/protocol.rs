@@ -7,8 +7,9 @@ pub use pig_protocol::{
 pub const DAEMON_HISTORY: usize = 1024;
 
 pub fn snapshot_events(snapshot: &SessionStateSnapshot) -> Vec<Event> {
-    let mut events =
-        Vec::with_capacity(4 + snapshot.pending_approvals.len() + snapshot.pending_questions.len());
+    let mut events = Vec::with_capacity(
+        9 + snapshot.pending_approvals.len() + snapshot.pending_questions.len(),
+    );
     if let Some(configuration) = &snapshot.configuration {
         events.push(Event::SessionConfigured {
             session_id: snapshot.session_id.clone(),
@@ -39,6 +40,33 @@ pub fn snapshot_events(snapshot: &SessionStateSnapshot) -> Vec<Event> {
         session_id: snapshot.session_id.clone(),
         items: snapshot.steer_queue.clone(),
     });
+    events.push(Event::TodoListChanged {
+        session_id: snapshot.session_id.clone(),
+        items: snapshot.todos.clone(),
+    });
+    events.push(Event::TaskListChanged {
+        session_id: snapshot.session_id.clone(),
+        tasks: snapshot.tasks.clone(),
+    });
+    events.push(Event::TaskNotificationQueueChanged {
+        session_id: snapshot.session_id.clone(),
+        notifications: snapshot.task_notifications.clone(),
+    });
+    if let Some(usage) = &snapshot.context_usage {
+        events.push(Event::ContextUsage {
+            session_id: snapshot.session_id.clone(),
+            used: usage.used,
+            total: usage.total,
+            cache_read_total: usage.cache_read_total,
+            input_total: usage.input_total,
+        });
+    }
+    if let Some(breakdown) = &snapshot.context_breakdown {
+        events.push(Event::ContextBreakdownChanged {
+            session_id: snapshot.session_id.clone(),
+            breakdown: breakdown.clone(),
+        });
+    }
     events.extend(
         snapshot
             .pending_approvals

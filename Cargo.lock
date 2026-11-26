@@ -4811,6 +4811,7 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "uuid",
+ "windows 0.57.0",
 ]
 
 [[package]]
@@ -4846,6 +4847,7 @@ dependencies = [
 name = "pig-tui"
 version = "0.1.0"
 dependencies = [
+ "async-channel",
  "crossterm",
  "futures-util",
  "pig-core",
@@ -4856,6 +4858,7 @@ dependencies = [
  "portable-pty",
  "serde_json",
  "tokio",
+ "unicode-width",
 ]
 
 [[package]]

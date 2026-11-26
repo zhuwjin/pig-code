@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use nsh_core::{file_dialog::OpenDialog, prelude::*};
@@ -37,6 +37,7 @@ pub struct Agent {
     handle: AgentConnection,
     cwd: PathBuf,
     data_dir: PathBuf,
+    active_session: Arc<Mutex<Option<String>>>,
     plugins: crate::plugin_system::PluginSystemManager,
     process_sampler: Mutex<ProcessSampler>,
     _selftest_dir: Option<SelftestDir>,
@@ -113,14 +114,30 @@ default_reasoning_level = "low"
             )
         } else {
             let data_dir = pig_utils::data_dir();
-            let client =
-                pig_daemon::DaemonClient::connect_or_spawn(pig_daemon::DaemonConnectConfig {
+            let connection = match pig_daemon::DaemonClient::connect_or_spawn(
+                pig_daemon::DaemonConnectConfig {
                     data_dir: data_dir.clone(),
                     cwd: cwd.clone(),
                     config_path: None,
-                })
-                .unwrap_or_else(|error| panic!("failed to attach pig-daemon: {error}"));
-            (AgentConnection::Remote(client), None, data_dir)
+                },
+            ) {
+                Ok(client) => AgentConnection::Remote(client),
+                Err(error) => {
+                    if std::env::var_os("PIG_REQUIRE_DAEMON").is_some() {
+                        panic!("failed to attach pig-daemon: {error}");
+                    }
+                    tracing::warn!(
+                        %error,
+                        "failed to attach pig-daemon; falling back to in-process core"
+                    );
+                    AgentConnection::Local(pig_core::spawn_agent_with_data_dir(
+                        None,
+                        cwd.clone(),
+                        data_dir.clone(),
+                    ))
+                }
+            };
+            (connection, None, data_dir)
         };
         if let AgentConnection::Local(handle) = &handle {
             // The native UI consumes the ordered EventJournal exclusively; closing
@@ -143,6 +160,7 @@ default_reasoning_level = "low"
             handle,
             cwd,
             data_dir,
+            active_session: Arc::new(Mutex::new(None)),
             process_sampler: Mutex::new(ProcessSampler::new()),
             _selftest_dir: selftest_dir,
         }
@@ -463,6 +481,7 @@ default_reasoning_level = "low"
     pub async fn listen(this: Instance<Self>, #[args(events)] listener: Callback<String>) {
         let connection = this.with(|agent| agent.handle.clone());
         let plugins = this.with(|agent| agent.plugins.clone());
+        let active_session = this.with(|agent| agent.active_session.clone());
         match connection {
             AgentConnection::Local(handle) => {
                 let events = handle.journal.clone();
@@ -511,6 +530,22 @@ default_reasoning_level = "low"
                         pig_daemon::DaemonMessage::Snapshot(snapshot) => {
                             pig_daemon::snapshot_events(&snapshot)
                         }
+                        pig_daemon::DaemonMessage::Subscription {
+                            resync_required: true,
+                            ..
+                        } => {
+                            let _ = client.send_op(Op::ListSessions);
+                            let _ = client.send_op(Op::ListWorkspaces);
+                            let _ = client.send_op(Op::GetConfig);
+                            let session_id = active_session
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                .clone();
+                            if let Some(session_id) = session_id {
+                                let _ = client.send_op(Op::OpenSession { session_id });
+                            }
+                            continue;
+                        }
                         pig_daemon::DaemonMessage::Subscription { .. } => continue,
                         pig_daemon::DaemonMessage::Error { detail } => {
                             report_projection_error(&listener, detail);
@@ -518,6 +553,12 @@ default_reasoning_level = "low"
                         }
                     };
                     for event in &ui_batch {
+                        if let Event::SessionConfigured { session_id, .. } = event {
+                            *active_session
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                                Some(session_id.clone());
+                        }
                         plugins.handle_core_event(event);
                     }
                     if !ui_batch.is_empty() {
@@ -531,6 +572,24 @@ default_reasoning_level = "low"
 
 impl Agent {
     fn send_op(&self, op: Op) -> Result<(), String> {
+        match &op {
+            Op::OpenSession { session_id } => {
+                *self
+                    .active_session
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(session_id.clone());
+            }
+            Op::DeleteSession { session_id } => {
+                let mut current = self
+                    .active_session
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if current.as_deref() == Some(session_id.as_str()) {
+                    *current = None;
+                }
+            }
+            _ => {}
+        }
         self.handle
             .ops()
             .try_send(op)
