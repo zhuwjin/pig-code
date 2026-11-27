@@ -37,6 +37,10 @@ pub struct SessionConfigurationSnapshot {
     pub reasoning_level: Option<String>,
     pub permissions: PermissionSettings,
     pub plan_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bot_id: Option<String>,
+    #[serde(default)]
+    pub global: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

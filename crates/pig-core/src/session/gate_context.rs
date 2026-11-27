@@ -46,4 +46,9 @@ pub(crate) struct GateCtx<'a> {
     /// session's history; background drives carry a detach-time snapshot)
     pub history: &'a [ChatMsg],
     pub timing: Option<Arc<TurnTiming>>,
+    /// Explicit Bot capability boundary (None = default coding capabilities,
+    /// which still enforces `control_plane = false`).
+    pub bot_capabilities: Option<pig_protocol::BotCapabilities>,
+    /// True when the session has no bound workspace (global non-project session).
+    pub global_session: bool,
 }

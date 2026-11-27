@@ -26,6 +26,9 @@ impl Session {
     /// A normal step and a manual compaction share this snapshot so both price
     /// and send the same tool schemas.
     pub(crate) async fn ensure_mcp_connected(&mut self, tx: &async_channel::Sender<Event>) {
+        if self.bot.as_ref().is_some_and(|b| !b.capabilities.mcp) {
+            return;
+        }
         if self.mcp.is_none() {
             let elicitation = crate::mcp::build_session_elicitation_handler(
                 self.event_session_id().to_string(),
@@ -299,8 +302,12 @@ impl Session {
             );
             return self.root_result(crate::session::AgentRunStatus::Failed);
         }
-        let skills_state =
-            skills_state_with_trust(&self.data_dir, self.trust.admits(&self.agent.cwd));
+        let skills_enabled = self.bot.as_ref().is_none_or(|b| b.capabilities.skills);
+        let skills_state = if skills_enabled {
+            skills_state_with_trust(&self.data_dir, !self.global && self.trust.admits(&self.agent.cwd))
+        } else {
+            "disabled".to_string()
+        };
         let memory_enabled = self.memory_enabled;
         let prompt_text = match (
             &self.prompt_text,
@@ -314,20 +321,31 @@ impl Session {
             }
             _ => {
                 if self.prompt_skills_state.as_deref() != Some(&skills_state) {
-                    self.skills_prompt = crate::plugins::skills_section_with_trust(
-                        &self.agent.cwd,
-                        &self.plugin_tools.registry(),
-                        self.trust.admits(&self.agent.cwd),
-                    );
+                    self.skills_prompt = if skills_enabled {
+                        crate::plugins::skills_section_with_trust(
+                            &self.agent.cwd,
+                            &self.plugin_tools.registry(),
+                            !self.global && self.trust.admits(&self.agent.cwd),
+                        )
+                    } else {
+                        String::new()
+                    };
                 }
-                let text = prompt::system_prompt(
+                let bot_persona = self.bot_persona_prompt();
+                let text = prompt::system_prompt_with_bot(
                     &self.agent.cwd,
                     true,
-                    self.git_snapshot.as_deref(),
+                    if self.global {
+                        None
+                    } else {
+                        self.git_snapshot.as_deref()
+                    },
                     &self.date_frozen,
                     &self.agents_prompt,
                     &self.memory_prompt,
                     &self.skills_prompt,
+                    bot_persona.as_deref(),
+                    self.global,
                 );
                 self.prompt_text = Some(text.clone());
                 self.prompt_memory_enabled = Some(memory_enabled);
@@ -357,7 +375,11 @@ impl Session {
         // system+history prefix cache, nor can it land between a
         // tool_use/tool_result pair; the actual user text and reminder state are
         // persisted below so resume does not have to reconstruct them.
-        let fresh_agents = prompt::agents_md(&self.data_dir, &self.agent.cwd);
+        let fresh_agents = if self.global {
+            String::new()
+        } else {
+            prompt::agents_md(&self.data_dir, &self.agent.cwd)
+        };
         // The memory fresh copy is computed whenever memory was enabled at
         // session start (the frozen flag, not the frozen section — the
         // /remember-mid-session case needs the reminder exactly when the
@@ -365,10 +387,13 @@ impl Session {
         // off never computes one: no injection, even after a stray
         // /remember wrote the file
         let fresh_memory = if self.memory_enabled {
-            let root = crate::memory::workspace_memory_dir(&self.data_dir, &self.agent.cwd);
-            crate::memory::memory_section_raw(
-                &root,
-                &crate::memory::read_index(&root.join("MEMORY.md")),
+            let bot_id = self.bot_id();
+            let workspace_cwd = (!self.global).then_some(self.agent.cwd.as_path());
+            crate::memory::layered_memory_section_raw(
+                &self.data_dir,
+                bot_id,
+                workspace_cwd,
+                None,
             )
         } else {
             String::new()
@@ -2685,6 +2710,8 @@ mod tests {
             reasoning_level: None,
             permissions: PermissionSettings::default(),
             plan_enabled: false,
+            bot_id: None,
+            global: false,
         };
         let mut session = Session::create(
             meta,
@@ -2873,6 +2900,8 @@ mod tests {
             reasoning_level: None,
             permissions: ExecMode::Auto.permissions(),
             plan_enabled: false,
+            bot_id: None,
+            global: false,
         };
         let mut session = Session::create(
             meta,
@@ -2969,6 +2998,8 @@ mod tests {
             reasoning_level: None,
             permissions: ExecMode::Auto.permissions(),
             plan_enabled: false,
+            bot_id: None,
+            global: false,
         };
         let empty_session = Session::create(
             empty_meta,
@@ -3049,6 +3080,8 @@ mod tests {
             reasoning_level: None,
             permissions: ExecMode::Auto.permissions(),
             plan_enabled: false,
+            bot_id: None,
+            global: false,
         };
         let mut session = Session::create(
             meta,
@@ -3371,6 +3404,8 @@ mod tests {
             reasoning_level: None,
             permissions: ExecMode::Auto.permissions(),
             plan_enabled: false,
+            bot_id: None,
+            global: false,
         };
         let mut session = Session::create(
             meta,

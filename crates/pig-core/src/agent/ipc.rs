@@ -452,6 +452,8 @@ impl WorkerState {
                     reasoning_level: None,
                     permissions: Some(pig_protocol::PermissionSettings::default()),
                     plan_enabled: None,
+                    bot_id: None,
+                    global: false,
                 })
                 .await
                 .map_err(|error| error.to_string())?;

@@ -345,6 +345,8 @@ impl Tui {
                 reasoning_level: None,
                 permissions: Some(self.permissions),
                 plan_enabled: Some(false),
+                bot_id: None,
+                global: false,
             });
         }
         if let Some(session_id) = input.strip_prefix("/open ") {
@@ -734,6 +736,8 @@ async fn main() {
                 reasoning_level: None,
                 permissions: Some(ExecMode::Auto.permissions()),
                 plan_enabled: Some(false),
+                bot_id: None,
+                global: false,
             })?;
         } else if let Some(session_id) = &options.session_id {
             client.send_op(Op::OpenSession {
@@ -786,6 +790,8 @@ mod tests {
             reasoning_level: None,
             permissions: PermissionSettings::default(),
             plan_enabled: false,
+            bot_id: None,
+            global: false,
         }
     }
 

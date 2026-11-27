@@ -438,6 +438,53 @@ pub async fn handle_rpc(
             let status = ctx.relay.reload_from_disk();
             serde_json::to_value(status).map_err(|error| error.to_string())
         }
+        "relay.sync_bots" => {
+            let payload = ctx.relay.sync_bots().await?;
+            serde_json::to_value(payload).map_err(|error| error.to_string())
+        }
+        "bot.list" => {
+            let data_dir = ctx.data_dir.clone();
+            let bots = tokio::task::spawn_blocking(move || -> Result<Vec<pig_protocol::BotProfile>, String> {
+                let store = pig_core::store::Store::open(&data_dir)?;
+                Ok(store.list_bots())
+            })
+            .await
+            .map_err(|error| error.to_string())??;
+            serde_json::to_value(bots).map_err(|error| error.to_string())
+        }
+        "bot.upsert" => {
+            let bot_value = params
+                .get("bot")
+                .cloned()
+                .unwrap_or(params);
+            let bot: pig_protocol::BotProfile =
+                serde_json::from_value(bot_value).map_err(|error| format!("invalid bot profile: {error}"))?;
+            ctx.agent_ops
+                .send(pig_protocol::Op::UpsertBot { bot })
+                .await
+                .map_err(|error| error.to_string())?;
+            if ctx.relay.status().configured {
+                let relay = ctx.relay.clone();
+                tokio::spawn(async move {
+                    let _ = relay.sync_bots().await;
+                });
+            }
+            Ok(Value::Bool(true))
+        }
+        "bot.delete" => {
+            let bot_id = required_str(&params, "bot_id")?.to_string();
+            ctx.agent_ops
+                .send(pig_protocol::Op::DeleteBot { bot_id })
+                .await
+                .map_err(|error| error.to_string())?;
+            if ctx.relay.status().configured {
+                let relay = ctx.relay.clone();
+                tokio::spawn(async move {
+                    let _ = relay.sync_bots().await;
+                });
+            }
+            Ok(Value::Bool(true))
+        }
         other => Err(format!("unknown daemon rpc method: {other}")),
     }
 }

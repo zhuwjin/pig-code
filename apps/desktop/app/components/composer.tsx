@@ -30,9 +30,15 @@ function WorkspaceSelector(props: UiContext) {
   const pickerOpen = signal(false);
   const query = signal("");
   const selected = () => props.store.heroCwd();
+  const isGlobal = () => props.store.heroGlobal();
+  const inBotMode = () => props.store.workMode() === "bot";
+  const activeBot = () => inBotMode()
+    ? (props.store.botById(props.store.heroBotId()) ?? props.store.bots()[0] ?? null)
+    : null;
+  const allowWorkspacePicker = () => !inBotMode() || (activeBot()?.capabilities.workspace_tools ?? true);
   const workspaces = () => Array.from(new Set([
     props.store.cwd(),
-    ...props.store.sessions().map((session) => session.cwd),
+    ...props.store.sessions().filter((session) => !session.global && session.cwd).map((session) => session.cwd),
     ...(selected() ? [selected()!] : []),
   ]));
   const items = (): CommandItem[] => [
@@ -40,91 +46,103 @@ function WorkspaceSelector(props: UiContext) {
       id: `workspace:${path}`,
       label: workspaceName(path),
       keywords: [path],
-      checked: selected() === path,
+      checked: !isGlobal() && selected() === path,
       group: "workspaces",
     })),
     { id: "open-folder", label: `${t("composer.open_folder")} …`, group: "actions" },
-    ...(selected() ? [{ id: "clear-workspace", label: t("composer.no_workspace"), group: "actions" }] : []),
+    ...(selected() || inBotMode()
+      ? [{ id: "clear-workspace", label: t("composer.no_workspace"), checked: isGlobal(), group: "actions" }]
+      : []),
   ];
   return (
-    <View class="w-full flex-row items-center gap-2 border-b border-border pb-1">
-      <Popover
-        open={open()}
-        onOpenChange={({ open: value }) => {
-          open.set(value);
-          query.set("");
-        }}
-        closeOnEscape={false}
-        onCancel={() => {
-          if (query()) query.set("");
-          else open.set(false);
-        }}
-        placement="top"
-        align="start"
-        offset={8}
-        margin={8}
-        popupClass="w-64 overflow-hidden rounded-xl border border-border bg-popover shadow-xl"
-        trigger={
-          <View role="button" testID="hero-cwd" class="flex-row items-center gap-1 rounded-full bg-accent/50 px-3 py-1 hover:bg-accent">
-            <Icon name="folder-closed" color={token("muted-foreground")} />
-            <Text class={selected() ? "text-sm text-foreground" : "text-sm text-muted-foreground"}>
-              {selected() ? workspaceName(selected()!) : t("composer.select_workspace")}
-            </Text>
-            <Icon name="chevron-down" size={12} color={token("muted-foreground")} />
-          </View>
-        }
-      >
-        <Command
-          testID="hero-cwd-command"
-          items={items()}
-          query={query()}
-          onQueryChange={({ query: value }) => query.set(value)}
-          autoFocus
-          placeholder={t("composer.search_workspace")}
-          accessibilityLabel={t("composer.select_workspace")}
-          searchAccessibilityLabel={t("composer.search_workspace")}
-          class="w-64 bg-popover"
-          searchBarClass="h-10 flex-row items-center gap-2 border-b border-border px-3"
-          searchClass="min-w-0 flex-1 text-sm text-foreground placeholder:text-muted-foreground"
-          searchPrefix={<Icon name="search" size={14} color={token("muted-foreground")} />}
-          listClass="max-h-64"
-          itemClass="group flex-row items-center gap-2 px-3 py-2 focus:bg-accent checked:bg-accent/60"
-          groupClass="hidden"
-          separatorClass="h-px bg-border"
-          empty={<Text class="px-3 py-2 text-sm text-muted-foreground">{t("composer.no_matching_workspaces")}</Text>}
-          renderItem={(entry) => {
-            const isWorkspace = entry.id.startsWith("workspace:");
-            const testID = isWorkspace
-              ? `hero-cwd-option-${workspaces().indexOf(entry.id.slice("workspace:".length))}`
-              : entry.id === "clear-workspace" ? "hero-cwd-clear" : `hero-cwd-${entry.id}`;
-            return (
-              <View testID={testID} class="min-w-0 flex-1 flex-row items-center gap-2">
-                <Icon
-                  name={entry.id === "open-folder" ? "folder-open" : entry.id === "clear-workspace" ? "circle-x" : "folder-closed"}
-                  size={14}
-                  color={token("muted-foreground")}
-                />
-                <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-sm text-foreground">{entry.label}</Text>
-                <If when={entry.checked}><Icon name="check" size={14} color={token("foreground")} /></If>
-              </View>
-            );
+    <View class="w-full flex-row flex-wrap items-center gap-2 border-b border-border pb-1">
+      <If when={inBotMode() && activeBot() !== null}>
+        <View testID="hero-active-bot" class="flex-row items-center gap-1.5 rounded-full bg-primary/10 px-3 py-1">
+          <Icon name="bot" size={14} color={token("primary")} />
+          <Text class="text-sm font-medium text-foreground">{activeBot()!.name}</Text>
+        </View>
+      </If>
+      <If when={allowWorkspacePicker()}>
+        <Popover
+          open={open()}
+          onOpenChange={({ open: value }) => {
+            open.set(value);
+            query.set("");
           }}
-          onCancel={() => open.set(false)}
-          onSelect={({ id }) => {
-            if (id.startsWith("workspace:")) {
-              props.store.selectHeroWorkspace(id.slice("workspace:".length));
+          closeOnEscape={false}
+          onCancel={() => {
+            if (query()) query.set("");
+            else open.set(false);
+          }}
+          placement="top"
+          align="start"
+          offset={8}
+          margin={8}
+          popupClass="w-64 overflow-hidden rounded-xl border border-border bg-popover shadow-xl"
+          trigger={
+            <View role="button" testID="hero-cwd" class="flex-row items-center gap-1 rounded-full bg-accent/50 px-3 py-1 hover:bg-accent">
+              <Icon name={isGlobal() ? "globe" : "folder-closed"} color={token("muted-foreground")} />
+              <Text class={selected() || isGlobal() ? "text-sm text-foreground" : "text-sm text-muted-foreground"}>
+                {isGlobal()
+                  ? t("composer.global_session")
+                  : (selected() ? workspaceName(selected()!) : t("composer.select_workspace"))}
+              </Text>
+              <Icon name="chevron-down" size={12} color={token("muted-foreground")} />
+            </View>
+          }
+        >
+          <Command
+            testID="hero-cwd-command"
+            items={items()}
+            query={query()}
+            onQueryChange={({ query: value }) => query.set(value)}
+            autoFocus
+            placeholder={t("composer.search_workspace")}
+            accessibilityLabel={t("composer.select_workspace")}
+            searchAccessibilityLabel={t("composer.search_workspace")}
+            class="w-64 bg-popover"
+            searchBarClass="h-10 flex-row items-center gap-2 border-b border-border px-3"
+            searchClass="min-w-0 flex-1 text-sm text-foreground placeholder:text-muted-foreground"
+            searchPrefix={<Icon name="search" size={14} color={token("muted-foreground")} />}
+            listClass="max-h-64"
+            itemClass="group flex-row items-center gap-2 px-3 py-2 focus:bg-accent checked:bg-accent/60"
+            groupClass="hidden"
+            separatorClass="h-px bg-border"
+            empty={<Text class="px-3 py-2 text-sm text-muted-foreground">{t("composer.no_matching_workspaces")}</Text>}
+            renderItem={(entry) => {
+              const isWorkspace = entry.id.startsWith("workspace:");
+              const testID = isWorkspace
+                ? `hero-cwd-option-${workspaces().indexOf(entry.id.slice("workspace:".length))}`
+                : entry.id === "clear-workspace" ? "hero-cwd-clear" : `hero-cwd-${entry.id}`;
+              return (
+                <View testID={testID} class="min-w-0 flex-1 flex-row items-center gap-2">
+                  <Icon
+                    name={entry.id === "open-folder" ? "folder-open" : entry.id === "clear-workspace" ? "globe" : "folder-closed"}
+                    size={14}
+                    color={token("muted-foreground")}
+                  />
+                  <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-sm text-foreground">{entry.label}</Text>
+                  <If when={entry.checked}><Icon name="check" size={14} color={token("foreground")} /></If>
+                </View>
+              );
+            }}
+            onCancel={() => open.set(false)}
+            onSelect={({ id }) => {
+              if (id.startsWith("workspace:")) {
+                props.store.selectHeroWorkspace(id.slice("workspace:".length));
+                open.set(false);
+                return;
+              }
               open.set(false);
-              return;
-            }
-            open.set(false);
-            if (id === "clear-workspace") {
-              props.store.selectHeroWorkspace(null);
-              return;
-            }
-            pickerOpen.set(true);
-          }}
-        />
-      </Popover>
+              if (id === "clear-workspace") {
+                props.store.selectHeroWorkspace(null);
+                return;
+              }
+              pickerOpen.set(true);
+            }}
+          />
+        </Popover>
+      </If>
       <If when={pickerOpen()}>
         <DirectoryPicker
           {...props}

@@ -472,6 +472,8 @@ impl TrustFixture {
             reasoning_level: None,
             permissions: PermissionSettings::default(),
             plan_enabled: false,
+            bot_id: None,
+            global: false,
         };
         let (task_tx, _) = async_channel::bounded(1024);
         Session::create(

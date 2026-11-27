@@ -9,7 +9,23 @@ impl Session {
         self.plugin_tool_filter = self.plugin_tools.select(config, None, tx).await;
     }
 
-    /// Root session tool set: built-ins + Agent/AgentSwarm + MCP + plugins.
+    fn tool_allowed_by_bot(&self, tool_name: &str) -> bool {
+        let has_memory_roots = !self.state.extra_rw_roots.is_empty();
+        let is_mcp = tool_name.starts_with("mcp__");
+        let caps = self.bot_capabilities();
+        crate::bots::check_tool_capability(
+            tool_name,
+            is_mcp,
+            caps.as_ref(),
+            self.global,
+            has_memory_roots,
+        )
+        .is_ok()
+    }
+
+    /// Root session tool set: built-ins + Agent/AgentSwarm + MCP + plugins,
+    /// projected through the active Bot's capability boundaries and global-session
+    /// workspace isolation.
     /// Subagents narrow built-ins and inherit MCP/plugin tools by the same
     /// read-only rule. Dynamic plugin tools use the current request's selection.
     pub(crate) fn root_tools(&self) -> Vec<Box<dyn tool::Tool>> {
@@ -18,10 +34,13 @@ impl Session {
             &self.profiles_summary,
             &self.plugin_tools.registry(),
         );
-        if let Some(mcp) = &self.mcp {
+        if self.bot.as_ref().is_none_or(|b| b.capabilities.mcp)
+            && let Some(mcp) = &self.mcp
+        {
             tools.extend(mcp.tools());
         }
         tools.extend(self.plugin_tools.tools_filtered(&self.plugin_tool_filter));
+        tools.retain(|tool| self.tool_allowed_by_bot(tool.name()));
         tools
     }
 
@@ -32,16 +51,22 @@ impl Session {
     /// through the fixed `ToolSearch` + `CallTool` proxy pair so `tools[]`
     /// remains byte-identical across turns (zero prefix-cache invalidation).
     pub(crate) fn root_schemas(&self) -> Vec<serde_json::Value> {
-        let builtins = tool::all_root_with_summary(
+        let builtins: Vec<Box<dyn tool::Tool>> = tool::all_root_with_summary(
             &self.agent.cwd,
             &self.profiles_summary,
             &self.plugin_tools.registry(),
-        );
+        )
+        .into_iter()
+        .filter(|tool| self.tool_allowed_by_bot(tool.name()))
+        .collect();
         let mut runtime_tools: Vec<Box<dyn tool::Tool>> = Vec::new();
-        if let Some(mcp) = &self.mcp {
+        if self.bot.as_ref().is_none_or(|b| b.capabilities.mcp)
+            && let Some(mcp) = &self.mcp
+        {
             runtime_tools.extend(mcp.tools());
         }
         runtime_tools.extend(self.plugin_tools.tools_filtered(&self.plugin_tool_filter));
+        runtime_tools.retain(|tool| self.tool_allowed_by_bot(tool.name()));
 
         let entries: Vec<tool::DeferredToolEntry> = runtime_tools
             .iter()

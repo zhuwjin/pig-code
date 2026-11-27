@@ -304,6 +304,21 @@ pub enum Event {
         /// orthogonal to permissions)
         #[serde(default)]
         plan_enabled: bool,
+        /// Persistent Bot identity bound to this session, if any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bot_id: Option<String>,
+        /// True when this session has no workspace binding (global session).
+        #[serde(default)]
+        global: bool,
+    },
+    BotList {
+        bots: Vec<BotProfile>,
+    },
+    BotUpdated {
+        bot: BotProfile,
+    },
+    BotDeleted {
+        bot_id: String,
     },
     /// A resumed session has completed its history and persisted-state replay.
     SessionReplayComplete {
@@ -976,6 +991,9 @@ impl Event {
             Self::Error { session_id, .. } => session_id.as_deref(),
             Self::SessionList { .. }
             | Self::WorkspaceList { .. }
+            | Self::BotList { .. }
+            | Self::BotUpdated { .. }
+            | Self::BotDeleted { .. }
             | Self::ConfigSnapshot { .. }
             | Self::ProviderCredentials { .. }
             | Self::TestResult { .. }

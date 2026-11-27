@@ -97,6 +97,25 @@ pub enum Op {
         /// Plan mode switch (None/false = off; not seeded — plan is a transient state)
         #[serde(default)]
         plan_enabled: Option<bool>,
+        /// Optional persistent Bot identity bound to this session.
+        #[serde(default)]
+        bot_id: Option<String>,
+        /// True to create a global (non-project) session without workspace binding.
+        #[serde(default)]
+        global: bool,
+    },
+    ListBots,
+    UpsertBot {
+        bot: BotProfile,
+    },
+    DeleteBot {
+        bot_id: String,
+    },
+    /// Dynamically bind a session to a workspace directory, or unbind it back
+    /// to a global (non-project) session when `cwd` is `None`.
+    BindSessionWorkspace {
+        session_id: String,
+        cwd: Option<PathBuf>,
     },
     OpenSession {
         session_id: String,

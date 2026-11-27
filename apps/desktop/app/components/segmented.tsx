@@ -6,6 +6,7 @@ export function Segmented<T extends string>(props: {
   value: T;
   onChange: (value: T) => void;
   class?: string;
+  tabClass?: string;
   testID?: string;
 }) {
   return (
@@ -19,7 +20,7 @@ export function Segmented<T extends string>(props: {
           <Tab
             testID={props.testID ? `${props.testID}-${option().value}` : undefined}
             selected={props.value === option().value}
-            class="group flex-row items-center justify-center gap-1 rounded px-2 py-1"
+            class={`group flex-row items-center justify-center gap-1 rounded px-2 py-1 ${props.tabClass ?? ""}`}
             onPress={() => props.onChange(option().value)}
           >
             <Text class="text-xs font-medium text-muted-foreground group-selected:text-foreground">

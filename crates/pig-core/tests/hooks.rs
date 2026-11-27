@@ -130,6 +130,8 @@ credential_dirs = []
                 reasoning_level: None,
                 permissions: None,
                 plan_enabled: None,
+                bot_id: None,
+                global: false,
             })
             .await
             .unwrap();

@@ -1307,6 +1307,8 @@ async fn marker_append_failure_keeps_the_live_history_and_reports() {
         reasoning_level: None,
         permissions: PermissionSettings::default(),
         plan_enabled: false,
+        bot_id: None,
+        global: false,
     };
     let mut session = Session::create(
         meta,

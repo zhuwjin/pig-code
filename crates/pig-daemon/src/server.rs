@@ -406,6 +406,8 @@ impl SharedState {
             reasoning_level,
             permissions,
             plan_enabled,
+            bot_id,
+            global,
             ..
         } = event
         {
@@ -420,6 +422,8 @@ impl SharedState {
                 reasoning_level: reasoning_level.clone(),
                 permissions: *permissions,
                 plan_enabled: *plan_enabled,
+                bot_id: bot_id.clone(),
+                global: *global,
             };
             let overlay = self.sessions.entry(session_id.to_string()).or_default();
             // Core emits QueueChanged and SteerChanged right before SessionConfigured
@@ -1139,9 +1143,12 @@ fn is_placeholder_cwd(path: &Path) -> bool {
 
 fn normalize_default_cwd(op: &mut Op, default_cwd: &Path) {
     match op {
-        Op::NewSession { cwd, .. }
-        | Op::GitStatus { cwd }
-        | Op::GitDiff { cwd, .. } => {
+        Op::NewSession { cwd, global, .. } => {
+            if !*global && is_placeholder_cwd(cwd) {
+                *cwd = default_cwd.to_path_buf();
+            }
+        }
+        Op::GitStatus { cwd } | Op::GitDiff { cwd, .. } => {
             if is_placeholder_cwd(cwd) {
                 *cwd = default_cwd.to_path_buf();
             }
@@ -1192,6 +1199,8 @@ mod tests {
             reasoning_level: None,
             permissions: pig_protocol::PermissionSettings::default(),
             plan_enabled: false,
+            bot_id: None,
+            global: false,
         }
     }
 
@@ -1339,6 +1348,8 @@ mod tests {
             reasoning_level: None,
             permissions: None,
             plan_enabled: None,
+            bot_id: None,
+            global: false,
         });
         // Even if s-old configures before s-new, s-old stays loading until SessionReplayComplete.
         assert!(state.publish_envelope(&envelope(1, configured("s-old"))).is_none());

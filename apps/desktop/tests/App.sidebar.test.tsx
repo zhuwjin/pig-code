@@ -266,3 +266,35 @@ test("shows the trailing fade for overflowing titles without hovering", async ()
   await app.waitFor("id:session-title-fade");
   expect(app.count("id:session-title-fade")).toBe(1);
 });
+
+test("switches between project mode and bot mode in the sidebar", async () => {
+  const app = await open("./App.selftest.tsx", {
+    network: "live",
+    platform: "macos",
+    locale: "zh-CN",
+    width: 1280,
+    height: 800,
+  });
+  await app.waitFor("id:sidebar-mode", { timeout: 10000 });
+  expect(app.shows("id:workspace-row")).toBe(true);
+  expect(app.count("id:bot-list")).toBe(0);
+  expect(app.count("id:hero-bot")).toBe(0);
+
+  await app.press("id:sidebar-mode-bot");
+  await app.waitFor("id:bot-list", { timeout: 10000 });
+  expect(app.count("id:workspace-row")).toBe(0);
+  await app.waitFor("id:sidebar-bot-pig-coder", { timeout: 10000 });
+  expect(app.shows("id:sidebar-bot-pig-architect")).toBe(true);
+  expect(app.shows("id:sidebar-bot-pig-orchestrator")).toBe(true);
+  expect(app.shows("id:hero-active-bot")).toBe(true);
+
+  await app.press("id:sidebar-bot-pig-coder");
+  await app.type("id:composer-input", "bot mode hello");
+  await app.press("id:send-button");
+  await app.waitFor("Conclusion: MOCK_REPLY_OK", { timeout: 20000 });
+  await app.waitFor("id:bot-list >> text:auto-title selftest", { timeout: 10000 });
+
+  await app.press("id:sidebar-mode-project");
+  await app.waitFor("id:workspace-row", { timeout: 10000 });
+  expect(app.count("id:bot-list")).toBe(0);
+});

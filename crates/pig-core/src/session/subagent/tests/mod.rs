@@ -192,6 +192,8 @@ pub(super) fn make_child_session(
         hook_context_stash: Vec::new(),
         session_start_hook_ran: true,
         session_start_source: "subagent",
+        bot: None,
+        global: false,
     }
 }
 
@@ -309,6 +311,8 @@ fn compaction_test_session_with_format(
         reasoning_level: None,
         permissions: pig_protocol::PermissionSettings::default(),
         plan_enabled: false,
+        bot_id: None,
+        global: false,
     };
     let store = Arc::new(Mutex::new(
         crate::store::Store::open(&data_dir).expect("store"),
@@ -618,6 +622,8 @@ async fn child_todo_write_stays_out_of_root_state_and_events() {
         hooks: &hooks,
         history: &[],
         timing: None,
+        bot_capabilities: None,
+        global_session: false,
     };
     let outcome = exec_tool_gated_ctx(
         &mut gate,
@@ -710,6 +716,8 @@ async fn child_gate_refuses_new_scope_widening() {
         hooks: &hooks,
         history: &[],
         timing: None,
+        bot_capabilities: None,
+        global_session: false,
     };
     let outcome = exec_tool_gated_ctx(
         &mut gate,
@@ -779,6 +787,8 @@ fn swarm_test_session(name: &str) -> (Session, ResolvedModel, PathBuf) {
         reasoning_level: None,
         permissions: pig_protocol::PermissionSettings::default(),
         plan_enabled: false,
+        bot_id: None,
+        global: false,
     };
     let store = Arc::new(Mutex::new(
         crate::store::Store::open(&data_dir).expect("store"),

@@ -11,6 +11,7 @@ import { t } from "./i18n";
 import {
   AppConfig,
   ApprovalDecision,
+  BotProfile,
   ChatItem,
   ComposerImage,
   ConnectionTestResult,
@@ -88,6 +89,12 @@ export class AgentStore {
   readonly threadSearchOpen = signal(false);
   readonly sessions = signal<SessionMeta[]>([]);
   readonly workspaces = signal<WorkspaceMeta[]>([]);
+  readonly bots = signal<BotProfile[]>([]);
+  readonly workMode = signal<"project" | "bot">("project");
+  readonly heroBotId = signal<string | null>(null);
+  readonly heroGlobal = signal(false);
+  readonly botSyncBusy = signal(false);
+  readonly botSyncNotice = signal("");
   readonly current = signal<string | null>(null);
   readonly currentTitle = signal(t("store.new_task"));
   readonly currentModel = signal("");
@@ -274,6 +281,22 @@ export class AgentStore {
     });
   }
 
+  setWorkMode(mode: "project" | "bot"): void {
+    if (this.workMode() === mode) return;
+    this.workMode.set(mode);
+    if (mode === "bot") {
+      const botId = this.heroBotId() ?? this.bots()[0]?.bot_id ?? null;
+      this.heroBotId.set(botId);
+      this.heroGlobal.set(true);
+      this.heroCwd.set(null);
+      if (botId) this.applyBotHeroDefaults(botId);
+    } else {
+      this.heroBotId.set(null);
+      this.heroGlobal.set(false);
+      this.applyHeroDefaults();
+    }
+  }
+
   newTask(): void {
     this.autoOpen = false;
     this.pendingSubmission = null;
@@ -282,13 +305,124 @@ export class AgentStore {
     this.heroModelDirty = false;
     this.currentTitle.set(t("store.new_task"));
     this.currentModel.set("");
+    if (this.workMode() === "bot") {
+      const botId = this.heroBotId() ?? this.bots()[0]?.bot_id ?? null;
+      this.heroBotId.set(botId);
+      this.heroGlobal.set(true);
+      if (botId) this.applyBotHeroDefaults(botId);
+    } else {
+      this.heroBotId.set(null);
+      this.heroGlobal.set(false);
+      this.applyHeroDefaults();
+    }
+    this.globalError.set("");
+  }
+
+  newTaskForBot(botId: string): void {
+    this.autoOpen = false;
+    this.pendingSubmission = null;
+    this.workMode.set("bot");
+    this.current.set(null);
+    this.heroBotId.set(botId);
+    this.heroCwd.set(null);
+    this.heroGlobal.set(true);
+    this.heroModelDirty = false;
+    this.currentTitle.set(t("store.new_task"));
+    this.currentModel.set("");
+    this.applyBotHeroDefaults(botId);
+    this.globalError.set("");
+  }
+
+  newGlobalTask(botId?: string | null): void {
+    this.autoOpen = false;
+    this.pendingSubmission = null;
+    this.current.set(null);
+    this.heroCwd.set(null);
+    this.heroGlobal.set(true);
+    if (botId !== undefined) this.heroBotId.set(botId);
+    this.heroModelDirty = false;
+    this.currentTitle.set(t("store.new_task"));
+    this.currentModel.set("");
     this.applyHeroDefaults();
     this.globalError.set("");
+  }
+
+  private applyBotHeroDefaults(botId: string): void {
+    const bot = this.botById(botId);
+    if (bot && !this.heroModelDirty) {
+      this.heroConfiguration.update((configuration) => ({
+        ...configuration,
+        providerId: bot.provider_id ?? configuration.providerId,
+        modelId: bot.model_id ?? configuration.modelId,
+        reasoningLevel: bot.reasoning_level ?? configuration.reasoningLevel,
+        botId: bot.bot_id,
+      }));
+    }
+  }
+
+  selectHeroBot(botId: string | null): void {
+    this.autoOpen = false;
+    this.heroBotId.set(botId);
+    const bot = this.botById(botId);
+    if (bot && !bot.capabilities.workspace_tools) {
+      this.heroGlobal.set(true);
+      this.heroCwd.set(null);
+    }
+    if (bot) this.applyBotHeroDefaults(bot.bot_id);
+  }
+
+  setHeroGlobal(global: boolean): void {
+    this.autoOpen = false;
+    this.heroGlobal.set(global);
+    if (global) {
+      this.heroCwd.set(null);
+    }
+    this.applyHeroDefaults();
+  }
+
+  botById(botId: string | null | undefined): BotProfile | null {
+    if (!botId) return null;
+    return this.bots().find((bot) => bot.bot_id === botId) ?? null;
+  }
+
+  upsertBot(bot: BotProfile): void {
+    this.command({ UpsertBot: { bot } });
+    if (this.relayStatus()?.configured) {
+      void this.syncBots();
+    }
+  }
+
+  deleteBot(botId: string): void {
+    if (this.heroBotId() === botId) this.heroBotId.set(null);
+    this.command({ DeleteBot: { bot_id: botId } });
+    if (this.relayStatus()?.configured) {
+      void this.syncBots();
+    }
+  }
+
+  bindSessionWorkspace(sessionId: string, cwd: string | null): void {
+    this.command({ BindSessionWorkspace: { session_id: sessionId, cwd } }, sessionId);
+  }
+
+  async syncBots(): Promise<boolean> {
+    this.botSyncBusy.set(true);
+    this.botSyncNotice.set("");
+    try {
+      await this.agent.relaySyncBots();
+      this.botSyncNotice.set(t("settings.bots.sync_success"));
+      return true;
+    } catch (error) {
+      this.botSyncNotice.set(errorMessage(error));
+      return false;
+    } finally {
+      this.botSyncBusy.set(false);
+    }
   }
 
   selectHeroWorkspace(cwd: string | null): void {
     this.autoOpen = false;
     this.heroCwd.set(cwd);
+    this.heroGlobal.set(cwd === null);
     this.applyHeroDefaults();
   }
 
@@ -525,14 +659,19 @@ export class AgentStore {
       }
       return;
     }
+    const inBotMode = this.workMode() === "bot";
+    const resolvedBotId = inBotMode ? (this.heroBotId() ?? this.bots()[0]?.bot_id ?? null) : null;
+    const global = this.heroGlobal();
     if (this.command({
       NewSession: {
-        cwd: this.heroCwd() ?? this.cwd(),
+        cwd: global ? "" : (this.heroCwd() ?? this.cwd()),
         provider_id: configuration.providerId,
         model_id: configuration.modelId,
         reasoning_level: configuration.reasoningLevel,
         permissions: configuration.permissions,
         plan_enabled: configuration.planEnabled,
+        bot_id: resolvedBotId,
+        global,
       },
     })) {
       this.pendingSubmission = { text, files, images, delivery: requestedDelivery };
@@ -1373,6 +1512,28 @@ export class AgentStore {
       case "WorkspaceList":
         this.workspaces.set(data.workspaces as WorkspaceMeta[]);
         break;
+      case "BotList":
+        this.bots.set((data.bots ?? []) as BotProfile[]);
+        break;
+      case "BotUpdated": {
+        const updated = data.bot as BotProfile;
+        if (updated?.bot_id) {
+          this.bots.update((list) => {
+            const exists = list.some((item) => item.bot_id === updated.bot_id);
+            return exists
+              ? list.map((item) => (item.bot_id === updated.bot_id ? updated : item))
+              : [...list, updated];
+          });
+        }
+        break;
+      }
+      case "BotDeleted": {
+        const deletedId = data.bot_id as string;
+        if (deletedId) {
+          this.bots.update((list) => list.filter((item) => item.bot_id !== deletedId));
+        }
+        break;
+      }
       case "SessionList": {
         const sessions = (data.sessions as SessionMeta[]).filter((item) => !item.archived);
         this.sessions.set(sessions);
@@ -1483,7 +1644,9 @@ export class AgentStore {
       case "SessionConfigured": {
         this.autoOpen = false;
         this.current.set(sessionId);
-        this.cwd.set(data.cwd);
+        if (!data.global && typeof data.cwd === "string" && data.cwd.length > 0) {
+          this.cwd.set(data.cwd);
+        }
         const cold = !this.configuredSessions.has(sessionId!);
         this.configuredSessions.add(sessionId!);
         if (cold) {
@@ -1503,6 +1666,8 @@ export class AgentStore {
             reasoningLevel: data.reasoning_level ?? null,
             permissions: data.permissions ?? permissionsForMode("auto"),
             planEnabled: data.plan_enabled ?? false,
+            botId: data.bot_id ?? null,
+            global: Boolean(data.global),
           },
         }));
         this.syncCurrentModelName(data.model || "");
@@ -2147,6 +2312,7 @@ export class AgentStore {
         this.currentModel.set("");
         this.sessions.set([]);
         this.workspaces.set([]);
+        this.bots.set([]);
         this.items.set({});
         this.turns.set({});
         this.running.set({});

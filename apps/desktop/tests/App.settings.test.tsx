@@ -231,3 +231,27 @@ test("opens remote control settings with account login and device-code pairing",
   expect(app.enabled("id:remote-sign-in")).toBe(true);
   expect(app.enabled("id:remote-register")).toBe(true);
 });
+
+test("opens bots settings and creates a custom bot with capability boundaries", async () => {
+  const app = await openApp();
+  await app.press("id:settings-open");
+  await app.waitFor("id:settings-bots");
+  await app.press("id:settings-bots");
+  await app.waitFor("id:bot-settings");
+  expect(app.texts()).toContain("Bot 与分层记忆");
+  await app.waitFor("id:bot-card-pig-coder", { timeout: 10000 });
+  expect(app.shows("id:bot-card-pig-architect")).toBe(true);
+  expect(app.shows("id:bot-card-pig-orchestrator")).toBe(true);
+
+  await app.press("id:bots-create");
+  await app.waitFor("id:bot-editor");
+  await app.type("id:bot-name-input", "Security Auditor");
+  await app.type("id:bot-description-input", "Reviews security boundaries");
+  await app.type("id:bot-prompt-input", "Audit every permission gate carefully.");
+  await app.press("id:bot-save");
+  await app.waitFor("id:bot-card-security-auditor", { timeout: 10000 });
+  expect(app.texts()).toContain("Security Auditor");
+
+  await app.press("id:bot-delete-security-auditor");
+  await app.waitFor("id:bot-card-security-auditor", { state: "gone", timeout: 10000 });
+});

@@ -203,6 +203,8 @@ fn new_session(cwd: &Path) -> Op {
         reasoning_level: None,
         permissions: Some(ExecMode::Auto.permissions()),
         plan_enabled: Some(false),
+        bot_id: None,
+        global: false,
     }
 }
 

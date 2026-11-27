@@ -21,6 +21,8 @@ pub fn snapshot_events(snapshot: &SessionStateSnapshot) -> Vec<Event> {
             reasoning_level: configuration.reasoning_level.clone(),
             permissions: configuration.permissions,
             plan_enabled: configuration.plan_enabled,
+            bot_id: configuration.bot_id.clone(),
+            global: configuration.global,
         });
     }
     events.push(Event::ConversationSnapshot {

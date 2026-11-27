@@ -1726,6 +1726,8 @@ mod tests {
             reasoning_level: None,
             permissions: Default::default(),
             plan_enabled: false,
+            bot_id: None,
+            global: false,
         };
         let mut rollout = Rollout::create_with_limit(&dir, &meta, 2048).expect("create");
         rollout

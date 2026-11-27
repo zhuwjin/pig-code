@@ -115,6 +115,10 @@ name = "bash"
 path = "tests/bash.rs"
 
 [[test]]
+name = "bots"
+path = "tests/bots.rs"
+
+[[test]]
 name = "config"
 path = "tests/config.rs"
 

@@ -10,6 +10,7 @@
 
 pub mod agent;
 mod api_usage;
+pub mod bots;
 pub mod config;
 pub mod conversation_projection;
 pub mod credentials;
@@ -183,6 +184,8 @@ pub fn net_test_full_turn(config_path: Option<PathBuf>) {
                 reasoning_level: None,
                 permissions: None,
                 plan_enabled: None,
+                bot_id: None,
+                global: false,
             })
             .await
             .expect("send NewSession");

@@ -272,6 +272,10 @@ pub struct Session {
     /// "startup" | "resume": the SessionStart hook payload's source, set by
     /// the constructor that built this Session
     session_start_source: &'static str,
+    /// Optional persistent Bot entity bound to this session.
+    pub(crate) bot: Option<pig_protocol::BotProfile>,
+    /// True when this session is a global (non-project) session with no bound workspace.
+    pub(crate) global: bool,
 }
 
 impl Session {
@@ -288,5 +292,17 @@ impl Session {
 
     pub(super) fn is_subagent(&self) -> bool {
         self.subagent.is_some()
+    }
+
+    pub(crate) fn bot_id(&self) -> Option<&str> {
+        self.bot.as_ref().map(|bot| bot.bot_id.as_str())
+    }
+
+    pub(crate) fn bot_capabilities(&self) -> Option<pig_protocol::BotCapabilities> {
+        self.bot.as_ref().map(|bot| bot.capabilities)
+    }
+
+    pub(crate) fn bot_persona_prompt(&self) -> Option<String> {
+        self.bot.as_ref().map(crate::bots::bot_persona_section)
     }
 }

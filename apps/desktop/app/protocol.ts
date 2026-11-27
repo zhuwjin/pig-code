@@ -1,5 +1,29 @@
 export type Payload = Record<string, any>;
 
+export interface BotCapabilities {
+  workspace_tools: boolean;
+  control_plane: boolean;
+  mcp: boolean;
+  skills: boolean;
+  network: boolean;
+  subagents: boolean;
+}
+
+export interface BotProfile {
+  bot_id: string;
+  name: string;
+  avatar?: string | null;
+  description: string;
+  system_prompt: string;
+  provider_id?: string | null;
+  model_id?: string | null;
+  reasoning_level?: string | null;
+  capabilities: BotCapabilities;
+  builtin: boolean;
+  created_at_ms: number;
+  updated_at_ms: number;
+}
+
 export interface SessionMeta {
   id: string;
   title: string;
@@ -12,6 +36,8 @@ export interface SessionMeta {
   model_id?: string | null;
   reasoning_level?: string | null;
   permissions?: PermissionSettings;
+  bot_id?: string | null;
+  global?: boolean;
 }
 
 export interface WorkspaceMeta {
@@ -368,6 +394,8 @@ export interface SessionConfiguration {
   reasoningLevel: string | null;
   permissions: PermissionSettings;
   planEnabled: boolean;
+  botId?: string | null;
+  global?: boolean;
 }
 
 export type ApiFormat = "OpenAiChat" | "AnthropicMessages" | "OpenAiResponses";

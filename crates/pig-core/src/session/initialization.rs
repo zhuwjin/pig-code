@@ -22,32 +22,45 @@ impl SessionFrozen {
         data_dir: &Path,
         plugins: &crate::plugins::SharedPluginRegistry,
         runtime: Option<&crate::config::RuntimeConfig>,
+        bot: Option<&pig_protocol::BotProfile>,
+        global: bool,
     ) -> Self {
         let app_config = runtime.map(|runtime| runtime.config());
         let trust = runtime
             .map(|runtime| runtime.trust().clone())
             .unwrap_or_else(|| crate::config::WorkspaceTrust::untrusted(cwd));
-        let skills_prompt =
-            crate::plugins::skills_section_with_trust(cwd, plugins, trust.admits(cwd));
-        let agents_prompt = prompt::agents_md(data_dir, cwd);
-        let memory_enabled = app_config.is_some_and(|config| config.memory.enabled);
+        let skills_enabled = bot.is_none_or(|b| b.capabilities.skills);
+        let skills_prompt = if skills_enabled {
+            crate::plugins::skills_section_with_trust(
+                cwd,
+                plugins,
+                !global && trust.admits(cwd),
+            )
+        } else {
+            String::new()
+        };
+        let agents_prompt = if global {
+            String::new()
+        } else {
+            prompt::agents_md(data_dir, cwd)
+        };
+        let bot_id = bot.map(|b| b.bot_id.as_str());
+        let workspace_cwd = (!global).then_some(cwd);
+        let memory_enabled =
+            app_config.is_some_and(|config| config.memory.enabled) || bot.is_some();
         if memory_enabled {
-            // The directory must genuinely exist before the prompt says
-            // "this directory already exists" (also makes the RW root
-            // canonicalizable for the path gates)
-            crate::memory::ensure_initialized(data_dir, cwd);
+            // The directories must genuinely exist before the prompt says
+            // "this directory already exists" (also makes the RW roots
+            // canonicalizable for the path gates).
+            crate::memory::ensure_layered_initialized(data_dir, bot_id, workspace_cwd, None);
         }
         let memory_rw_roots = if memory_enabled {
-            vec![crate::memory::workspace_memory_dir(data_dir, cwd)]
+            crate::memory::layered_memory_roots(data_dir, bot_id, workspace_cwd, None)
         } else {
             vec![]
         };
         let memory_prompt = if memory_enabled {
-            crate::memory::memory_section(
-                app_config.unwrap_or(&AppConfig::default()),
-                data_dir,
-                cwd,
-            )
+            crate::memory::layered_memory_section_raw(data_dir, bot_id, workspace_cwd, None)
         } else {
             String::new()
         };
@@ -88,6 +101,8 @@ struct SessionParts {
     task_notify: async_channel::Sender<crate::task::TaskChange>,
     runtime: Option<Arc<crate::config::RuntimeConfig>>,
     session_start_source: &'static str,
+    bot: Option<pig_protocol::BotProfile>,
+    global: bool,
 }
 
 fn assemble_session(parts: SessionParts, frozen: SessionFrozen) -> Session {
@@ -129,7 +144,11 @@ fn assemble_session(parts: SessionParts, frozen: SessionFrozen) -> Session {
             &parts.data_dir,
             &trust,
         ))),
-        git_snapshot: prompt::git_snapshot(&parts.cwd),
+        git_snapshot: if parts.global {
+            None
+        } else {
+            prompt::git_snapshot(&parts.cwd)
+        },
         hooks: crate::hooks::HookSet::load_with_plugins(
             &parts.cwd,
             app_config,
@@ -197,6 +216,8 @@ fn assemble_session(parts: SessionParts, frozen: SessionFrozen) -> Session {
         hook_context_stash: Vec::new(),
         session_start_hook_ran: false,
         session_start_source: parts.session_start_source,
+        bot: parts.bot,
+        global: parts.global,
     };
     session.state.agents.register_root(session.agent.id.clone());
     session.state.agents.update_agent_context(
@@ -222,8 +243,19 @@ impl Session {
         runtime: Option<Arc<crate::config::RuntimeConfig>>,
     ) -> Result<Self, CoreError> {
         let rollout = Rollout::create(sessions_dir, &meta)?;
-        let frozen =
-            SessionFrozen::capture(&meta.id, &meta.cwd, &data_dir, plugins, runtime.as_deref());
+        let bot = meta
+            .bot_id
+            .as_deref()
+            .and_then(|id| store.lock().expect("store lock").get_bot(id));
+        let frozen = SessionFrozen::capture(
+            &meta.id,
+            &meta.cwd,
+            &data_dir,
+            plugins,
+            runtime.as_deref(),
+            bot.as_ref(),
+            meta.global,
+        );
         Ok(assemble_session(
             SessionParts {
                 id: meta.id,
@@ -240,6 +272,8 @@ impl Session {
                 task_notify,
                 runtime,
                 session_start_source: "startup",
+                bot,
+                global: meta.global,
             },
             frozen,
         ))
@@ -287,8 +321,25 @@ impl Session {
         }
         // Freeze the same inputs as create; the canonical PromptSnapshot below
         // replaces the last-sent values (older sessions fall back to these).
-        let frozen = SessionFrozen::capture(id, &cwd, &data_dir, plugins, runtime.as_deref());
         let session_meta = store.lock().expect("store lock").get_session(id);
+        let bot = session_meta
+            .as_ref()
+            .and_then(|meta| meta.bot_id.as_deref())
+            .and_then(|bot_id| store.lock().expect("store lock").get_bot(bot_id));
+        let global = session_meta.as_ref().is_some_and(|meta| meta.global);
+        let effective_cwd = session_meta
+            .as_ref()
+            .map(|meta| meta.cwd.clone())
+            .unwrap_or(cwd);
+        let frozen = SessionFrozen::capture(
+            id,
+            &effective_cwd,
+            &data_dir,
+            plugins,
+            runtime.as_deref(),
+            bot.as_ref(),
+            global,
+        );
         let selection = session_meta.as_ref().and_then(|meta| {
             Some(ModelSelection {
                 provider_id: meta.provider_id.clone()?,
@@ -309,20 +360,23 @@ impl Session {
             .as_ref()
             .map(|model| tool::MediaCapabilities::new(model.input_image, model.input_pdf));
         let media_dir = pig_utils::paths::media_dir(sessions_dir, id);
+        let bot_persona = bot.as_ref().map(crate::bots::bot_persona_section);
         let (history, user_ixs) = crate::rollout::rebuild_history_with_media_root(
             &records,
             // Placeholder system prompt: the first run_turn overwrites it
             // wholly with the frozen snapshot
             // Placeholder (overwritten by the first run_turn): the env-key
             // leg only, the per-model cap lands with the turn's own prompt
-            prompt::system_prompt(
-                &cwd,
+            prompt::system_prompt_with_bot(
+                &effective_cwd,
                 true,
                 None,
                 &frozen.today,
                 &frozen.agents_prompt,
                 &frozen.memory_prompt,
                 &frozen.skills_prompt,
+                bot_persona.as_deref(),
+                global,
             ),
             media,
             &media_dir,
@@ -408,7 +462,7 @@ impl Session {
         let mut session = assemble_session(
             SessionParts {
                 id: id.to_string(),
-                cwd,
+                cwd: effective_cwd,
                 history,
                 user_ixs,
                 tracker,
@@ -425,6 +479,8 @@ impl Session {
                 task_notify,
                 runtime,
                 session_start_source: "resume",
+                bot,
+                global,
             },
             frozen,
         );
@@ -474,6 +530,64 @@ impl Session {
         session.projected_input_image = media.map(|caps| caps.input_image);
         session.projected_input_pdf = media.map(|caps| caps.input_pdf);
         Ok((session, records))
+    }
+
+    /// Rebind a session to a workspace directory (`Some`) or detach it back to
+    /// a global non-workspace session (`None`), refreshing trust, project memory,
+    /// AGENTS.md, skills, hooks, and permission rules while preserving the Bot's
+    /// persona and personal long-term memory.
+    pub(crate) fn rebind_workspace(
+        &mut self,
+        new_cwd: Option<PathBuf>,
+        runtime: Option<Arc<crate::config::RuntimeConfig>>,
+    ) {
+        let global = new_cwd.is_none();
+        let effective_cwd = new_cwd.unwrap_or_default();
+        self.agent.cwd = effective_cwd.clone();
+        self.global = global;
+        self.runtime = runtime;
+        let frozen = SessionFrozen::capture(
+            &self.agent.id,
+            &effective_cwd,
+            &self.data_dir,
+            &self.plugin_tools.registry(),
+            self.runtime.as_deref(),
+            self.bot.as_ref(),
+            global,
+        );
+        self.trust = frozen.trust;
+        self.skills_prompt = frozen.skills_prompt;
+        self.agents_prompt = frozen.agents_prompt.clone();
+        self.memory_enabled = frozen.memory_enabled;
+        self.memory_prompt = frozen.memory_prompt;
+        self.profiles_summary = frozen.profiles_summary;
+        self.git_snapshot = if global {
+            None
+        } else {
+            prompt::git_snapshot(&effective_cwd)
+        };
+        let app_config = self.runtime.as_ref().map(|r| r.config());
+        self.hooks = crate::hooks::HookSet::load_with_plugins(
+            &effective_cwd,
+            app_config,
+            &self.plugin_tools.registry(),
+            &self.trust,
+        );
+        *self
+            .permission_rules
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            load_permissions(&effective_cwd, &self.data_dir, &self.trust);
+        self.state.extra_rw_roots = frozen.memory_rw_roots;
+        self.mcp = None;
+        self.prompt_text = None;
+        self.prompt_memory_enabled = None;
+        self.prompt_skills_state = None;
+        self.recorded_prompt = None;
+        self.agents_reminded = frozen.agents_prompt;
+        self.memory_reminded.clear();
+        self.permissions_reminded = None;
+        self.refresh_project_sandbox();
     }
 }
 

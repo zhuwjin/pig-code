@@ -1,7 +1,10 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use pig_protocol::{RelayDeviceInfo, RelayUser};
+use pig_protocol::{
+    BotDeletionTombstone, BotMemoryFile, BotProfile, BotSyncPayload, RelayDeviceInfo, RelayUser,
+};
 use rusqlite::{Connection, OptionalExtension as _, params};
 use uuid::Uuid;
 
@@ -53,9 +56,10 @@ pub enum DeviceCodeStatus {
 /// SQLite-backed store for `pig-relay`.
 ///
 /// Privacy boundary: this store persists ONLY account credentials (salted
-/// hashes), hashed tokens, device registry metadata, and ephemeral device-code
-/// login challenges. It NEVER stores source code, tool outputs, conversation
-/// content, or model API keys.
+/// hashes), hashed tokens, device registry metadata, ephemeral device-code
+/// login challenges, and account-scoped Bot profiles + Bot personal long-term
+/// memory. It NEVER stores workspace source code, workspace memory, tool
+/// outputs, conversation content, or model API keys.
 pub struct RelayStore {
     conn: Connection,
 }
@@ -109,6 +113,31 @@ impl RelayStore {
                 expires_at_ms INTEGER NOT NULL,
                 approved_user_id TEXT REFERENCES users(user_id) ON DELETE CASCADE,
                 consumed INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS account_bots (
+                user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                bot_id TEXT NOT NULL,
+                profile_json TEXT NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (user_id, bot_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS account_bot_deletions (
+                user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                bot_id TEXT NOT NULL,
+                deleted_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (user_id, bot_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS account_bot_memories (
+                user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                bot_id TEXT NOT NULL,
+                path TEXT NOT NULL,
+                content TEXT NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                deleted INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (user_id, bot_id, path)
             );
             "#,
         )
@@ -561,6 +590,263 @@ impl RelayStore {
             device_token,
         })
     }
+
+    /// Resolve a `user_id` from either an active session token or an active device token.
+    pub fn resolve_user_id_from_token(&self, token: &str) -> Result<Option<String>, String> {
+        if let Some(user) = self.verify_session_token(token)? {
+            return Ok(Some(user.user_id));
+        }
+        if let Some(device) = self.verify_device_token(token)? {
+            return Ok(Some(device.user_id));
+        }
+        Ok(None)
+    }
+
+    pub fn get_bot_sync(&self, user_id: &str) -> Result<BotSyncPayload, String> {
+        let mut bots = Vec::new();
+        {
+            let mut stmt = self
+                .conn
+                .prepare(
+                    "SELECT profile_json FROM account_bots WHERE user_id = ?1 ORDER BY bot_id ASC",
+                )
+                .map_err(|error| error.to_string())?;
+            let rows = stmt
+                .query_map(params![user_id], |row| row.get::<_, String>(0))
+                .map_err(|error| error.to_string())?;
+            for row in rows {
+                let raw = row.map_err(|error| error.to_string())?;
+                if let Ok(profile) = serde_json::from_str::<BotProfile>(&raw) {
+                    bots.push(profile);
+                }
+            }
+        }
+
+        let mut deletions = Vec::new();
+        {
+            let mut stmt = self
+                .conn
+                .prepare(
+                    "SELECT bot_id, deleted_at_ms FROM account_bot_deletions WHERE user_id = ?1 ORDER BY bot_id ASC",
+                )
+                .map_err(|error| error.to_string())?;
+            let rows = stmt
+                .query_map(params![user_id], |row| {
+                    Ok(BotDeletionTombstone {
+                        bot_id: row.get(0)?,
+                        deleted_at_ms: row.get::<_, i64>(1)?.max(0) as u64,
+                    })
+                })
+                .map_err(|error| error.to_string())?;
+            for row in rows {
+                deletions.push(row.map_err(|error| error.to_string())?);
+            }
+        }
+
+        let mut memories: BTreeMap<String, Vec<BotMemoryFile>> = BTreeMap::new();
+        {
+            let mut stmt = self
+                .conn
+                .prepare(
+                    r#"
+                    SELECT bot_id, path, content, updated_at_ms, deleted
+                    FROM account_bot_memories
+                    WHERE user_id = ?1
+                    ORDER BY bot_id ASC, path ASC
+                    "#,
+                )
+                .map_err(|error| error.to_string())?;
+            let rows = stmt
+                .query_map(params![user_id], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        BotMemoryFile {
+                            path: row.get(1)?,
+                            content: row.get(2)?,
+                            updated_at_ms: row.get::<_, i64>(3)?.max(0) as u64,
+                            deleted: row.get::<_, i64>(4)? != 0,
+                        },
+                    ))
+                })
+                .map_err(|error| error.to_string())?;
+            for row in rows {
+                let (bot_id, file) = row.map_err(|error| error.to_string())?;
+                memories.entry(bot_id).or_default().push(file);
+            }
+        }
+
+        Ok(BotSyncPayload {
+            bots,
+            deletions,
+            memories,
+        })
+    }
+
+    pub fn merge_bot_sync(
+        &mut self,
+        user_id: &str,
+        incoming: &BotSyncPayload,
+    ) -> Result<BotSyncPayload, String> {
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(|error| error.to_string())?;
+
+        for bot in &incoming.bots {
+            if !is_safe_bot_id(&bot.bot_id) {
+                continue;
+            }
+            let existing_deleted: Option<i64> = tx
+                .query_row(
+                    "SELECT deleted_at_ms FROM account_bot_deletions WHERE user_id = ?1 AND bot_id = ?2",
+                    params![user_id, &bot.bot_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| error.to_string())?;
+            if existing_deleted.is_some_and(|ts| (ts.max(0) as u64) >= bot.updated_at_ms) {
+                continue;
+            }
+            let existing_updated: Option<i64> = tx
+                .query_row(
+                    "SELECT updated_at_ms FROM account_bots WHERE user_id = ?1 AND bot_id = ?2",
+                    params![user_id, &bot.bot_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| error.to_string())?;
+            if existing_updated.is_some_and(|ts| (ts.max(0) as u64) >= bot.updated_at_ms) {
+                continue;
+            }
+            let profile_json = serde_json::to_string(bot).map_err(|error| error.to_string())?;
+            tx.execute(
+                r#"
+                INSERT INTO account_bots (user_id, bot_id, profile_json, updated_at_ms)
+                VALUES (?1, ?2, ?3, ?4)
+                ON CONFLICT(user_id, bot_id) DO UPDATE SET
+                    profile_json = excluded.profile_json,
+                    updated_at_ms = excluded.updated_at_ms
+                "#,
+                params![user_id, &bot.bot_id, profile_json, bot.updated_at_ms as i64],
+            )
+            .map_err(|error| error.to_string())?;
+            let _ = tx.execute(
+                "DELETE FROM account_bot_deletions WHERE user_id = ?1 AND bot_id = ?2",
+                params![user_id, &bot.bot_id],
+            );
+        }
+
+        for tombstone in &incoming.deletions {
+            if !is_safe_bot_id(&tombstone.bot_id) {
+                continue;
+            }
+            let existing_updated: Option<i64> = tx
+                .query_row(
+                    "SELECT updated_at_ms FROM account_bots WHERE user_id = ?1 AND bot_id = ?2",
+                    params![user_id, &tombstone.bot_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| error.to_string())?;
+            if existing_updated.is_some_and(|ts| (ts.max(0) as u64) > tombstone.deleted_at_ms) {
+                continue;
+            }
+            tx.execute(
+                r#"
+                INSERT INTO account_bot_deletions (user_id, bot_id, deleted_at_ms)
+                VALUES (?1, ?2, ?3)
+                ON CONFLICT(user_id, bot_id) DO UPDATE SET
+                    deleted_at_ms = MAX(account_bot_deletions.deleted_at_ms, excluded.deleted_at_ms)
+                "#,
+                params![user_id, &tombstone.bot_id, tombstone.deleted_at_ms as i64],
+            )
+            .map_err(|error| error.to_string())?;
+            let _ = tx.execute(
+                "DELETE FROM account_bots WHERE user_id = ?1 AND bot_id = ?2",
+                params![user_id, &tombstone.bot_id],
+            );
+            let _ = tx.execute(
+                "DELETE FROM account_bot_memories WHERE user_id = ?1 AND bot_id = ?2",
+                params![user_id, &tombstone.bot_id],
+            );
+        }
+
+        for (bot_id, files) in &incoming.memories {
+            if !is_safe_bot_id(bot_id) {
+                continue;
+            }
+            let deleted_at: Option<i64> = tx
+                .query_row(
+                    "SELECT deleted_at_ms FROM account_bot_deletions WHERE user_id = ?1 AND bot_id = ?2",
+                    params![user_id, bot_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| error.to_string())?;
+            for file in files {
+                if !is_safe_memory_filename(&file.path) {
+                    continue;
+                }
+                if deleted_at.is_some_and(|ts| (ts.max(0) as u64) >= file.updated_at_ms) {
+                    continue;
+                }
+                let existing_updated: Option<i64> = tx
+                    .query_row(
+                        r#"
+                        SELECT updated_at_ms FROM account_bot_memories
+                        WHERE user_id = ?1 AND bot_id = ?2 AND path = ?3
+                        "#,
+                        params![user_id, bot_id, &file.path],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(|error| error.to_string())?;
+                if existing_updated.is_some_and(|ts| (ts.max(0) as u64) >= file.updated_at_ms) {
+                    continue;
+                }
+                tx.execute(
+                    r#"
+                    INSERT INTO account_bot_memories (user_id, bot_id, path, content, updated_at_ms, deleted)
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                    ON CONFLICT(user_id, bot_id, path) DO UPDATE SET
+                        content = excluded.content,
+                        updated_at_ms = excluded.updated_at_ms,
+                        deleted = excluded.deleted
+                    "#,
+                    params![
+                        user_id,
+                        bot_id,
+                        &file.path,
+                        &file.content,
+                        file.updated_at_ms as i64,
+                        i64::from(file.deleted)
+                    ],
+                )
+                .map_err(|error| error.to_string())?;
+            }
+        }
+
+        tx.commit().map_err(|error| error.to_string())?;
+        self.get_bot_sync(user_id)
+    }
+}
+
+fn is_safe_bot_id(bot_id: &str) -> bool {
+    let trimmed = bot_id.trim();
+    !trimmed.is_empty()
+        && trimmed.len() <= 64
+        && trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+}
+
+fn is_safe_memory_filename(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && name.ends_with(".md")
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains("..")
 }
 
 fn normalize_username(raw: &str) -> Result<String, String> {

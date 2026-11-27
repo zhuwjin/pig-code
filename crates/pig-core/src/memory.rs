@@ -21,8 +21,9 @@
 //! user data and stays in whatever language it was written in.
 
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
-use pig_protocol::AppConfig;
+use pig_protocol::{AppConfig, BotMemoryFile};
 use sha2::{Digest, Sha256};
 
 /// Index injection budget (ZCode's index cap): the index stays small enough
@@ -78,23 +79,292 @@ fn workspace_slug(cwd: &Path) -> String {
     }
 }
 
-/// Create the memory directory + a fresh empty index when missing (run at
-/// session create/load when memory is on, so the directory genuinely exists
-/// before the prompt tells the model "this directory already exists — write
-/// to it directly"). Best-effort: a read-only data_dir logs and continues
-/// (memory writes then fail individually with tool errors).
-pub fn ensure_initialized(data_dir: &Path, cwd: &Path) {
-    let root = workspace_memory_dir(data_dir, cwd);
+/// Bot personal long-term memory directory: `{data_dir}/memories/bots/{bot_id}/`.
+/// Follows `bot_id` across workspaces and syncs across same-account devices.
+pub fn bot_memory_dir(data_dir: &Path, bot_id: &str) -> PathBuf {
+    let safe = sanitize_memory_key(bot_id, "bot");
+    data_dir.join("memories").join("bots").join(safe)
+}
+
+/// Shared/team memory directory: `{data_dir}/memories/shared/{scope}/`.
+/// Reserved for multi-bot collaborative channels and team-wide conventions.
+pub fn shared_memory_dir(data_dir: &Path, scope: &str) -> PathBuf {
+    let safe = sanitize_memory_key(scope, "default");
+    data_dir.join("memories").join("shared").join(safe)
+}
+
+fn sanitize_memory_key(raw: &str, fallback: &str) -> String {
+    let mut slug = String::new();
+    for ch in raw.trim().chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+            slug.push(ch.to_ascii_lowercase());
+        } else if !slug.ends_with('-') {
+            slug.push('-');
+        }
+        if slug.len() >= 64 {
+            break;
+        }
+    }
+    let slug = slug.trim_matches('-').to_string();
+    if slug.is_empty() {
+        fallback.to_string()
+    } else {
+        slug
+    }
+}
+
+fn ensure_memory_dir(root: &Path, heading: &str) {
     let index = root.join("MEMORY.md");
-    if let Err(error) = std::fs::create_dir_all(&root) {
-        tracing::warn!("workspace memory directory unavailable: {error:?}");
+    if let Err(error) = std::fs::create_dir_all(root) {
+        tracing::warn!("memory directory unavailable {}: {error:?}", root.display());
         return;
     }
     if !index.exists()
-        && let Err(error) = std::fs::write(&index, "# Memory\n")
+        && let Err(error) = std::fs::write(&index, format!("# {heading}\n"))
     {
-        tracing::warn!("workspace memory index seed failed: {error:?}");
+        tracing::warn!("memory index seed failed {}: {error:?}", index.display());
     }
+}
+
+/// Create the workspace memory directory + fresh index when missing.
+pub fn ensure_initialized(data_dir: &Path, cwd: &Path) {
+    let root = workspace_memory_dir(data_dir, cwd);
+    ensure_memory_dir(&root, "Memory");
+}
+
+/// Create a Bot's personal memory directory + fresh index when missing.
+pub fn ensure_bot_initialized(data_dir: &Path, bot_id: &str) {
+    let root = bot_memory_dir(data_dir, bot_id);
+    ensure_memory_dir(&root, &format!("Bot Memory ({bot_id})"));
+}
+
+/// Create a shared/team memory directory + fresh index when missing.
+pub fn ensure_shared_initialized(data_dir: &Path, scope: &str) {
+    let root = shared_memory_dir(data_dir, scope);
+    ensure_memory_dir(&root, &format!("Shared Memory ({scope})"));
+}
+
+/// Compute all active memory RW roots for a session (Bot personal + Workspace
+/// project + optional Shared/team scope).
+pub fn layered_memory_roots(
+    data_dir: &Path,
+    bot_id: Option<&str>,
+    workspace_cwd: Option<&Path>,
+    shared_scope: Option<&str>,
+) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(bot_id) = bot_id {
+        roots.push(bot_memory_dir(data_dir, bot_id));
+    }
+    if let Some(cwd) = workspace_cwd {
+        roots.push(workspace_memory_dir(data_dir, cwd));
+    }
+    if let Some(scope) = shared_scope {
+        roots.push(shared_memory_dir(data_dir, scope));
+    }
+    roots
+}
+
+/// Initialize all active memory tiers for a session before building its prompt.
+pub fn ensure_layered_initialized(
+    data_dir: &Path,
+    bot_id: Option<&str>,
+    workspace_cwd: Option<&Path>,
+    shared_scope: Option<&str>,
+) {
+    if let Some(bot_id) = bot_id {
+        ensure_bot_initialized(data_dir, bot_id);
+    }
+    if let Some(cwd) = workspace_cwd {
+        ensure_initialized(data_dir, cwd);
+    }
+    if let Some(scope) = shared_scope {
+        ensure_shared_initialized(data_dir, scope);
+    }
+}
+
+/// Build the prefix-cache-friendly three-tier memory section for a session:
+/// 1. Bot personal long-term memory (cross-workspace, cross-device)
+/// 2. Workspace project memory (local to this repository/directory)
+/// 3. Shared/team memory (optional collaborative scope)
+pub fn layered_memory_section(
+    config: &AppConfig,
+    data_dir: &Path,
+    bot_id: Option<&str>,
+    workspace_cwd: Option<&Path>,
+    shared_scope: Option<&str>,
+) -> String {
+    if !config.memory.enabled {
+        return String::new();
+    }
+    layered_memory_section_raw(data_dir, bot_id, workspace_cwd, shared_scope)
+}
+
+pub(crate) fn layered_memory_section_raw(
+    data_dir: &Path,
+    bot_id: Option<&str>,
+    workspace_cwd: Option<&Path>,
+    shared_scope: Option<&str>,
+) -> String {
+    let mut sections = Vec::new();
+    if let Some(bot_id) = bot_id {
+        let root = bot_memory_dir(data_dir, bot_id);
+        let index = read_index(&root.join("MEMORY.md"));
+        sections.push(bot_memory_section_raw(bot_id, &root, &index));
+    }
+    if let Some(cwd) = workspace_cwd {
+        let root = workspace_memory_dir(data_dir, cwd);
+        let index = read_index(&root.join("MEMORY.md"));
+        sections.push(memory_section_raw(&root, &index));
+    }
+    if let Some(scope) = shared_scope {
+        let root = shared_memory_dir(data_dir, scope);
+        let index = read_index(&root.join("MEMORY.md"));
+        sections.push(shared_memory_section_raw(scope, &root, &index));
+    }
+    sections.join("\n")
+}
+
+fn format_index_body(index: &str) -> String {
+    if index.trim().is_empty() {
+        "(no memories saved yet)".to_string()
+    } else if index.len() <= INDEX_MAX_BYTES {
+        index.trim().to_string()
+    } else {
+        let mut end = INDEX_MAX_BYTES;
+        while !index.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}\n[MEMORY.md too long; truncated]", &index[..end])
+    }
+}
+
+pub(crate) fn bot_memory_section_raw(bot_id: &str, root: &Path, index: &str) -> String {
+    let body = format_index_body(index);
+    format!(
+        "## Bot personal memory (`{bot_id}`)\n\
+         You keep a persistent personal long-term memory across all workspaces and devices at \
+         `{}/`. This directory already exists — read and write its markdown files directly with \
+         Read/Write/Edit (no approval needed). Store durable role methodology, cross-project user \
+         preferences, and lessons learned here; keep project-specific facts in Workspace memory. \
+         Never store secrets or API keys. Update `MEMORY.md` with one-line pointers (`- [Title](file.md) — hook`).\n\
+         \n\
+         The current personal memory index follows:\n\
+         Contents of {}:\n\
+         {}\n",
+        root.display(),
+        root.join("MEMORY.md").display(),
+        body
+    )
+}
+
+pub(crate) fn shared_memory_section_raw(scope: &str, root: &Path, index: &str) -> String {
+    let body = format_index_body(index);
+    format!(
+        "## Shared team memory (`{scope}`)\n\
+         Shared multi-bot memory is located at `{}/`. Use Read/Write/Edit for durable cross-bot \
+         decisions and shared conventions, indexed in `MEMORY.md`.\n\
+         \n\
+         Contents of {}:\n\
+         {}\n",
+        root.display(),
+        root.join("MEMORY.md").display(),
+        body
+    )
+}
+
+/// Collect all markdown files in a Bot's personal memory directory for account
+/// synchronization. Non-markdown entries, subdirectories, and symlinks are skipped.
+pub fn collect_bot_memory_files(data_dir: &Path, bot_id: &str) -> Vec<BotMemoryFile> {
+    let root = bot_memory_dir(data_dir, bot_id);
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return Vec::new();
+    };
+    let mut files = Vec::new();
+    for entry in entries.filter_map(Result::ok) {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !is_safe_memory_filename(&name) {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let updated_at_ms = std::fs::metadata(&path)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|mtime| mtime.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or(0);
+        files.push(BotMemoryFile {
+            path: name,
+            content,
+            updated_at_ms,
+            deleted: false,
+        });
+    }
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    files
+}
+
+/// Apply synced Bot personal memory files locally using last-write-wins by
+/// `updated_at_ms`. Returns the number of files written or removed.
+pub fn apply_bot_memory_files(
+    data_dir: &Path,
+    bot_id: &str,
+    files: &[BotMemoryFile],
+) -> Result<usize, String> {
+    if files.is_empty() {
+        return Ok(0);
+    }
+    let root = bot_memory_dir(data_dir, bot_id);
+    std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+    let mut applied = 0;
+    for file in files {
+        if !is_safe_memory_filename(&file.path) {
+            continue;
+        }
+        let target = root.join(&file.path);
+        let local_mtime = std::fs::metadata(&target)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|mtime| mtime.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or(0);
+        if target.exists() && local_mtime > file.updated_at_ms {
+            continue;
+        }
+        if file.deleted {
+            if target.exists() {
+                let _ = std::fs::remove_file(&target);
+                applied += 1;
+            }
+            continue;
+        }
+        if target.exists()
+            && std::fs::read_to_string(&target).ok().as_deref() == Some(file.content.as_str())
+        {
+            continue;
+        }
+        std::fs::write(&target, &file.content).map_err(|error| error.to_string())?;
+        applied += 1;
+    }
+    Ok(applied)
+}
+
+fn is_safe_memory_filename(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains("..")
+        && name.ends_with(".md")
 }
 
 /// Raw index content ("" when missing or unreadable)

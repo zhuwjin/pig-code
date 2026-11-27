@@ -14,6 +14,7 @@ use rusqlite::{Connection, params};
 
 use crate::rollout::now_secs;
 
+mod bots;
 mod deletion;
 mod execution;
 pub use execution::ExecutionClaim;
@@ -28,12 +29,15 @@ pub use tasks::BackgroundTask;
 /// Current SQLite schema version tracked via `PRAGMA user_version`.
 /// Bump this and append a transactional step to `MIGRATIONS` whenever tables
 /// or columns evolve.
-pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 type MigrationFn = fn(&rusqlite::Transaction<'_>) -> Result<(), String>;
 
-const MIGRATIONS: &[(u32, MigrationFn)] =
-    &[(1, migrate_v1_baseline), (2, migrate_v2_session_search)];
+const MIGRATIONS: &[(u32, MigrationFn)] = &[
+    (1, migrate_v1_baseline),
+    (2, migrate_v2_session_search),
+    (3, migrate_v3_bots),
+];
 
 fn migrate_v1_baseline(tx: &rusqlite::Transaction<'_>) -> Result<(), String> {
     tx.execute_batch(BASELINE_SCHEMA)
@@ -44,6 +48,10 @@ fn migrate_v1_baseline(tx: &rusqlite::Transaction<'_>) -> Result<(), String> {
 
 fn migrate_v2_session_search(tx: &rusqlite::Transaction<'_>) -> Result<(), String> {
     search::create_schema(tx)
+}
+
+fn migrate_v3_bots(tx: &rusqlite::Transaction<'_>) -> Result<(), String> {
+    bots::create_schema(tx)
 }
 
 fn apply_migrations(conn: &mut Connection) -> Result<(), String> {
@@ -227,6 +235,7 @@ impl Store {
         conn.execute_batch(BASELINE_SCHEMA)
             .map_err(|e| format!("store.sqlite ensure baseline schema failed: {e}"))?;
         runtime::create_schema(&conn)?;
+        bots::create_schema(&conn)?;
         if let Err(error) = search::ensure_schema(&conn) {
             // Search is derived state: a damaged virtual table must not prevent
             // sessions, usage and other durable stores from opening.
@@ -271,17 +280,19 @@ impl Store {
             reasoning_level: row.get(10)?,
             plan_enabled: row.get::<_, i64>(11)? != 0,
             permissions: Self::permissions_from_row(row)?,
+            bot_id: row.get(13)?,
+            global: row.get::<_, i64>(14)? != 0,
         })
     }
 
-    const SESSION_COLUMNS: &'static str = "id, title, title_custom, cwd, created_at, updated_at, pinned, archived, provider_id, model_id, reasoning_level, plan_enabled, permissions";
+    const SESSION_COLUMNS: &'static str = "id, title, title_custom, cwd, created_at, updated_at, pinned, archived, provider_id, model_id, reasoning_level, plan_enabled, permissions, bot_id, global";
 
     pub fn upsert_session(&self, meta: &SessionMeta) {
         let permissions_raw =
             serde_json::to_string(&meta.permissions).unwrap_or_else(|_| "{}".to_string());
         let result = self.conn.execute(
-            "INSERT INTO sessions (id, title, title_custom, cwd, created_at, updated_at, pinned, archived, provider_id, model_id, reasoning_level, plan_enabled, permissions)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            "INSERT INTO sessions (id, title, title_custom, cwd, created_at, updated_at, pinned, archived, provider_id, model_id, reasoning_level, plan_enabled, permissions, bot_id, global)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
              ON CONFLICT(id) DO UPDATE SET
                 title = excluded.title,
                 title_custom = excluded.title_custom,
@@ -294,7 +305,9 @@ impl Store {
                 model_id = excluded.model_id,
                 reasoning_level = excluded.reasoning_level,
                 plan_enabled = excluded.plan_enabled,
-                permissions = excluded.permissions",
+                permissions = excluded.permissions,
+                bot_id = excluded.bot_id,
+                global = excluded.global",
             params![
                 meta.id,
                 meta.title,
@@ -309,6 +322,8 @@ impl Store {
                 meta.reasoning_level,
                 meta.plan_enabled,
                 permissions_raw,
+                meta.bot_id,
+                meta.global,
             ],
         );
         // Write failures must not be silent (a missing column once dropped whole batches of new sessions): at least log at error level
@@ -798,6 +813,8 @@ mod tests {
             reasoning_level: None,
             permissions: Default::default(),
             plan_enabled: false,
+            bot_id: None,
+            global: false,
         };
         store.upsert_session(&meta);
         store.record_api_usage(&crate::api_usage::ApiUsageRecord {
@@ -857,6 +874,8 @@ mod tests {
             reasoning_level: None,
             permissions: Default::default(),
             plan_enabled: false,
+            bot_id: None,
+            global: false,
         };
         store.upsert_session(&meta);
         assert!(!store.get_session("s1").unwrap().title_custom);

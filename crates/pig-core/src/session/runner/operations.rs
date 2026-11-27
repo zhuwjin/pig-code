@@ -17,6 +17,8 @@ impl Manager {
         reasoning_level: Option<String>,
         permissions: Option<pig_protocol::PermissionSettings>,
         plan_enabled: Option<bool>,
+        bot_id: Option<String>,
+        global: bool,
     ) {
         let config_path = self.config_path.clone();
         let sessions_dir = self.sessions_dir.clone();
@@ -28,14 +30,26 @@ impl Manager {
         let config = &mut self.config;
         let sessions = &mut self.sessions;
         let id_counter = &mut self.id_counter;
-        let cwd = normalize_workspace_path(&cwd);
+        let cwd = if global {
+            PathBuf::new()
+        } else {
+            normalize_workspace_path(&cwd)
+        };
+        let bot = bot_id
+            .as_deref()
+            .and_then(|id| store.lock().expect("store lock").get_bot(id));
+        let resolved_bot_id = bot.as_ref().map(|b| b.bot_id.clone());
         *id_counter += 1;
         let id = format!("s{}-{}", now_secs(), id_counter);
-        // New-session defaults = the workspace's most recently active session; fields passed explicitly by the UI take priority over the seed
-        let seed = store
-            .lock()
-            .expect("store lock")
-            .latest_active_in_workspace(&cwd);
+        // New-session defaults = the workspace's most recently active session; fields passed explicitly by the UI or the Bot take priority over the seed
+        let seed = if global {
+            None
+        } else {
+            store
+                .lock()
+                .expect("store lock")
+                .latest_active_in_workspace(&cwd)
+        };
         let mut meta = SessionMeta {
             id: id.clone(),
             // New-session seed title: empty-string sentinel (GUI renders the localized "New task");
@@ -47,21 +61,29 @@ impl Manager {
             updated_at: now_secs(),
             pinned: false,
             archived: false,
-            provider_id: provider_id.or_else(|| seed.as_ref().and_then(|m| m.provider_id.clone())),
-            model_id: model_id.or_else(|| seed.as_ref().and_then(|m| m.model_id.clone())),
-            // Reasoning level passes through from the UI as-is (hero defaults already seed the UI; None = off)
-            reasoning_level,
+            provider_id: provider_id
+                .or_else(|| bot.as_ref().and_then(|b| b.provider_id.clone()))
+                .or_else(|| seed.as_ref().and_then(|m| m.provider_id.clone())),
+            model_id: model_id
+                .or_else(|| bot.as_ref().and_then(|b| b.model_id.clone()))
+                .or_else(|| seed.as_ref().and_then(|m| m.model_id.clone())),
+            // Reasoning level passes through from the UI as-is (Bot default if unset; None = off)
+            reasoning_level: reasoning_level
+                .or_else(|| bot.as_ref().and_then(|b| b.reasoning_level.clone())),
             permissions: permissions
                 .unwrap_or_else(|| seed.as_ref().map(|m| m.permissions).unwrap_or_default()),
             // Plan mode is transient: not inherited from the seed, only set explicitly by the UI
             plan_enabled: plan_enabled.unwrap_or(false),
+            bot_id: resolved_bot_id,
+            global,
         };
         // UI left the reasoning level unset and the model config has a default -> adopt the default tier
         // (written into meta; SessionConfigured syncs it back to the UI's level chip)
+        let runtime_cwd = if meta.global { &data_dir } else { &meta.cwd };
         let session_runtime = layered_runtime(
             config.as_ref(),
             &config_path,
-            &meta.cwd,
+            runtime_cwd,
             self.credentials.clone(),
             &self.plugins,
         );
@@ -162,6 +184,8 @@ impl Manager {
                         reasoning_level: meta.reasoning_level.clone(),
                         permissions: meta.permissions,
                         plan_enabled: meta.plan_enabled,
+                        bot_id: meta.bot_id.clone(),
+                        global: meta.global,
                     },
                 );
                 // New session: panels initialize to empty snapshots
@@ -186,10 +210,11 @@ impl Manager {
                     },
                 );
                 // Creating a session under a removed (hidden) workspace: automatically unhide it
-                if store
-                    .lock()
-                    .expect("store lock")
-                    .unhide_workspace(&meta.cwd)
+                if !meta.global
+                    && store
+                        .lock()
+                        .expect("store lock")
+                        .unhide_workspace(&meta.cwd)
                 {
                     emit(
                         &event_tx,
@@ -291,6 +316,8 @@ impl Manager {
                         reasoning_level: meta.reasoning_level.clone(),
                         permissions: meta.permissions,
                         plan_enabled: meta.plan_enabled,
+                        bot_id: meta.bot_id.clone(),
+                        global: meta.global,
                     },
                 );
                 // Switching back to an already-open session: re-emit panel snapshots so the UI resets its panels
@@ -367,12 +394,18 @@ impl Manager {
             self.replay_loaded_session(&event_tx, session_id);
             return;
         }
-        let resume_cwd = store
-            .lock()
-            .expect("store lock")
-            .get_session(&session_id)
-            .map(|meta| meta.cwd)
-            .unwrap_or_else(|| default_cwd.clone());
+        let resume_meta = store.lock().expect("store lock").get_session(&session_id);
+        let resume_cwd = resume_meta
+            .as_ref()
+            .filter(|meta| !meta.global && !meta.cwd.as_os_str().is_empty())
+            .map(|meta| meta.cwd.clone())
+            .unwrap_or_else(|| {
+                if resume_meta.as_ref().is_some_and(|meta| meta.global) {
+                    data_dir.clone()
+                } else {
+                    default_cwd.clone()
+                }
+            });
         let session_runtime = layered_runtime(
             config.as_ref(),
             &config_path,
@@ -466,6 +499,8 @@ impl Manager {
                         reasoning_level: meta.as_ref().and_then(|m| m.reasoning_level.clone()),
                         permissions: meta.as_ref().map(|m| m.permissions).unwrap_or_default(),
                         plan_enabled: meta.as_ref().is_some_and(|m| m.plan_enabled),
+                        bot_id: meta.as_ref().and_then(|m| m.bot_id.clone()),
+                        global: meta.as_ref().is_some_and(|m| m.global),
                     },
                 );
                 emit(
@@ -628,6 +663,157 @@ impl Manager {
             ),
         }
     }
+    pub(super) fn list_bots(&mut self, event_tx: async_channel::Sender<Event>) {
+        let bots = self.store.lock().expect("store lock").list_bots();
+        emit(&event_tx, Event::BotList { bots });
+    }
+
+    pub(super) fn upsert_bot(
+        &mut self,
+        event_tx: async_channel::Sender<Event>,
+        bot: pig_protocol::BotProfile,
+    ) {
+        let result = self.store.lock().expect("store lock").upsert_bot(&bot);
+        match result {
+            Ok(saved) => {
+                crate::memory::ensure_bot_initialized(&self.data_dir, &saved.bot_id);
+                // Refresh live sessions bound to this bot so capability/persona edits take effect cleanly.
+                for entry in self.sessions.values_mut() {
+                    if let Some(session) = entry.session.as_mut()
+                        && session.bot_id() == Some(saved.bot_id.as_str())
+                    {
+                        session.bot = Some(saved.clone());
+                        session.prompt_text = None;
+                    }
+                }
+                emit(&event_tx, Event::BotUpdated { bot: saved });
+                let bots = self.store.lock().expect("store lock").list_bots();
+                emit(&event_tx, Event::BotList { bots });
+            }
+            Err(detail) => emit(
+                &event_tx,
+                Event::Error {
+                    session_id: None,
+                    error: CoreError::Internal { detail },
+                    fatal: false,
+                },
+            ),
+        }
+    }
+
+    pub(super) fn delete_bot(&mut self, event_tx: async_channel::Sender<Event>, bot_id: String) {
+        let result = self.store.lock().expect("store lock").delete_bot(&bot_id);
+        match result {
+            Ok(true) => {
+                emit(&event_tx, Event::BotDeleted { bot_id });
+                let bots = self.store.lock().expect("store lock").list_bots();
+                emit(&event_tx, Event::BotList { bots });
+            }
+            Ok(false) => {
+                let bots = self.store.lock().expect("store lock").list_bots();
+                emit(&event_tx, Event::BotList { bots });
+            }
+            Err(detail) => emit(
+                &event_tx,
+                Event::Error {
+                    session_id: None,
+                    error: CoreError::Internal { detail },
+                    fatal: false,
+                },
+            ),
+        }
+    }
+
+    pub(super) fn bind_session_workspace(
+        &mut self,
+        event_tx: async_channel::Sender<Event>,
+        session_id: String,
+        cwd: Option<PathBuf>,
+    ) {
+        let normalized = cwd.map(|path| normalize_workspace_path(&path));
+        let updated = {
+            let store = self.store.lock().expect("store lock");
+            store.update_session(&session_id, |meta| {
+                if let Some(path) = &normalized {
+                    meta.cwd = path.clone();
+                    meta.global = false;
+                } else {
+                    meta.cwd = PathBuf::new();
+                    meta.global = true;
+                }
+                meta.updated_at = now_secs();
+            });
+            if let Some(path) = &normalized {
+                store.add_workspace(path);
+            }
+            store.get_session(&session_id)
+        };
+        let Some(meta) = updated else {
+            emit(
+                &event_tx,
+                Event::Error {
+                    session_id: Some(session_id),
+                    error: CoreError::SessionNotFoundOpen,
+                    fatal: false,
+                },
+            );
+            return;
+        };
+        let runtime_cwd = if meta.global {
+            &self.data_dir
+        } else {
+            &meta.cwd
+        };
+        let session_runtime = layered_runtime(
+            self.config.as_ref(),
+            &self.config_path,
+            runtime_cwd,
+            self.credentials.clone(),
+            &self.plugins,
+        );
+        if let Some(entry) = self.sessions.get_mut(&session_id) {
+            entry.cwd = meta.cwd.clone();
+            entry.runtime = session_runtime.clone();
+            entry.mcp_status = None;
+            if let Some(session) = entry.session.as_mut() {
+                session.rebind_workspace(normalized.clone(), session_runtime);
+            }
+        }
+        let (model, provider_name) = self
+            .sessions
+            .get(&session_id)
+            .map(model_label)
+            .unwrap_or_default();
+        emit(
+            &event_tx,
+            Event::SessionConfigured {
+                session_id: session_id.clone(),
+                cwd: meta.cwd.clone(),
+                model,
+                provider_name,
+                provider_id: meta.provider_id.clone(),
+                model_id: meta.model_id.clone(),
+                reasoning_level: meta.reasoning_level.clone(),
+                permissions: meta.permissions,
+                plan_enabled: meta.plan_enabled,
+                bot_id: meta.bot_id.clone(),
+                global: meta.global,
+            },
+        );
+        emit(
+            &event_tx,
+            Event::SessionList {
+                sessions: self.store.lock().expect("store lock").sorted_sessions(),
+            },
+        );
+        emit(
+            &event_tx,
+            Event::WorkspaceList {
+                workspaces: self.store.lock().expect("store lock").workspaces(),
+            },
+        );
+    }
+
     pub(super) fn list_workspaces(&mut self, event_tx: async_channel::Sender<Event>) {
         let store = self.store.clone();
         emit(

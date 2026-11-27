@@ -82,6 +82,8 @@ pub fn fork_session(
         reasoning_level: src_meta.reasoning_level.clone(),
         permissions: src_meta.permissions,
         plan_enabled: false,
+        bot_id: src_meta.bot_id.clone(),
+        global: src_meta.global,
     };
     let mut rollout = Rollout::create(sessions_dir, &meta)?;
     for record in &kept {

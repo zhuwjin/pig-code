@@ -150,6 +150,8 @@ impl Session {
             hook_context_stash: Vec::new(),
             session_start_hook_ran: true,
             session_start_source: "subagent",
+            bot: parent.bot.clone(),
+            global: parent.global,
         }
     }
 
@@ -914,6 +916,8 @@ impl Session {
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .clone(),
+                bot_capabilities: self.bot.as_ref().map(|b| b.capabilities),
+                global_session: self.global,
             };
             let outcome = exec_tool_gated_ctx(
                 &mut gate,
@@ -1610,6 +1614,8 @@ async fn execute_child_batch_tool(
         hooks: &context.hooks,
         history: &context.history,
         timing: context.timing.clone(),
+        bot_capabilities: None,
+        global_session: false,
     };
     exec_tool_gated_ctx(
         &mut gate,

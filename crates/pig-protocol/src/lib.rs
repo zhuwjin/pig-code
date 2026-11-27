@@ -18,6 +18,7 @@ pub struct PendingImage {
     pub mime: String,
 }
 
+mod bot;
 mod config;
 mod daemon;
 mod error;
@@ -27,6 +28,7 @@ mod plugin;
 mod plugin_runtime;
 mod relay;
 
+pub use bot::*;
 pub use config::*;
 pub use daemon::*;
 pub use error::*;
@@ -326,6 +328,13 @@ pub struct SessionMeta {
     /// approving ExitPlanMode only flips this switch, the permission tier stays
     #[serde(default)]
     pub plan_enabled: bool,
+    /// Optional persistent Bot bound to this session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bot_id: Option<String>,
+    /// True when this session is a global (non-project) session not bound to
+    /// any workspace directory.
+    #[serde(default)]
+    pub global: bool,
 }
 
 /// Todo item of the TodoList tool: session-level state, wholly replaced on write.

@@ -181,7 +181,7 @@ async fn multi_device_discovery_remote_session_cursor_resync_revocation_and_priv
 
     // 2. Start two isolated pig-daemon instances (Device A and Device B).
     let mock_port = mock::start_mock_server();
-    let (ep_a, _ws_a, _data_a) = spawn_test_daemon(&dev_a_dir.0, mock_port).await;
+    let (ep_a, _ws_a, data_a) = spawn_test_daemon(&dev_a_dir.0, mock_port).await;
     let (ep_b, ws_b, data_b) = spawn_test_daemon(&dev_b_dir.0, mock_port).await;
 
     let client_a = DaemonClient::connect(ep_a, None)
@@ -319,6 +319,8 @@ async fn multi_device_discovery_remote_session_cursor_resync_revocation_and_priv
             reasoning_level: None,
             permissions: Some(ExecMode::Auto.permissions()),
             plan_enabled: Some(false),
+            bot_id: None,
+            global: false,
         })
         .expect("send remote NewSession");
 
@@ -444,6 +446,69 @@ async fn multi_device_discovery_remote_session_cursor_resync_revocation_and_priv
         ConversationItem::Markdown { text, .. } if text.contains(mock::MOCK_REPLY_MARKER)
     )));
     drop(resumed);
+
+    // 7b. Multi-device Bot & personal memory sync across Device A and Device B.
+    let custom_bot = pig_protocol::BotProfile {
+        bot_id: "cross-device-bot".to_string(),
+        name: "Cross Device Reviewer".to_string(),
+        avatar: None,
+        description: "Follows user across devices".to_string(),
+        system_prompt: "Focus on reliability and clear error handling.".to_string(),
+        provider_id: None,
+        model_id: None,
+        reasoning_level: None,
+        capabilities: pig_protocol::BotCapabilities::coding(),
+        builtin: false,
+        created_at_ms: 1_700_000_000_000,
+        updated_at_ms: 1_700_000_000_100,
+    };
+    let upserted = call_rpc(&client_a, "bot.upsert", json!({ "bot": custom_bot }))
+        .await
+        .expect("bot.upsert on Device A");
+    assert_eq!(upserted, Value::Bool(true));
+    // Wait briefly for Device A core to persist the bot & create its personal memory directory.
+    let bot_mem_a = data_a.join("memories").join("bots").join("cross-device-bot");
+    let mem_deadline = Instant::now() + Duration::from_secs(5);
+    while !bot_mem_a.exists() {
+        assert!(Instant::now() < mem_deadline, "timed out waiting for bot memory dir on Device A");
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+    let personal_memory_marker = "BOT_PERSONAL_MEMORY_PREF_RUST_EXPLICIT_ERRORS";
+    std::fs::write(
+        bot_mem_a.join("MEMORY.md"),
+        format!("# Bot Personal Memory\n- {personal_memory_marker}\n"),
+    )
+    .expect("write bot personal memory on Device A");
+
+    let _ = call_rpc(&client_a, "relay.sync_bots", json!({}))
+        .await
+        .expect("sync_bots on Device A");
+    let _ = call_rpc(&client_b, "relay.sync_bots", json!({}))
+        .await
+        .expect("sync_bots on Device B");
+
+    let bots_b: Vec<pig_protocol::BotProfile> = serde_json::from_value(
+        call_rpc(&client_b, "bot.list", json!({}))
+            .await
+            .expect("bot.list on Device B"),
+    )
+    .expect("parse bot list on Device B");
+    assert!(
+        bots_b.iter().any(|b| b.bot_id == "cross-device-bot" && !b.capabilities.control_plane),
+        "Device B must receive synced custom bot: {bots_b:?}"
+    );
+    let synced_mem_b = std::fs::read_to_string(
+        data_b
+            .join("memories")
+            .join("bots")
+            .join("cross-device-bot")
+            .join("MEMORY.md"),
+    )
+    .expect("read synced bot personal memory on Device B");
+    assert!(
+        synced_mem_b.contains(personal_memory_marker),
+        "Device B must receive synced bot personal memory: {synced_mem_b}"
+    );
 
     // 8. Privacy boundary audit: relay.db must NEVER contain source code, tool output, conversation text, or API keys.
     let db_bytes = std::fs::read(relay_dir.0.join("relay.db")).expect("read relay.db");

@@ -7,6 +7,7 @@ import type { UiContext } from "../ui-context";
 import { workspaceName } from "../ui-context";
 import { SidebarBrand } from "./brand";
 import { Icon } from "./icon";
+import { Segmented } from "./segmented";
 import { SETTINGS_PAGES, type SettingsPageId } from "./settings/settings-page";
 
 const WORKSPACE_PAGE_SIZE = 5;
@@ -185,9 +186,19 @@ export function Sidebar(props: UiContext & {
   const manageOpen = signal(false);
   const deviceMenuOpen = signal(false);
   const workspaceMenuOpen = signal(false);
+  const collapsedBots = signal<Record<string, boolean>>({});
   const hoveredSession = signal<string | null>(null);
   const renaming = signal<{ kind: "workspace" | "session"; id: string } | null>(null);
   const renameValue = signal("");
+  const isBotMode = () => store.workMode() === "bot";
+  const isBotExpanded = (botId: string) => !(collapsedBots()[botId] ?? false);
+  const toggleBotExpanded = (botId: string) => {
+    collapsedBots.update((all) => ({ ...all, [botId]: !(all[botId] ?? false) }));
+  };
+  const sessionsForBot = (botId: string) => store.sessions()
+    .filter((session) => session.bot_id === botId)
+    .sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.updated_at - a.updated_at);
+  const activeBotId = () => store.heroBotId() ?? store.bots()[0]?.bot_id ?? null;
   const workspaceMeta = () => store.workspaces().find((workspace) => workspace.path === store.cwd());
   const currentWorkspaceName = () => workspaceMeta()?.alias || workspaceName(store.cwd());
   const workspaceHidden = () => workspaceMeta()?.hidden ?? false;
@@ -209,8 +220,11 @@ export function Sidebar(props: UiContext & {
   const pinnedSessions = () => store.sessions()
     .filter((session) => session.pinned)
     .sort((a, b) => b.updated_at - a.updated_at);
+  const globalSessions = () => store.sessions()
+    .filter((session) => session.global && !session.pinned)
+    .sort((a, b) => b.updated_at - a.updated_at);
   const sessions = () => store.sessions()
-    .filter((session) => session.cwd === store.cwd() && !session.pinned)
+    .filter((session) => !session.global && session.cwd === store.cwd() && !session.pinned)
     .sort((a, b) => b.updated_at - a.updated_at);
   const flatSessions = () => [...store.sessions()].sort((a, b) =>
     Number(b.pinned) - Number(a.pinned) || b.updated_at - a.updated_at
@@ -412,13 +426,15 @@ export function Sidebar(props: UiContext & {
                       </View>
                     </View>
                     <View class="flex-row items-center gap-1">
-                      <Icon name="folder-closed" size={12} color={token("muted-foreground")} />
+                      <Icon name={session().global ? "globe" : "folder-closed"} size={12} color={token("muted-foreground")} />
                       <Text
                         testID={`session-workspace-${session().id}`}
                         style={{ numberOfLines: 1 }}
                         class="min-w-0 flex-1 text-left text-xs text-muted-foreground"
                       >
-                        {workspaceName(session().cwd)}
+                        {session().global
+                          ? (store.botById(session().bot_id)?.name ?? t("sidebar.global_session"))
+                          : workspaceName(session().cwd)}
                       </Text>
                     </View>
                   </View>
@@ -472,6 +488,19 @@ export function Sidebar(props: UiContext & {
         </Button>
       </View>
       <If when={props.mode === "workspace"}>
+        <View class="px-2 pt-1 pb-0.5">
+          <Segmented
+            testID="sidebar-mode"
+            class="w-full"
+            tabClass="flex-1"
+            value={store.workMode()}
+            onChange={(next) => store.setWorkMode(next)}
+            options={[
+              { value: "project", label: t("sidebar.mode.project") },
+              { value: "bot", label: t("sidebar.mode.bot") },
+            ]}
+          />
+        </View>
         <View class="gap-1 p-2">
           <Button
             testID="new-task"
@@ -505,7 +534,7 @@ export function Sidebar(props: UiContext & {
           </Button>
         </View>
       </If>
-      <If when={props.mode === "workspace" && sidebarView() === "workspace" && pinnedSessions().length > 0}>
+      <If when={props.mode === "workspace" && !isBotMode() && sidebarView() === "workspace" && pinnedSessions().length > 0}>
         <View testID="pinned-sessions" class="gap-0.5 px-2 pb-1">
           <Text class="px-1 py-0.5 text-xs text-muted-foreground">{t("sidebar.pinned")}</Text>
           <Each of={pinnedSessions()} key={(session) => session.id}>
@@ -513,7 +542,86 @@ export function Sidebar(props: UiContext & {
           </Each>
         </View>
       </If>
-      <If when={props.mode === "workspace"}>
+      <If when={props.mode === "workspace" && !isBotMode() && sidebarView() === "workspace" && globalSessions().length > 0}>
+        <View testID="global-sessions" class="gap-0.5 px-2 pb-1">
+          <Text class="px-1 py-0.5 text-xs text-muted-foreground">{t("sidebar.global_sessions")}</Text>
+          <Each of={globalSessions()} key={(session) => session.id}>
+            {(session) => renderSessionRow(session, () => true)}
+          </Each>
+        </View>
+      </If>
+      <If when={props.mode === "workspace" && isBotMode()}>
+        <View class="flex-row items-center gap-1 pl-3 pr-2 py-0.5">
+          <Text class="flex-1 text-xs text-muted-foreground">{t("sidebar.bots_header")}</Text>
+          <Button
+            testID="sidebar-manage-bots"
+            accessibilityLabel={t("sidebar.manage_bots")}
+            class="h-6 w-6 items-center justify-center rounded-(--radius) hover:bg-sidebar-accent"
+            onPress={() => props.onNavigateSettings("bots")}
+          >
+            <Icon name="settings" size={12} color={token("secondary-foreground")} />
+          </Button>
+        </View>
+        <Scroll testID="bot-list" class="flex-1" contentClass="gap-1 px-2 pb-1">
+          <Each of={store.bots()} key={(bot) => bot.bot_id}>
+            {(bot) => {
+              const botSessions = () => sessionsForBot(bot().bot_id);
+              const selected = () => activeBotId() === bot().bot_id;
+              return (
+                <View class="gap-0.5">
+                  <View class="group relative">
+                    <Button
+                      testID={`sidebar-bot-${bot().bot_id}`}
+                      selected={selected() && store.current() === null}
+                      class="w-full flex-row items-center gap-2 rounded-(--radius) px-2 py-1.5 hover:bg-sidebar-accent group-hover:bg-sidebar-accent group-hover:pr-9 selected:bg-sidebar-accent"
+                      onPress={() => {
+                        if (botSessions().length === 0) {
+                          store.newTaskForBot(bot().bot_id);
+                        } else {
+                          store.selectHeroBot(bot().bot_id);
+                          toggleBotExpanded(bot().bot_id);
+                        }
+                      }}
+                    >
+                      <Icon
+                        name="bot"
+                        size={15}
+                        color={selected() ? token("primary") : token("muted-foreground")}
+                      />
+                      <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-left text-sm text-sidebar-foreground">
+                        {bot().name}
+                      </Text>
+                      <If when={botSessions().length > 0}>
+                        <Text class="text-xs text-muted-foreground group-hover:hidden">
+                          {String(botSessions().length)}
+                        </Text>
+                      </If>
+                    </Button>
+                    <View class="absolute right-1 top-0 bottom-0 hidden items-center group-hover:flex">
+                      <Button
+                        testID={`sidebar-bot-add-${bot().bot_id}`}
+                        accessibilityLabel={t("sidebar.new_bot_chat", { name: bot().name })}
+                        class="h-6 w-6 flex-row items-center justify-center rounded-(--radius) hover:bg-foreground/10"
+                        onPress={() => store.newTaskForBot(bot().bot_id)}
+                      >
+                        <Icon name="plus" size={14} color={token("muted-foreground")} />
+                      </Button>
+                    </View>
+                  </View>
+                  <If when={botSessions().length > 0 && isBotExpanded(bot().bot_id)}>
+                    <View class="gap-0.5">
+                      <Each of={botSessions()} key={(session) => session.id}>
+                        {(session) => renderSessionRow(session, () => false)}
+                      </Each>
+                    </View>
+                  </If>
+                </View>
+              );
+            }}
+          </Each>
+        </Scroll>
+      </If>
+      <If when={props.mode === "workspace" && !isBotMode()}>
       <View class="flex-row items-center gap-1 pl-3 pr-2 py-0.5">
         <Text class="flex-1 text-xs text-muted-foreground">{t("sidebar.sessions")}</Text>
         <If when={sidebarView() === "workspace"}>
@@ -576,7 +684,7 @@ export function Sidebar(props: UiContext & {
         </Menu>
       </View>
       </If>
-      <If when={props.mode === "workspace" && sidebarView() === "flat"}>
+      <If when={props.mode === "workspace" && !isBotMode() && sidebarView() === "flat"}>
         <List
           testID="session-list"
           each={flatSessions()}
@@ -587,7 +695,7 @@ export function Sidebar(props: UiContext & {
           {(session) => renderSessionRow(session, () => true)}
         </List>
       </If>
-      <If when={props.mode === "workspace" && sidebarView() === "workspace"}>
+      <If when={props.mode === "workspace" && !isBotMode() && sidebarView() === "workspace"}>
         <Scroll testID="session-list" class="flex-1" contentClass="gap-0.5 px-2 pb-1">
           <If when={!workspaceHidden()}>
             <Collapsible

@@ -287,7 +287,7 @@ Before running a command that changes system state — restarts, deletes, config
 /// passed by the caller as session-frozen snapshots, and the execution mode goes through the
 /// per-turn turn_reminder. The prompt is byte-stable within a session, maximizing prefix
 /// caching (the same trade-off as kimi-code frozenSkillListing / ZCode segmented freezing).
-#[allow(clippy::too_many_arguments)]
+#[allow(dead_code, clippy::too_many_arguments)]
 pub fn system_prompt(
     cwd: &Path,
     has_tools: bool,
@@ -297,9 +297,45 @@ pub fn system_prompt(
     memory_section: &str,
     skills_section: &str,
 ) -> String {
-    let mut prompt = String::from(
-        "You are Pig Code, an AI coding assistant running in the user's workspace.\n\n\
-         IMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, \
+    system_prompt_with_bot(
+        cwd,
+        has_tools,
+        git,
+        date_frozen,
+        agents_section,
+        memory_section,
+        skills_section,
+        None,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn system_prompt_with_bot(
+    cwd: &Path,
+    has_tools: bool,
+    git: Option<&str>,
+    date_frozen: &str,
+    agents_section: &str,
+    memory_section: &str,
+    skills_section: &str,
+    bot_section: Option<&str>,
+    global_session: bool,
+) -> String {
+    let mut prompt = String::from(if global_session {
+        "You are Pig Code, an AI assistant running in a global (non-workspace) session.\n\n"
+    } else {
+        "You are Pig Code, an AI coding assistant running in the user's workspace.\n\n"
+    });
+    if let Some(section) = bot_section.filter(|s| !s.trim().is_empty()) {
+        prompt.push_str(section);
+        if !section.ends_with('\n') {
+            prompt.push('\n');
+        }
+        prompt.push('\n');
+    }
+    prompt.push_str(
+        "IMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, \
          and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass \
          targeting, supply chain compromise, or detection evasion for malicious purposes. \
          Dual-use security tools (C2 frameworks, credential testing, exploit development) require \
@@ -388,7 +424,7 @@ pub fn system_prompt(
     // The static tail (tools listing / context section) already ends with a single
     // newline; one more yields exactly one blank line before the env block
     prompt.push('\n');
-    prompt.push_str(&env_block(cwd, git, date_frozen));
+    prompt.push_str(&env_block_scoped(cwd, git, date_frozen, global_session));
     prompt
 }
 
@@ -771,6 +807,23 @@ fn tool_summaries() -> &'static [(&'static str, &'static str)] {
 /// Shared by the main agent's and subagents' system prompts (subagents pass the spawn-time
 /// date, stable over their lifetime)
 fn env_block(cwd: &Path, git: Option<&str>, date: &str) -> String {
+    env_block_scoped(cwd, git, date, false)
+}
+
+fn env_block_scoped(cwd: &Path, git: Option<&str>, date: &str, global_session: bool) -> String {
+    if global_session {
+        return format!(
+            "<env>\n\
+             Session scope: global (no workspace bound)\n\
+             Platform: {}-{}\n\
+             Date: {date}\n\
+             Workspace shell and repository file tools are unavailable until a workspace is bound. \
+             Personal memory files remain readable and writable directly.\n\
+             </env>",
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+        );
+    }
     format!(
         "<env>\n\
          Working directory: {}\n\

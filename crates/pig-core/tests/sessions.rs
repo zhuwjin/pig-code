@@ -917,6 +917,8 @@ async fn session_model_mode_persist_and_inherit() {
             reasoning_level: Some("high".into()),
             permissions: None,
             plan_enabled: None,
+            bot_id: None,
+            global: false,
         })
         .await
         .unwrap();
@@ -1308,6 +1310,8 @@ default_reasoning_level = "high"
         reasoning_level: level,
         permissions: None,
         plan_enabled: None,
+        bot_id: None,
+        global: false,
     };
     async fn wait_configured(events: &async_channel::Receiver<Event>) -> Vec<Event> {
         recv_until(events, Duration::from_secs(5), |e| {

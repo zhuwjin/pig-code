@@ -221,6 +221,8 @@ impl Manager {
                 reasoning_level,
                 permissions,
                 plan_enabled,
+                bot_id,
+                global,
             } => self.new_session(
                 event_tx,
                 cwd,
@@ -229,7 +231,15 @@ impl Manager {
                 reasoning_level,
                 permissions,
                 plan_enabled,
+                bot_id,
+                global,
             ),
+            Op::ListBots => self.list_bots(event_tx),
+            Op::UpsertBot { bot } => self.upsert_bot(event_tx, bot),
+            Op::DeleteBot { bot_id } => self.delete_bot(event_tx, bot_id),
+            Op::BindSessionWorkspace { session_id, cwd } => {
+                self.bind_session_workspace(event_tx, session_id, cwd)
+            }
             Op::OpenSession { session_id } => self.open_session(event_tx, session_id),
             Op::ListWorkspaces => self.list_workspaces(event_tx),
             Op::AddWorkspace { path } => self.add_workspace(event_tx, path),

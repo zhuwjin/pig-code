@@ -86,6 +86,8 @@ impl Manager {
                             reasoning_level,
                             None,
                             Some(false),
+                            None,
+                            false,
                         );
                         let created = self
                             .sessions

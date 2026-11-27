@@ -656,6 +656,8 @@ mod tests {
             reasoning_level: None,
             permissions: Default::default(),
             plan_enabled: false,
+            bot_id: None,
+            global: false,
         }
     }
 

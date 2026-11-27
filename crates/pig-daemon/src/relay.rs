@@ -7,8 +7,8 @@ use std::time::Duration;
 use futures_util::{SinkExt as _, StreamExt as _};
 use pig_core::AgentHandle;
 use pig_protocol::{
-    DAEMON_PROTOCOL_VERSION, DaemonMessage, DaemonRequest, DeviceCodePollResponse,
-    DeviceCodeStartResponse, RELAY_PROTOCOL_VERSION, RelayAuthResponse, RelayConnectionStatus,
+    BotSyncPayload, DAEMON_PROTOCOL_VERSION, DaemonMessage, DaemonRequest, DeviceCodePollResponse,
+    DeviceCodeStartResponse, Op, RELAY_PROTOCOL_VERSION, RelayAuthResponse, RelayConnectionStatus,
     RelayDaemonFrame, RelayDeviceInfo, RelayServerFrame,
 };
 use serde::{Deserialize, Serialize};
@@ -463,6 +463,58 @@ impl RelayManager {
         self.status()
     }
 
+    /// Synchronize persistent Bots and Bot personal long-term memories with `pig-relay`
+    /// for the signed-in account. Workspace code, workspace memory, and API keys are never sent.
+    pub async fn sync_bots(&self) -> Result<BotSyncPayload, String> {
+        let creds = self.require_credentials()?;
+        let data_dir = self.data_dir.clone();
+        let local_payload = tokio::task::spawn_blocking(move || -> Result<BotSyncPayload, String> {
+            let store = pig_core::store::Store::open(&data_dir)?;
+            let bots = store.list_bots();
+            let deletions = store.bot_deletions();
+            let mut memories = std::collections::BTreeMap::new();
+            for bot in &bots {
+                let files = pig_core::memory::collect_bot_memory_files(&data_dir, &bot.bot_id);
+                if !files.is_empty() {
+                    memories.insert(bot.bot_id.clone(), files);
+                }
+            }
+            Ok(BotSyncPayload {
+                bots,
+                deletions,
+                memories,
+            })
+        })
+        .await
+        .map_err(|error| error.to_string())??;
+
+        let resp = self
+            .http
+            .post(format!("{}/api/v1/bots/sync", creds.relay_url))
+            .bearer_auth(&creds.device_token)
+            .json(&local_payload)
+            .send()
+            .await
+            .map_err(|error| format!("failed to reach relay for bot sync: {error}"))?;
+        let merged: BotSyncPayload = decode_http_json(resp).await?;
+
+        let apply_dir = self.data_dir.clone();
+        let merged_clone = merged.clone();
+        tokio::task::spawn_blocking(move || -> Result<(), String> {
+            let store = pig_core::store::Store::open(&apply_dir)?;
+            store.apply_bot_sync(&merged_clone)?;
+            for (bot_id, files) in &merged_clone.memories {
+                let _ = pig_core::memory::apply_bot_memory_files(&apply_dir, bot_id, files);
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|error| error.to_string())??;
+
+        let _ = self.agent.ops.send(Op::ListBots).await;
+        Ok(merged)
+    }
+
     fn require_credentials(&self) -> Result<RelayCredentials, String> {
         self.inner
             .lock()
@@ -631,13 +683,26 @@ impl RelayManager {
                     };
                     match frame {
                         RelayServerFrame::Registered { .. } => {
-                            let mut inner = self
-                                .inner
-                                .lock()
-                                .unwrap_or_else(|poisoned| poisoned.into_inner());
-                            if inner.generation == generation {
-                                inner.connected = true;
-                                inner.last_error = None;
+                            let should_sync = {
+                                let mut inner = self
+                                    .inner
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                if inner.generation == generation {
+                                    inner.connected = true;
+                                    inner.last_error = None;
+                                    true
+                                } else {
+                                    false
+                                }
+                            };
+                            if should_sync {
+                                let manager = self.clone();
+                                tokio::spawn(async move {
+                                    if let Err(error) = manager.sync_bots().await {
+                                        tracing::debug!(%error, "background bot sync after relay registration skipped");
+                                    }
+                                });
                             }
                         }
                         RelayServerFrame::ClientConnected { stream_id, .. } => {

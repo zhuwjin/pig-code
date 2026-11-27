@@ -64,6 +64,37 @@ pub(crate) async fn exec_tool_gated_ctx(
     } else {
         (incoming, tool)
     };
+
+    // ---- Mandatory Bot capability & global-session boundary check ----
+    // Enforced unconditionally at the execution gate (before hooks, approvals,
+    // or execution) so neither prompts nor CallTool wrappers can bypass it.
+    {
+        let target_in_memory_root = if crate::bots::is_memory_io_tool(&incoming.name) {
+            extract_file_path_arg(&incoming.arguments).is_some_and(|raw| {
+                let candidate = {
+                    let path = PathBuf::from(&raw);
+                    if path.is_absolute() {
+                        path
+                    } else {
+                        ctx.cwd.join(path)
+                    }
+                };
+                path_within_any_root(&candidate, &ctx.state.extra_rw_roots)
+            })
+        } else {
+            false
+        };
+        if let Err(note) = crate::bots::check_tool_capability(
+            &incoming.name,
+            incoming.name.starts_with("mcp__"),
+            ctx.bot_capabilities.as_ref(),
+            ctx.global_session,
+            target_in_memory_root,
+        ) {
+            return GatedToolOutcome::Rejected { note };
+        }
+    }
+
     // ---- PreToolUse hooks (before any permission logic, so hooks observe
     // every call including ones the rules will deny). May reject the call,
     // rewrite the input, or adjust the permission path; contexts carry to the
@@ -1187,4 +1218,34 @@ The sandbox stays on: ordinary paths become writable, but protected files, deny 
         documents: chat_documents,
         delivered_notification_ids: media.delivered_notification_ids.clone(),
     }
+}
+
+fn extract_file_path_arg(arguments: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(arguments).ok()?;
+    value
+        .get("path")
+        .or_else(|| value.get("file_path"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+fn path_within_any_root(candidate: &Path, roots: &[PathBuf]) -> bool {
+    if roots.is_empty() {
+        return false;
+    }
+    let resolved = candidate.canonicalize().unwrap_or_else(|_| {
+        if let Some(parent) = candidate.parent()
+            && let Ok(canon_parent) = parent.canonicalize()
+            && let Some(name) = candidate.file_name()
+        {
+            return canon_parent.join(name);
+        }
+        candidate.to_path_buf()
+    });
+    roots.iter().any(|root| {
+        let canon_root = root.canonicalize().unwrap_or_else(|_| root.clone());
+        resolved.starts_with(&canon_root)
+    })
 }

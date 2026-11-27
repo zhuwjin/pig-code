@@ -17,7 +17,7 @@ use hyper::upgrade::OnUpgrade;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use pig_protocol::{
-    DaemonMessage, DaemonRequest, DeviceCodePollResponse, DeviceCodeStartResponse,
+    BotSyncPayload, DaemonMessage, DaemonRequest, DeviceCodePollResponse, DeviceCodeStartResponse,
     RELAY_PROTOCOL_VERSION, RelayAuthResponse, RelayDaemonFrame, RelayDeviceInfo, RelayServerFrame,
     RelayUser,
 };
@@ -34,6 +34,7 @@ use crate::store::{DeviceCodeStatus, RelayStore, now_ms};
 
 const WEB_INDEX_HTML: &str = include_str!("../web/index.html");
 const MAX_BODY_BYTES: usize = 64 * 1024;
+const MAX_BOT_SYNC_BODY_BYTES: usize = 4 * 1024 * 1024;
 const CLIENT_STREAM_CAPACITY: usize = 256;
 const DAEMON_TUNNEL_CAPACITY: usize = 512;
 
@@ -224,6 +225,8 @@ async fn handle_http(state: Arc<RelayState>, req: Request<Incoming>) -> Response
         (Method::POST, "/api/v1/auth/device/approve") => handle_device_approve(state, req).await,
         (Method::POST, "/api/v1/auth/device/poll") => handle_device_poll(state, req).await,
         (Method::GET, "/api/v1/devices") => handle_list_devices(state, req).await,
+        (Method::GET, "/api/v1/bots/sync") => handle_get_bots_sync(state, req).await,
+        (Method::POST, "/api/v1/bots/sync") => handle_post_bots_sync(state, req).await,
         (Method::DELETE, p) if p.starts_with("/api/v1/devices/") => {
             let device_id = p.trim_start_matches("/api/v1/devices/").to_string();
             handle_revoke_device(state, req, device_id).await
@@ -503,6 +506,40 @@ async fn handle_revoke_device(
     }
     state.hub.disconnect_device(&device_id).await;
     json_response(StatusCode::OK, &serde_json::json!({ "ok": true }))
+}
+
+async fn handle_get_bots_sync(
+    state: Arc<RelayState>,
+    req: Request<Incoming>,
+) -> Response<Full<Bytes>> {
+    let user_id = match authenticate_user_or_device(&state, &req) {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    let store = state.store.lock().expect("relay store lock");
+    match store.get_bot_sync(&user_id) {
+        Ok(payload) => json_response(StatusCode::OK, &payload),
+        Err(detail) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &detail),
+    }
+}
+
+async fn handle_post_bots_sync(
+    state: Arc<RelayState>,
+    req: Request<Incoming>,
+) -> Response<Full<Bytes>> {
+    let user_id = match authenticate_user_or_device(&state, &req) {
+        Ok(user_id) => user_id,
+        Err(response) => return response,
+    };
+    let incoming: BotSyncPayload = match read_json_with_limit(req, MAX_BOT_SYNC_BODY_BYTES).await {
+        Ok(payload) => payload,
+        Err(response) => return response,
+    };
+    let mut store = state.store.lock().expect("relay store lock");
+    match store.merge_bot_sync(&user_id, &incoming) {
+        Ok(merged) => json_response(StatusCode::OK, &merged),
+        Err(detail) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &detail),
+    }
 }
 
 async fn handle_daemon_ws_upgrade(
@@ -824,6 +861,27 @@ fn authenticate_session(
     }
 }
 
+fn authenticate_user_or_device(
+    state: &RelayState,
+    req: &Request<Incoming>,
+) -> Result<String, Response<Full<Bytes>>> {
+    let Some(token) = bearer_token(req).or_else(|| query_param(req, "token")) else {
+        return Err(error_response(
+            StatusCode::UNAUTHORIZED,
+            "missing bearer token",
+        ));
+    };
+    let store = state.store.lock().expect("relay store lock");
+    match store.resolve_user_id_from_token(&token) {
+        Ok(Some(user_id)) => Ok(user_id),
+        Ok(None) => Err(error_response(
+            StatusCode::UNAUTHORIZED,
+            "invalid or revoked token",
+        )),
+        Err(detail) => Err(error_response(StatusCode::INTERNAL_SERVER_ERROR, &detail)),
+    }
+}
+
 fn bearer_token(req: &Request<Incoming>) -> Option<String> {
     req.headers()
         .get(AUTHORIZATION)
@@ -859,13 +917,20 @@ fn infer_public_url(config: &RelayServerConfig, req: &Request<Incoming>) -> Stri
 async fn read_json<T: for<'de> Deserialize<'de>>(
     req: Request<Incoming>,
 ) -> Result<T, Response<Full<Bytes>>> {
+    read_json_with_limit(req, MAX_BODY_BYTES).await
+}
+
+async fn read_json_with_limit<T: for<'de> Deserialize<'de>>(
+    req: Request<Incoming>,
+    max_bytes: usize,
+) -> Result<T, Response<Full<Bytes>>> {
     let collected = req
         .into_body()
         .collect()
         .await
         .map_err(|error| error_response(StatusCode::BAD_REQUEST, &error.to_string()))?;
     let bytes = collected.to_bytes();
-    if bytes.len() > MAX_BODY_BYTES {
+    if bytes.len() > max_bytes {
         return Err(error_response(
             StatusCode::PAYLOAD_TOO_LARGE,
             "request payload too large",

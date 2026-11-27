@@ -157,6 +157,8 @@ function snapshotToEvents(snapshot: Record<string, any>): Record<string, any>[] 
         reasoning_level: c.reasoning_level ?? null,
         permissions: c.permissions,
         plan_enabled: c.plan_enabled ?? false,
+        bot_id: c.bot_id ?? null,
+        global: Boolean(c.global),
       },
     });
   }
@@ -574,6 +576,7 @@ export class DaemonAgent {
     const ops: Record<string, unknown>[] = [
       { ListSessions: null },
       { ListWorkspaces: null },
+      { ListBots: null },
       { GetConfig: null },
     ];
     if (resync && this.activeSessionId) {
@@ -895,6 +898,22 @@ export class DaemonAgent {
 
   relayRevokeDevice(deviceId: string): Promise<boolean> {
     return this.localRpc<boolean>("relay.revoke_device", { device_id: deviceId });
+  }
+
+  relaySyncBots(): Promise<Record<string, unknown>> {
+    return this.localRpc<Record<string, unknown>>("relay.sync_bots");
+  }
+
+  listBots(): Promise<unknown[]> {
+    return this.rpc<unknown[]>("bot.list");
+  }
+
+  upsertBot(bot: Record<string, unknown>): Promise<boolean> {
+    return this.rpc<boolean>("bot.upsert", { bot });
+  }
+
+  deleteBot(botId: string): Promise<boolean> {
+    return this.rpc<boolean>("bot.delete", { bot_id: botId });
   }
 
   send(opJson: string): void {
