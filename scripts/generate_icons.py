@@ -142,8 +142,8 @@ def write_if_changed(output: Path, content: str) -> bool:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate Canvas icon geometry from SVG files.")
-    parser.add_argument("--input", type=Path, default=ROOT / "assets" / "icons")
-    parser.add_argument("--output", type=Path, default=ROOT / "app" / "components" / "icon-elements.ts")
+    parser.add_argument("--input", type=Path, default=ROOT / "apps" / "desktop" / "assets" / "icons")
+    parser.add_argument("--output", type=Path, default=ROOT / "apps" / "desktop" / "app" / "components" / "icon-elements.ts")
     parser.add_argument("--check", action="store_true", help="fail when the generated file is not current")
     args = parser.parse_args()
     try:

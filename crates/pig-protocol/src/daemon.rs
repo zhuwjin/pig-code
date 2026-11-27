@@ -111,6 +111,12 @@ pub enum DaemonRequest {
     Op {
         op: Op,
     },
+    Rpc {
+        id: String,
+        method: String,
+        #[serde(default)]
+        params: serde_json::Value,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -122,6 +128,23 @@ pub enum DaemonMessage {
     },
     Batch(ProjectedEventBatch),
     Snapshot(SessionStateSnapshot),
+    RpcResult {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    PluginEvent {
+        payload: String,
+    },
+    TerminalOutput {
+        terminal_id: String,
+        data: String,
+    },
+    TerminalExit {
+        terminal_id: String,
+    },
     Error {
         detail: String,
     },

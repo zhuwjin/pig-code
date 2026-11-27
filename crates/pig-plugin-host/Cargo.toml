@@ -1,0 +1,20 @@
+[package]
+name = "pig-plugin-host"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+pig-core = { path = "../pig-core" }
+pig-protocol = { path = "../pig-protocol" }
+pig-utils = { path = "../pig-utils" }
+async-channel = "2"
+base64 = "0.22"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+quickjs-jit = "0.14.2"
+rand_core = { version = "0.6", features = ["getrandom"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+tracing = "0.1"
+zip = { version = "9", default-features = false, features = ["deflate"] }

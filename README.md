@@ -1,45 +1,31 @@
 # pig-code
 
-Pig Code's NSH + TSX desktop app. `App.tsx` is the entry point; `app/view.tsx` composes the interface from the
-region components in `app/components/`. Shared state lives in `app/store.ts` and `app/theme.ts`. Tests and their
-fixture entries live in `tests/`; standalone reproduction entries live in `examples/repros/`. The directory is
-also a crate (`Cargo.toml`, `src/lib.rs`; `nsh.json` `"rust": "."`) whose `#[native_module("pig-code/native")]`
-exports the native `Agent` connection. The existing agent engine lives in `crates/pig-core`, with `pig-protocol`,
-`pig-provider` and `pig-utils` alongside it. TSX sends commands and receives ordered event batches through this
-connection. `app/components/icon.tsx` uses the gallery's Canvas drawing pattern with original
-`gpui-kit-assets 0.8.1` Lucide geometry in `app/components/icon-elements.ts`; the source SVG files and their
-license stay in `assets/icons/`. `assets/pig-code-wordmark.svg` is the original wordmark mask sampled by the
-hero's particle canvas.
+Pig Code is a decoupled monorepo with a pure Rust backend workspace and a pure TSX NSH desktop client:
+
+- **`crates/*`** — Pure Rust workspace (zero `nsh-*` dependencies):
+  - `pig-daemon`: Long-lived local WebSocket daemon owning sessions, SQLite FTS5 search, PTY terminals, syntax highlighting, file/directory browsing, and the plugin runtime host.
+  - `pig-plugin-host`: Standalone QuickJS (`quickjs-jit`) plugin engine, Ed25519 signed package verifier/loader (`.pigpkg` / `.nshpkg`), and marketplace trust store.
+  - `pig-core`, `pig-protocol`, `pig-provider`, `pig-utils`, `pig-tui`: Core agent loop, protocol types, model providers, shared utilities, and terminal UI client.
+- **`apps/desktop/`** — Standard NSH `--template ts` desktop application (zero Rust code). `App.tsx` is the entry point, `app/daemon-client.ts` connects to `pig-daemon` over WebSocket, `app/view.tsx` composes the interface from `app/components/`, and shared state lives in `app/store.ts` and `app/theme.ts`. Tests live in `apps/desktop/tests/`.
+- **`sdk/pig-plugin/`** — Pure TypeScript plugin SDK (`pig/plugin`) executed inside `pig-plugin-host`.
+
+## Development
 
 ```sh
-nsh run                      # this machine's native backend, no target needed
-nsh check                    # cargo check of the crate, then type checks App.tsx against the declarations generated from it
-nsh test                     # cargo test, then the TSX tests in tests/, headless; --target to run them on a platform
-nsh package --target web     # or ios, android, macos, linux, windows
+# Backend checks and tests
+cargo check --all-targets
+cargo test --workspace
+cargo build --bin pig-daemon
+
+# Desktop app (ensure target/debug is on PATH so pig-daemon can be launched)
+cd apps/desktop
+nsh check
+nsh test
+nsh run
 ```
 
 ## Unified plugins
 
-Signed `.nshpkg` packages are verified and installed at runtime without rebuilding or restarting the app. Open Plugin Management
-and provide the package path plus its trusted root public key. Packages can contribute Agent tools, commands, model-provider
-presets, themes, Skills, MCP servers and configuration. A package with a backend starts an independent NSH `Engine`;
-resource-only packages do not need one. Disabling a package stops its backend and removes its runtime contributions.
+Signed `.pigpkg` (and legacy `.nshpkg`) packages are verified and installed at runtime by `pig-daemon` without rebuilding or restarting the desktop app. Open Plugin Management and provide the package path plus its trusted root public key. Packages can contribute Agent tools, commands, model-provider presets, themes, Skills, MCP servers, and configuration. A package with a backend runs in an isolated `pig-plugin-host` QuickJS runtime inside `pig-daemon`; resource-only packages do not start an engine. Disabling a package stops its backend and removes its runtime contributions.
 
-The main branch does not render plugin-provided UI or allow plugins to modify host components. `examples/moon-plugin`
-demonstrates a backend tool, a command, a local model provider, themes, a Skill and configuration. The architecture and protocol contract live in
-`docs/PLUGIN_SYSTEM.md`.
-
-`nsh` describes the crate's exports with a small program of the crate and builds the app's hosts with it linked in.
-TSX edits are hot updates; Rust edits rebuild and restart the app. The first build writes the crate's TypeScript declarations into
-`.nsh/types/pig-code/native.d.ts`, doc comments included.
-
-Native methods run according to their Rust signatures: synchronous commands such as `Agent.newSession` return directly
-(or throw), while `Agent.listen` returns a Promise and delivers ordered event batches as an NSH task. Add further native
-exports in `src/lib.rs` with `registry.register::<…>()` (components), `registry.module::<…>()` and
-`registry.class::<…>()`.
-
-The `nsh` commands build the app's hosts from the NSH crates `Cargo.toml` depends on: crates.io's at the version of the
-`nsh` you run (keep the `nsh-*` dependencies at that version when you upgrade `nsh`), or an NSH checkout's by path.
-
-NSH-generated files stay in `.nsh/`: runner sources in `.nsh/rust/` and default packages in `.nsh/out/`.
-Cargo keeps its normal `target/` directory and respects your existing `CARGO_TARGET_DIR`.
+`examples/moon-plugin` demonstrates a backend tool, a command, a local model provider, themes, a Skill, and configuration. The architecture and protocol contract live in `docs/PLUGIN_SYSTEM.md`.

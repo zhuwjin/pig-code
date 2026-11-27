@@ -22,7 +22,20 @@
 // });
 // ```
 
-import { host } from "nsh";
+interface GlobalPluginHost {
+  available(): boolean;
+  readonly params: unknown;
+  post(channel: string, data: unknown): void;
+  on(channel: string, listener: (data: unknown) => void): () => void;
+}
+
+function activeHost(): GlobalPluginHost | undefined {
+  const globalHost = (globalThis as { __pigHost?: GlobalPluginHost }).__pigHost;
+  if (globalHost && typeof globalHost.available === "function" && globalHost.available()) {
+    return globalHost;
+  }
+  return undefined;
+}
 
 import {
   asPluginError,
@@ -789,14 +802,17 @@ export function runPlugin(applier: PluginApplier, bridge: PluginHostBridge): { d
 
 function hostParams(): unknown {
   try {
-    if (typeof host === "undefined" || !host.available()) return undefined;
-    return host.params;
+    return activeHost()?.params;
   } catch {
     return undefined;
   }
 }
 
 function nshBridge(identity: PluginIdentity): PluginHostBridge {
+  const host = activeHost();
+  if (!host) {
+    throw new Error("plugin host bridge is not available");
+  }
   return {
     identity,
     post(envelope) {

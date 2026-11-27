@@ -127,7 +127,11 @@ fn record_cursor(cursor: &Mutex<Option<EventCursor>>, message: &DaemonMessage) {
         DaemonMessage::Subscription { cursor, .. } => Some(cursor.clone()),
         DaemonMessage::Batch(batch) => Some(batch.cursor()),
         DaemonMessage::Snapshot(snapshot) => Some(snapshot.cursor.clone()),
-        DaemonMessage::Error { .. } => None,
+        DaemonMessage::RpcResult { .. }
+        | DaemonMessage::PluginEvent { .. }
+        | DaemonMessage::TerminalOutput { .. }
+        | DaemonMessage::TerminalExit { .. }
+        | DaemonMessage::Error { .. } => None,
     };
     if let Some(next) = next {
         *cursor

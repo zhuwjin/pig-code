@@ -109,7 +109,11 @@ async fn until_event(client: &DaemonClient, mut predicate: impl FnMut(&Event) ->
                     return event;
                 }
             }
-            DaemonMessage::Subscription { .. } => {}
+            DaemonMessage::Subscription { .. }
+            | DaemonMessage::RpcResult { .. }
+            | DaemonMessage::PluginEvent { .. }
+            | DaemonMessage::TerminalOutput { .. }
+            | DaemonMessage::TerminalExit { .. } => {}
             DaemonMessage::Error { detail } => panic!("daemon error: {detail}"),
         }
     }

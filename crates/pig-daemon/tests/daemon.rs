@@ -123,7 +123,11 @@ impl Harness {
             eprintln!("{}: {message:?}", self.name);
         }
         match message {
-            DaemonMessage::Subscription { .. } => {}
+            DaemonMessage::Subscription { .. }
+            | DaemonMessage::RpcResult { .. }
+            | DaemonMessage::PluginEvent { .. }
+            | DaemonMessage::TerminalOutput { .. }
+            | DaemonMessage::TerminalExit { .. } => {}
             DaemonMessage::Batch(batch) => {
                 assert!(
                     self.seen.insert((batch.epoch.clone(), batch.sequence)),
@@ -562,4 +566,147 @@ async fn websocket_ping_frames_stay_connected_and_client_reconnects_after_daemon
             ..
         }
     ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn selftest_cli_and_rpc_methods_work_over_websocket() {
+    use futures_util::{SinkExt as _, StreamExt as _};
+    use pig_daemon::DaemonRequest;
+    use std::io::BufRead as _;
+    use tokio_tungstenite::tungstenite::Message;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+    use tokio_tungstenite::tungstenite::http::HeaderValue;
+    use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
+
+    let mut child = daemon_command()
+        .arg("--selftest")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn pig-daemon --selftest");
+
+    let stdout = child.stdout.take().expect("piped stdout");
+    let endpoint = tokio::task::spawn_blocking(move || {
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("read endpoint line");
+        serde_json::from_str::<DaemonEndpoint>(line.trim()).expect("parse endpoint json")
+    })
+    .await
+    .expect("join stdout reader");
+
+    let url = format!("ws://{}/", endpoint.address);
+    let mut request = url.into_client_request().expect("client request");
+    request.headers_mut().insert(
+        AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {}", endpoint.token)).expect("auth header"),
+    );
+    let (mut ws, _) = tokio_tungstenite::connect_async(request)
+        .await
+        .expect("connect to selftest daemon");
+    ws.send(Message::text(
+        serde_json::to_string(&DaemonRequest::Subscribe {
+            after: None,
+            session_ids: None,
+        })
+        .unwrap(),
+    ))
+    .await
+    .expect("subscribe");
+
+    async fn call_rpc(
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        id: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        ws.send(Message::text(
+            serde_json::to_string(&DaemonRequest::Rpc {
+                id: id.to_string(),
+                method: method.to_string(),
+                params,
+            })
+            .unwrap(),
+        ))
+        .await
+        .expect("send rpc");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            assert!(Instant::now() < deadline, "timed out waiting for rpc {method}");
+            let frame = tokio::time::timeout(Duration::from_secs(2), ws.next())
+                .await
+                .expect("ws frame timeout")
+                .expect("ws open")
+                .expect("ws ok");
+            let Message::Text(text) = frame else { continue };
+            let message: DaemonMessage = serde_json::from_str(&text).expect("parse daemon msg");
+            if let DaemonMessage::RpcResult {
+                id: reply_id,
+                result,
+                error,
+            } = message
+                && reply_id == id
+            {
+                assert!(error.is_none(), "rpc {method} failed: {error:?}");
+                return result.expect("rpc result");
+            }
+        }
+    }
+
+    let info = call_rpc(&mut ws, "1", "daemon.info", serde_json::json!({})).await;
+    assert_eq!(info["selftest"], serde_json::json!(true));
+    let cwd = info["cwd"].as_str().expect("cwd string").to_string();
+    assert!(Path::new(&cwd).is_dir());
+
+    let dir = call_rpc(
+        &mut ws,
+        "2",
+        "fs.list_directory",
+        serde_json::json!({ "path": cwd, "include_files": true }),
+    )
+    .await;
+    assert!(
+        dir["entries"]
+            .as_array()
+            .expect("entries")
+            .iter()
+            .any(|e| e["name"] == mock::MOCK_FILE_NAME)
+    );
+
+    let spans = call_rpc(
+        &mut ws,
+        "3",
+        "code.highlight",
+        serde_json::json!({ "code": "fn main() {}", "language": "rs" }),
+    )
+    .await;
+    assert!(!spans.as_array().expect("spans array").is_empty());
+
+    let sample = call_rpc(&mut ws, "4", "system.process_sample", serde_json::json!({})).await;
+    assert!(sample["memory"].as_u64().unwrap_or(0) > 0);
+
+    let sandbox = call_rpc(&mut ws, "5", "system.sandbox_status", serde_json::json!({})).await;
+    assert!(sandbox["backend"].is_string());
+
+    let term = call_rpc(
+        &mut ws,
+        "6",
+        "terminal.open",
+        serde_json::json!({ "cwd": info["cwd"] }),
+    )
+    .await;
+    let terminal_id = term["terminal_id"].as_str().expect("terminal_id").to_string();
+    let closed = call_rpc(
+        &mut ws,
+        "7",
+        "terminal.close",
+        serde_json::json!({ "terminal_id": terminal_id }),
+    )
+    .await;
+    assert_eq!(closed, serde_json::json!(true));
+
+    let _ = child.kill();
+    let _ = child.wait();
 }

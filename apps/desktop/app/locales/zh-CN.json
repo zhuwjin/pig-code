@@ -1,0 +1,838 @@
+{
+  "common": {
+    "cancel": "取消",
+    "close": "关闭",
+    "confirm_delete": "确认删除",
+    "delete": "删除",
+    "edit": "编辑",
+    "list_separator": "、",
+    "back": "返回",
+    "collapse": "收起",
+    "copy": "复制",
+    "not_provided": "未提供"
+  },
+  "window": {
+    "minimize": "最小化",
+    "maximize": "最大化",
+    "restore": "还原",
+    "close": "关闭"
+  },
+  "sidebar": {
+    "collapse": "折叠侧边栏",
+    "new_task": "新建任务",
+    "search": "搜索",
+    "sessions": "会话",
+    "collapse_workspace": "折叠工作区",
+    "expand_workspace": "展开工作区",
+    "group_by_workspace": "按工作区分组",
+    "view": "视图",
+    "view_flat": "平铺列表",
+    "collapse_current_workspace": "折叠当前工作区",
+    "expand_current_workspace": "展开当前工作区",
+    "untitled_session": "未命名会话",
+    "settings": "设置",
+    "open_page": "打开{name}",
+    "return_workspace": "返回工作区",
+    "open_settings": "模型与应用设置",
+    "workspace_menu": "工作区菜单",
+    "copy_path": "复制路径",
+    "rename": "重命名",
+    "remove_workspace": "移除工作区",
+    "pin": "置顶",
+    "unpin": "取消置顶",
+    "pinned": "置顶",
+    "archive": "归档",
+    "unarchive": "取消归档",
+    "delete_session": "删除会话",
+    "show_more": "展开更多",
+    "collapse_sessions": "收起",
+    "time": {
+      "just_now": "刚刚",
+      "minutes": "{count} 分钟",
+      "hours": "{count} 小时",
+      "days": "{count} 天",
+      "weeks": "{count} 周",
+      "months": "{count} 个月"
+    }
+  },
+  "settings": {
+    "nav": {
+      "models": "模型设置",
+      "appearance": "外观",
+      "plugins": "插件管理",
+      "marketplace": "插件市场",
+      "developer": "开发者选项"
+    },
+    "developer": {
+      "title": "开发者选项",
+      "description": "用于开发与排查问题的诊断和性能选项。",
+      "hud": {
+        "fps": "FPS",
+        "interval": "INTERVAL",
+        "p95": "P95",
+        "drop": "DROP",
+        "gpu": "GPU",
+        "cpu": "CPU",
+        "memory": "MEM",
+        "ms": "{value} ms",
+        "percent": "{value}%",
+        "mb": "{value} MB",
+        "unavailable": "—"
+      },
+      "show_fps": {
+        "label": "显示性能 HUD",
+        "description": "在窗口角落实时显示本进程的 CPU 和内存占用。"
+      },
+      "sandbox": {
+        "label": "启用系统沙盒",
+        "description": "使用操作系统沙盒隔离模型执行的命令。启用后若当前主机不支持，将拒绝执行而非静默降级。",
+        "status_ready": "当前主机支持（{backend}）",
+        "status_unsupported": "当前主机不支持（{backend}）——开启期间将拒绝执行沙盒命令。",
+        "status_disabled": "已显式关闭系统沙盒——命令将不经操作系统沙盒隔离运行。"
+      }
+    },
+    "appearance": {
+      "title": "主题",
+      "description": "选择配色主题，立即生效并保存。",
+      "search": "搜索主题…",
+      "no_matches": "没有匹配的主题",
+      "select": "选择主题 {name}",
+      "filter": {
+        "all": "全部",
+        "light": "亮色",
+        "dark": "暗色"
+      },
+      "mode": {
+        "title": "主题模式",
+        "description": "跟随系统，或固定使用亮色、暗色。",
+        "light": "亮色",
+        "dark": "暗色",
+        "system": "跟随系统"
+      },
+      "badge": {
+        "light": "亮色",
+        "dark": "暗色"
+      },
+      "style_packs": {
+        "active": "正在叠加的样式包",
+        "note": "样式包可修改当前主题；更新插件后需要重新启用。"
+      },
+      "localization": {
+        "title": "语言与字体",
+        "description": "可跟随系统或选择语言；字体留空使用系统默认。"
+      },
+      "language": {
+        "label": "语言",
+        "system": "跟随系统",
+        "zh_cn": "中文",
+        "en": "English",
+        "description": "界面显示语言；跟随系统时按系统语言自动选择。"
+      },
+      "fonts": {
+        "ui": "界面字体",
+        "mono": "等宽字体",
+        "system_default": "系统默认",
+        "ui_description": "设置界面文字字体。",
+        "mono_description": "设置代码和终端使用的等宽字体。",
+        "search": "搜索…",
+        "no_matches": "没有匹配的字体"
+      }
+    },
+    "models": {
+      "title": "模型设置",
+      "description": "管理模型供应商、连接方式与可用模型。",
+      "custom_provider": "自定义供应商",
+      "missing_key": "缺少密钥",
+      "model_count": {
+        "one": "{count} 个模型",
+        "other": "{count} 个模型"
+      },
+      "providers_tab": "供应商",
+      "all_models_tab": "全部模型",
+      "providers_hint": "按供应商管理连接与模型",
+      "models_hint": "查看并维护所有供应商的模型",
+      "search_providers": "搜索供应商",
+      "search_all": "搜索模型或供应商",
+      "add_provider": "＋ 添加供应商 …",
+      "disabled_section": "已停用",
+      "no_matching_providers": "没有匹配的供应商",
+      "no_matching_models": "没有匹配的模型",
+      "no_providers": "还没有供应商",
+      "empty_selection": "选择或添加一个供应商开始配置。",
+      "select_icon": "选择模型图标 {name}",
+      "vision": "视觉",
+      "edit_model": "编辑模型 {id}",
+      "delete_model": "删除模型 {id}",
+      "disable_model": "停用模型 {id}",
+      "enable_model": "启用模型 {id}",
+      "section": "模型",
+      "add_model": "＋ 添加模型 …",
+      "empty": "还没有模型，点击“添加模型”创建。",
+      "provider_settings": "供应商设置",
+      "table": {
+        "model": "模型",
+        "context": "上下文",
+        "output": "输出",
+        "capabilities": "能力",
+        "reasoning": "推理等级",
+        "enabled": "启用",
+        "actions": "操作"
+      },
+      "reasoning": {
+        "none": "关闭",
+        "enabled": "开启",
+        "minimal": "极简",
+        "low": "低",
+        "medium": "中",
+        "high": "高",
+        "xhigh": "极高",
+        "max": "最高"
+      },
+      "error": {
+        "id_required": "请输入模型 ID。",
+        "id_exists": "这个模型 ID 在当前供应商下已经存在。",
+        "positive_integers": "上下文窗口和最大输出必须是正整数。",
+        "default_level": "默认推理等级必须包含在推理等级列表中。",
+        "params_json": "请求参数映射必须是有效的 JSON 对象。",
+        "web_search_json": "原生搜索工具定义不是有效的 JSON。",
+        "save_failed": "保存模型失败。"
+      },
+      "dialog": {
+        "close_label": "关闭模型编辑",
+        "edit_title": "编辑模型",
+        "add_title": "添加模型"
+      },
+      "field": {
+        "id": "模型 ID",
+        "display_name": "显示名（可选）",
+        "context_window": "上下文窗口",
+        "max_output": "最大输出 tokens",
+        "enabled": "启用模型",
+        "advanced": "高级设置",
+        "input_image": "支持图片",
+        "input_pdf": "支持 PDF",
+        "structured_output": "结构化输出",
+        "strict_tools": "严格工具模式",
+        "web_search": "原生联网搜索",
+        "web_search_definition": "原生搜索工具定义",
+        "web_search_local_hint": "Chat Completions 使用插件提供的搜索工具，无需配置原生搜索。",
+        "reasoning_levels": "推理等级",
+        "level_placeholder": "等级",
+        "label_placeholder": "显示名",
+        "default_level": "默认推理等级",
+        "default_level_unset": "不设置",
+        "params_json": "请求参数映射"
+      },
+      "lookup": {
+        "pending": "正在查询 models.dev…",
+        "not_found": "未找到元数据，可重试",
+        "hint": "Enter 或失焦自动填充"
+      },
+      "delete_level": "删除推理等级 {level}",
+      "action": {
+        "reset": "重置表单",
+        "save": "保存模型"
+      },
+      "preset": {
+        "title": "添加供应商",
+        "close_label": "关闭供应商预设",
+        "search": "搜索供应商、地址或模型",
+        "description": "选择预设快速创建，或添加自定义供应商。",
+        "custom_description": "配置兼容的 API 地址"
+      },
+      "icon_picker": {
+        "title": "选择图标",
+        "close_label": "关闭图标选择",
+        "cancel_label": "取消图标选择",
+        "search": "搜索图标、平台或模型",
+        "default_brain": "默认 Brain",
+        "default_server": "默认 Server",
+        "no_matches": "没有匹配的图标"
+      }
+    },
+    "provider": {
+      "connected": "连接成功 · HTTP {status}",
+      "timeout": "连接超时 · {secs} 秒",
+      "failed": "连接失败 · {detail}",
+      "toggle_connection": "展开或折叠连接配置",
+      "connection": "连接配置",
+      "testing": "测试中…",
+      "test": "测试连接",
+      "name": "名称",
+      "base_url": "连接地址",
+      "api_format": "API 协议",
+      "requires_key": "需要 API Key",
+      "clear_key": "清除密钥",
+      "get_key": "获取密钥",
+      "key_not_required": "无需 API Key",
+      "key_saved_placeholder": "留空以保留已保存的密钥",
+      "key_placeholder": "输入 API Key",
+      "show_key": "显示密钥",
+      "hide_key": "隐藏密钥",
+      "select_icon": "选择供应商图标 {name}",
+      "disable": "停用供应商 {name}",
+      "enable": "启用供应商 {name}"
+    },
+    "plugins": {
+      "title": "插件管理",
+      "description": "安装、配置和管理签名插件",
+      "toggle": {
+        "enable": "启用插件 {name}",
+        "disable": "停用插件 {name}"
+      },
+      "state": {
+        "enabled": "已启用",
+        "disabled": "已停用",
+        "incompatible": "版本不兼容"
+      },
+      "metrics": {
+        "resources": "epoch {epoch} · 节点 {nodes} · 操作 {operations} · 请求 {requests} · 队列 {queue}",
+        "network": "网络 {network} B · 存储 {storage} B · 超时 {timeout} · 取消 {cancelled} · 丢弃 {dropped}"
+      },
+      "retry": "重试",
+      "uninstall": {
+        "label": "卸载插件 {name}",
+        "action": "卸载",
+        "confirm": "确认卸载 {name}？插件文件将被删除。",
+        "confirm_action": "确认卸载"
+      },
+      "signed": {
+        "title": "安装签名插件",
+        "package_path": ".nshpkg 路径",
+        "root_path": "根公钥 root.pub 路径",
+        "verify": "验证并安装",
+        "verifying": "正在验证…"
+      },
+      "installed": {
+        "title": "已安装插件",
+        "refresh": "刷新",
+        "refresh_label": "刷新主题插件",
+        "empty": "尚未安装插件，可从市场或签名包开始。"
+      },
+      "diagnostics": {
+        "logs": "最近插件日志（已脱敏）"
+      },
+      "incompatible": "需要更新版本的 Pig Code — {detail}",
+      "config": {
+        "open": "配置",
+        "save": "保存",
+        "saved": "已保存",
+        "on": "开启",
+        "off": "关闭",
+        "failed": "保存失败：{detail}",
+        "loading": "正在加载配置…",
+        "scope": {
+          "user": "用户",
+          "workspace": "当前工作区"
+        },
+        "workspace_unavailable": "请先打开工作区"
+      },
+      "credentials": {
+        "title": "凭证",
+        "placeholder": "粘贴密钥，将安全保存",
+        "save": "保存密钥",
+        "clear": "清除",
+        "saved": "已保存 {name}",
+        "cleared": "已清除 {name}",
+        "failed": "凭证更新失败：{detail}"
+      },
+      "conflicts": {
+        "title": "贡献冲突",
+        "conflict": "冲突：{kind} `{name}` 来自 {winner}，已忽略 {losers}"
+      }
+    },
+    "marketplace": {
+      "title": "插件市场",
+      "description": "浏览可信市场，每个签名插件包验证通过后才会安装。",
+      "refresh": "刷新",
+      "refreshing": "正在刷新…",
+      "loading": "正在加载市场…",
+      "empty": "打开市场以加载目录。",
+      "no_packages": "这个市场还没有插件。",
+      "packages": {
+        "one": "{count} 个插件",
+        "other": "{count} 个插件"
+      },
+      "official_badge": "官方",
+      "install": "安装",
+      "installing": "正在安装…",
+      "installed": "已安装",
+      "update": "更新",
+      "sources": {
+        "title": "市场来源",
+        "remove_label": "移除市场 {name}",
+        "remove_confirm": "确认移除 {name}？已安装插件会保留，但保存的受信根公钥将被删除。",
+        "remove": "移除"
+      },
+      "add": {
+        "title": "添加市场",
+        "description": "输入 index.json 地址。仓库还必须包含 root.pub 和签名的 .nshpkg 插件包。",
+        "url_placeholder": "https://…/index.json",
+        "preview": "检查",
+        "previewing": "正在检查…",
+        "fingerprint": "根公钥指纹（SHA-256）",
+        "trust_notice": "请通过其他可靠渠道核对这个指纹。确认后会用于后续安装和更新，密钥变化不会被静默信任。",
+        "confirm": "信任并添加",
+        "official_exists": "官方市场已经内置，无需重复添加。"
+      }
+    }
+  },
+  "title_bar": {
+    "expand_sidebar": "展开侧边栏",
+    "toggle_theme": "切换明暗主题",
+    "appearance_settings": "外观与主题设置",
+    "close_terminal": "关闭终端",
+    "open_terminal": "打开终端",
+    "close_right_panel": "关闭右侧面板",
+    "open_right_panel": "打开右侧面板"
+  },
+  "hero": {
+    "summarize_label": "总结这个工作区",
+    "summarize_prompt": "请阅读 README 并总结这个工作区的结构和主要模块。",
+    "fix_error_label": "修复一个报错",
+    "fix_error_prompt": "我遇到了一个报错： ",
+    "unit_tests_label": "写单元测试",
+    "unit_tests_prompt": "请为主要模块写单元测试。"
+  },
+  "commands": {
+    "clear": "清空当前消息显示",
+    "clear_label": "Clear",
+    "compact": "压缩上下文，可附加重点关注的内容",
+    "compact_label": "Compact",
+    "plan": "切换 Plan 模式，支持 on / off",
+    "plan_label": "Plan"
+  },
+  "search": {
+    "untitled_session": "未命名会话",
+    "plugin_command": "插件命令",
+    "close_label": "关闭搜索",
+    "clear_label": "清空搜索",
+    "placeholder": "搜索会话或工作区…",
+    "no_results": "没有匹配结果",
+    "tabs": {
+      "all": "全部",
+      "workspaces": "工作区",
+      "sessions": "会话"
+    },
+    "groups": {
+      "workspaces": {
+        "one": "工作区 {count}",
+        "other": "工作区 {count}"
+      },
+      "sessions": {
+        "one": "会话 {count}",
+        "other": "会话 {count}"
+      },
+      "content": {
+        "one": "内容匹配 {count}",
+        "other": "内容匹配 {count}"
+      },
+      "commands": {
+        "one": "命令 {count}",
+        "other": "命令 {count}"
+      }
+    },
+    "hints": {
+      "select": "选择",
+      "open": "打开",
+      "filter": "过滤",
+      "close": "关闭"
+    }
+  },
+  "conversation": {
+    "duration": {
+      "minutes_seconds": "{minutes} 分 {seconds} 秒",
+      "seconds": "{seconds} 秒"
+    }
+  },
+  "tools": {
+    "running": "运行中",
+    "terminal": "终端",
+    "writing_stdin": "发送输入中",
+    "write_stdin": "终端输入",
+    "read": "读取",
+    "writing": "写入中",
+    "write": "写入",
+    "editing": "编辑中",
+    "edit": "编辑",
+    "glob": "查找文件",
+    "grep": "搜索内容",
+    "todo": "待办事项",
+    "fetch_url": "读取网页",
+    "wait_for": "等待",
+    "wait_any": "任意任务",
+    "background_task": "后台任务",
+    "ask_user": "询问用户",
+    "exit_plan": "实施计划",
+    "wrap_off": "关闭自动换行",
+    "wrap_on": "自动换行",
+    "copy_code": "复制代码",
+    "lines": "{count} 行",
+    "from_line": " · 从 {line} 行",
+    "command": "命令",
+    "output": "输出",
+    "stopped": "已停止",
+    "no_output": "无输出",
+    "agents_complete": "{done}/{total} 完成",
+    "done": "完成",
+    "failed": "失败",
+    "open_file_right": "在右侧打开文件",
+    "plan_pending": "待确认",
+    "plan_rejected": "已拒绝",
+    "plan_approved": "计划已批准",
+    "plan_waiting": "等待计划确认",
+    "plan_not_approved": "计划未批准",
+    "waiting_approval": "等待批准"
+  },
+  "store": {
+    "new_task": "新任务",
+    "error": {
+      "event_parse": "事件解析失败：{error}",
+      "invalid_plugin_envelope": "无效的插件协议信封",
+      "plugin_runtime": "插件运行失败：{message}",
+      "plugin_event_parse": "插件事件解析失败：{error}",
+      "unknown": "未知错误",
+      "stop_turn_first": "请先停止当前回合，再执行这个命令。",
+      "send_first": "请先发送一条消息创建会话。"
+    },
+    "current_session": "当前会话",
+    "compacting": "正在压缩上下文…",
+    "agent_unavailable": "Agent 不可用"
+  },
+  "question": {
+    "progress": "问题 {current} / {total}",
+    "multi_hint": "可选择多项，也可以填写其他回答。",
+    "other_placeholder": "其他回答（可选）",
+    "skip": "跳过",
+    "previous": "上一题",
+    "next": "下一题",
+    "submit": "提交"
+  },
+  "terminal": {
+    "exited_suffix": "（已退出）",
+    "close_tab": "关闭终端标签",
+    "new_tab": "新建终端标签",
+    "collapse": "折叠终端",
+    "empty": "没有终端",
+    "new": "新建终端",
+    "text_selected": "已选择终端文本",
+    "input_label": "终端输入",
+    "output_label": "终端输出"
+  },
+  "tasks": {
+    "status": {
+      "queued": "排队中",
+      "running": "运行中",
+      "completed": "完成",
+      "failed": "失败",
+      "timed_out": "超时",
+      "killed": "已停止",
+      "lost": "已丢失"
+    },
+    "filter": {
+      "running": "运行中",
+      "finished": "已完成",
+      "all": "全部"
+    },
+    "empty": "暂无任务",
+    "background_terminal": "后台终端",
+    "background_agent": "后台 Agent",
+    "changes": "变更",
+    "todo_count": "{done}/{total} 待办",
+    "todos": "待办事项"
+  },
+  "composer": {
+    "select_workspace": "选择工作区",
+    "search_workspace": "搜索工作区",
+    "open_folder": "打开文件夹",
+    "no_workspace": "不在工作区中工作",
+    "no_matching_workspaces": "没有匹配的工作区",
+    "clear_workspace": "清除工作区",
+    "remove_attachment": "移除 {path}",
+    "remove_image": "移除图片",
+    "image_mention": "提及图片 {index}",
+    "no_matching_files": "没有匹配文件",
+    "send": "发送",
+    "image_limit": "每条消息最多添加 8 张图片",
+    "steer_hint": "继续输入以引导后续修改",
+    "queue_hint": "继续输入以排队后续修改",
+    "paused_hint": "提出后续修改要求",
+    "steer_keys": "按 Enter 发送引导消息 · 按 Ctrl+Enter 加入队列",
+    "queue_keys": "按 Enter 加入队列 · 按 Ctrl+Enter 发送引导消息",
+    "stop": "停止",
+    "close_image": "关闭图片",
+    "plan_mode": "Plan 模式",
+    "plan_mode_description": "先制定计划，批准后再修改文件",
+    "close_plan_mode": "关闭 Plan 模式",
+    "select_model": "选择模型",
+    "search_models": "搜索模型或提供商",
+    "no_models": "没有匹配的可用模型",
+    "reasoning_level": "推理等级",
+    "reasoning_off": "关闭",
+    "manage_models": "管理模型"
+  },
+  "permissions": {
+    "mode": {
+      "read_only": "只读",
+      "read_only_description": "读取和分析，不修改工作区",
+      "auto": "自动",
+      "auto_description": "在工作区内执行，危险操作仍需批准",
+      "full": "完全访问",
+      "full_description": "不使用沙箱，可修改任意文件",
+      "custom": "自定义"
+    },
+    "full_access": {
+      "title": "启用完全访问？",
+      "description": "Agent 将不受工作区沙箱限制，也不会进行常规操作审批。仅在你信任当前任务时启用。",
+      "enable": "启用完全访问"
+    }
+  },
+  "approval": {
+    "danger": {
+      "fork_bomb": "可能创建大量进程并耗尽系统资源",
+      "rm_rf_root": "可能递归删除系统或工作区文件",
+      "disk_format": "可能格式化磁盘并破坏数据",
+      "dd_block": "可能直接覆写磁盘或块设备",
+      "shutdown": "可能关闭或重启计算机",
+      "chmod_root": "可能修改系统目录权限",
+      "chmod_world_writable": "可能递归将文件设为全局可写（chmod 777）",
+      "pipe_to_shell": "可能将远程或解码内容直接交给 Shell 执行",
+      "git_force_push": "可能强制推送并覆盖远程 Git 历史",
+      "dynamic_command": "使用了动态 Shell 命令名，无法验证安全性",
+      "prefix": "高危命令：{reason}"
+    },
+    "plan_prompt": "是否按此计划开始实施？",
+    "tool_prompt": "需要批准：{tool}",
+    "write_dirs": "请求写入以下目录：",
+    "cwd": "工作目录：{cwd}",
+    "revise_placeholder": "说明需要怎样修改计划",
+    "cancel_revise": "取消修改",
+    "revise_plan": "修改计划",
+    "allow_project": "项目内允许",
+    "allow_session": "本次会话允许 Ctrl+Enter",
+    "deny": "拒绝 Esc",
+    "approve_plan": "批准计划 Enter",
+    "allow": "允许 Enter",
+    "submit_revisions": "提交修改意见"
+  },
+  "status": {
+    "generating": "生成中",
+    "turns_steps": "{turns} 回合 · {steps} 步",
+    "session_activity": "会话活动",
+    "completed_turns": "已完成回合",
+    "api_steps": "API 步数",
+    "model_time": "模型累计耗时",
+    "tool_time": "工具累计耗时",
+    "tool_exec": "纯工具执行累计",
+    "tool_wall": "工具关键路径累计",
+    "user_wait": "人工等待累计",
+    "review": "审批审核累计",
+    "hook_time": "Hook 累计耗时",
+    "compact": "上下文压缩累计",
+    "overhead": "其他开销累计",
+    "first_token": "首 Token 平均延迟",
+    "decode_speed": "加权解码速度",
+    "cache_suffix": "缓存命中 {percent}%",
+    "token_usage": "会话 Token 用量",
+    "input": "输入",
+    "cache_read": "缓存读取",
+    "output": "输出",
+    "cache_hit": "缓存命中率",
+    "context_used": "上下文已使用 {percent}%",
+    "system_prompt": "系统提示（估算）",
+    "tool_schema": "工具 Schema（估算）",
+    "messages": "对话（估算）"
+  },
+  "turn": {
+    "stopped": "已停止",
+    "worked_for": "工作了 ",
+    "processed": "处理完成",
+    "files_changed": "修改了 {count} 个文件",
+    "restore": "还原 {path}",
+    "more_files": "还有 {count} 个文件",
+    "speed_title": "回合速度",
+    "usage_title": "回合 Token 用量",
+    "duration": "回合耗时",
+    "api_steps": "API 步数",
+    "model_time": "模型耗时",
+    "first_token": "首 Token 平均延迟",
+    "tool_time": "工具累计耗时",
+    "tool_exec": "纯工具执行",
+    "tool_wall": "工具关键路径",
+    "user_wait": "等待人工审批 / 提问",
+    "review": "审批审核",
+    "hook_time": "Hook 耗时",
+    "compact": "上下文压缩",
+    "overhead": "其他开销",
+    "decode_speed": "纯解码速度",
+    "input": "输入",
+    "cache_read": "缓存读取",
+    "output": "输出",
+    "cache_hit": "缓存命中率",
+    "truncated": "回复因长度限制被截断",
+    "filtered": "回复因内容过滤而停止",
+    "copy_answer": "复制回答",
+    "fork": "从此回合 Fork",
+    "hooks_summary": "查看 Hook 汇总",
+    "finished": "回合结束 · {duration}",
+    "hook": {
+      "finished": "完成",
+      "blocked": "已阻止",
+      "failed": "失败"
+    }
+  },
+  "queue": {
+    "drag": "拖动排序",
+    "drag_aria": "拖动排序 {text}",
+    "image_count": {
+      "one": "{count} 张图片",
+      "other": "{count} 张图片"
+    },
+    "move_to_queue": "转为排队",
+    "move_to_queue_aria": "移到队列 {text}",
+    "convert_to_steer": "转为引导",
+    "convert_to_steer_aria": "转为引导 {text}",
+    "edit": "撤回编辑",
+    "edit_aria": "编辑 {text}",
+    "send_now": "立即",
+    "send_now_aria": "立即发送 {text}",
+    "cancel": "取消排队",
+    "cancel_aria": "取消排队 {text}",
+    "pause": {
+      "stopped": "由于你中断了当前响应，队列已暂停",
+      "restarted": "由于应用重启，队列已暂停（内容未丢失）",
+      "error": "由于当前响应出错，队列已暂停（内容未丢失）"
+    },
+    "resume": "继续",
+    "held_prompt": "队列已暂停。新消息“{text}”如何处理？",
+    "clear_and_send": "清空并发送",
+    "keep_and_enqueue": "保留并入队",
+    "steer_lane": "当前回合引导",
+    "pending_lane": "后续消息队列"
+  },
+  "right_panel": {
+    "tab": {
+      "changes": "变更",
+      "subagent": "子代理",
+      "task": "任务输出",
+      "compact": "压缩摘要"
+    },
+    "add_tab": "新建标签页",
+    "tab_list": "标签页列表",
+    "search_tabs": "搜索标签页…",
+    "open_tabs": "打开的标签页",
+    "no_matching_tabs": "没有匹配的标签页",
+    "file_changes": "文件变更",
+    "refresh_changes": "刷新变更",
+    "diff": {
+      "binary": "二进制文件无法显示文本 diff",
+      "too_large": "文件过大，无法显示 diff",
+      "truncated": "diff 已截断"
+    },
+    "reading_changes": "正在读取变更…",
+    "not_git": "当前目录不是 Git 仓库",
+    "unstaged": "未暂存",
+    "staged": "已暂存",
+    "no_changes": "没有文件变更",
+    "first_2mb": "仅显示前 2 MB",
+    "exit_code": " · 退出码 {code}",
+    "tool": "工具",
+    "loading_subagent": "正在读取子代理…",
+    "running": "运行中",
+    "no_conversation": "暂无对话记录",
+    "close_tab": "关闭 {name}",
+    "close_panel": "关闭右侧面板",
+    "fullscreen": "全屏",
+    "restore": "退出全屏"
+  },
+  "image_viewer": {
+    "previous": "上一张图片",
+    "next": "下一张图片",
+    "zoom_out": "缩小",
+    "zoom_in": "放大",
+    "fit": "适配"
+  },
+  "messages": {
+    "image_label": "图片 {index}",
+    "expand": "展开消息",
+    "collapse": "收起消息",
+    "copy_user": "复制用户消息",
+    "retract_edit": "撤回并编辑",
+    "thinking": "思考中",
+    "thought_for": "思考了 ",
+    "thought_process": "思考过程",
+    "sources": "来源",
+    "compacted": "上下文已压缩（{before} → {after} tokens）",
+    "compacted_plain": "上下文已压缩",
+    "view_summary": "查看摘要",
+    "activity": {
+      "grep": {
+        "one": "搜索了 {count} 个模式",
+        "other": "搜索了 {count} 个模式"
+      },
+      "glob": {
+        "one": "找了 {count} 次文件",
+        "other": "找了 {count} 次文件"
+      },
+      "command": {
+        "one": "运行了 {count} 条命令",
+        "other": "运行了 {count} 条命令"
+      },
+      "web_search": {
+        "one": "网络搜索了 {count} 次",
+        "other": "网络搜索了 {count} 次"
+      },
+      "reasoning": {
+        "one": "思考了 {count} 次",
+        "other": "思考了 {count} 次"
+      },
+      "tools": {
+        "one": "执行了 {count} 次工具调用",
+        "other": "执行了 {count} 次工具调用"
+      },
+      "failures": {
+        "one": "（{count} 失败）",
+        "other": "（{count} 失败）"
+      }
+    },
+    "notification": {
+      "sent_by_shell": "由后台发送（Shell）",
+      "sent_by_agent": "由后台发送（Agent）",
+      "duration": "耗时 {duration}"
+    },
+    "retry": {
+      "rate_limit": "请求受限",
+      "server": "服务错误",
+      "empty_completion": "空响应",
+      "network": "网络错误",
+      "progress": "正在重试（{attempt}/{max}）",
+      "wait": "，{secs} 秒后"
+    },
+    "retry_now": "立即重试",
+    "working_for": "正在工作 ",
+    "hook_running": "正在运行 Hook · {event}（{label}）",
+    "hooks_untrusted": {
+      "one": "{path} 中有 {count} 个项目 Hook 尚未信任",
+      "other": "{path} 中有 {count} 个项目 Hook 尚未信任"
+    },
+    "trust": "信任",
+    "ignore": "忽略",
+    "latest": "最新消息",
+    "jump_turn": "跳转到回合 {index}",
+    "no_text_reply": "暂无文字回复",
+    "search_placeholder": "搜索当前对话",
+    "prev_result": "上一个结果",
+    "next_result": "下一个结果",
+    "close_search": "关闭搜索",
+    "close_image": "关闭图片"
+  },
+  "directory_picker": {
+    "title": "选择文件夹",
+    "up": "上级目录",
+    "path_placeholder": "输入文件夹路径…",
+    "go": "前往",
+    "loading": "正在读取目录…",
+    "empty": "此目录下没有子文件夹",
+    "select": "选择此文件夹"
+  }
+}

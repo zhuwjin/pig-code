@@ -542,7 +542,13 @@ async fn run(mut tui: Tui) -> Result<(), String> {
                             tui.client.send_op(Op::OpenSession { session_id })?;
                         }
                     }
-                    Ok(DaemonMessage::Subscription { .. }) => {}
+                    Ok(
+                        DaemonMessage::Subscription { .. }
+                        | DaemonMessage::RpcResult { .. }
+                        | DaemonMessage::PluginEvent { .. }
+                        | DaemonMessage::TerminalOutput { .. }
+                        | DaemonMessage::TerminalExit { .. },
+                    ) => {}
                     Ok(DaemonMessage::Batch(batch)) => {
                         for event in batch.events {
                             tui.apply(event);

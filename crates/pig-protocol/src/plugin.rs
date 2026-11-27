@@ -780,6 +780,7 @@ pub struct PluginPackageInfo {
 
 pub const PLUGIN_MANIFEST_FILE: &str = "pig-plugin.json";
 pub const PLUGIN_BACKEND_BUNDLE_FILE: &str = ".pig-backend.nshc";
+pub const PLUGIN_BACKEND_JS_FILE: &str = ".pig-backend.js";
 pub const PLUGIN_BACKEND_VERSION_FILE: &str = ".pig-backend-version";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

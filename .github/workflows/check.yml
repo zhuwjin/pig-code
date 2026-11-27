@@ -50,7 +50,18 @@ jobs:
         run: cargo check --all-targets
       - name: Run Rust tests
         run: cargo test --workspace
-      - name: Check NSH app
+      - name: Build pig-daemon for desktop tests
+        run: cargo build --bin pig-daemon
+      - name: Add pig-daemon to PATH (macOS and Linux)
+        if: runner.os != 'Windows'
+        run: echo "$GITHUB_WORKSPACE/target/debug" >> "$GITHUB_PATH"
+      - name: Add pig-daemon to PATH (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Add-Content -Path $env:GITHUB_PATH -Value "$env:GITHUB_WORKSPACE\target\debug"
+      - name: Check NSH desktop app
+        working-directory: apps/desktop
         run: nsh check
-      - name: Run NSH tests
+      - name: Run NSH desktop tests
+        working-directory: apps/desktop
         run: nsh test

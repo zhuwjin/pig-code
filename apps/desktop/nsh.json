@@ -1,0 +1,39 @@
+{
+  "name": "pig-code",
+  "id": "com.example.pigcode",
+  "version": "1.0.0",
+  "build": 1,
+  "theme": "theme.json",
+  "appearance": "system",
+  "capabilities": {
+    "fs": {
+      "read": ["${homeDir}/.pigcode"],
+      "write": ["${homeDir}"]
+    },
+    "network": {
+      "hosts": ["127.0.0.1", "localhost", "::1"]
+    },
+    "process": {
+      "execute": ["pig-daemon"],
+      "env": [
+        "PIG_DAEMON_URL",
+        "PIG_DAEMON_TOKEN",
+        "PIG_DATA_DIR",
+        "PIG_SELFTEST_REPO_ROOT",
+        "LOCALAPPDATA",
+        "XDG_DATA_HOME"
+      ]
+    },
+    "application": true,
+    "clipboard": true,
+    "picker": true,
+    "homeDir": true,
+    "openUrl": true,
+    "notifications": true
+  },
+  "resolve": {
+    "alias": {
+      "pig/plugin": "../../sdk/pig-plugin/mod.ts"
+    }
+  }
+}

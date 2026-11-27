@@ -137,9 +137,12 @@ pub async fn download_signed_package(
     package: &PluginMarketplacePackage,
 ) -> Result<SignedPluginDownload, CoreError> {
     validate_package(package)?;
-    if package.files.len() != 1 || !package.files[0].path.ends_with(".nshpkg") {
+    if package.files.len() != 1
+        || (!package.files[0].path.ends_with(".pigpkg")
+            && !package.files[0].path.ends_with(".nshpkg"))
+    {
         return Err(manifest(
-            "a signed marketplace package must contain exactly one .nshpkg file",
+            "a signed marketplace package must contain exactly one .pigpkg or .nshpkg file",
         ));
     }
     let file = &package.files[0];
