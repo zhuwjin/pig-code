@@ -725,7 +725,7 @@ pub enum Event {
         duration_ms: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         run: Option<AgentRunEnvelope>,
-        /// Turn token stats (None for aborted turns or turns without usage data)
+        /// Turn stats (None when neither token usage nor timing data exists)
         #[serde(default)]
         stats: Option<TurnUsageStats>,
         /// Present when the final model response ended through length or content filtering.

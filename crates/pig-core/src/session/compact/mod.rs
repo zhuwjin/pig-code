@@ -108,9 +108,7 @@ pub(crate) fn context_recovery_footer(path: &Path, windows: &[(usize, usize)]) -
     for (ix, (start, end)) in windows.iter().enumerate() {
         let label = format!("  window {}: lines {start}-{end}", ix + 1);
         if ix == last_ix {
-            window_lines.push(format!(
-                "{label}  <- the conversation this note summarizes"
-            ));
+            window_lines.push(format!("{label}  <- the conversation this note summarizes"));
         } else {
             window_lines.push(label);
         }
@@ -201,6 +199,8 @@ impl Session {
         tx: &async_channel::Sender<Event>,
         cancel: &CancellationToken,
     ) -> CompactOutcome {
+        let timing = self.run_state.active.then(|| self.run_state.timing.clone());
+        let _compact_timer = TurnTiming::optional_guard(&timing, TimingKind::Compact);
         if let Some(config) = config {
             self.select_plugin_tools(config, tx).await;
         }
@@ -227,6 +227,8 @@ impl Session {
         tx: &async_channel::Sender<Event>,
         cancel: &CancellationToken,
     ) -> CompactOutcome {
+        let timing = self.run_state.active.then(|| self.run_state.timing.clone());
+        let _compact_timer = TurnTiming::optional_guard(&timing, TimingKind::Compact);
         let automatic = trigger.automatic();
         // A manual compaction needs a model for the summary sidecar. Without
         // one there is no summary to install, and silently truncating the

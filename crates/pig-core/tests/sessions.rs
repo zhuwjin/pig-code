@@ -844,7 +844,7 @@ async fn restart_restores_todos_changes_and_revert() {
         .await
         .unwrap();
     let replay_b = recv_until(&events2, Duration::from_secs(10), |e| {
-        matches!(e, Event::TurnComplete { .. })
+        matches!(e, Event::TurnComplete { stats: None, .. })
     })
     .await;
     let todo_snapshot = replay_b.iter().find_map(|e| match e {

@@ -61,16 +61,76 @@ impl Session {
             // leave the file diverging from memory with no way to repair it.
             return;
         }
+        let rollout_path = self
+            .rollout
+            .as_ref()
+            .map(|rollout| rollout.path().to_path_buf());
+        let is_subagent = self.is_subagent();
+        let mut search_record = None;
+        let mut advance_search_cursor = false;
+        let mut rebuild_search = false;
         let Some(rollout) = &mut self.rollout else {
             return;
         };
-        if let Err(structured) = crate::rollout::ConversationStore::append(rollout, record) {
-            tracing::error!(
-                session_id = %self.agent.id,
-                error = ?structured,
-                "rollout append failed; later records for this session are not persisted"
-            );
-            self.rollout_failure = Some(structured);
+        match crate::rollout::ConversationStore::append(rollout, record) {
+            Ok(()) if !is_subagent => {
+                if matches!(record, RolloutRecord::Recall) {
+                    rebuild_search = true;
+                } else {
+                    let indexed = crate::rollout::content_index_record(
+                        record,
+                        rollout.record_offset(),
+                        crate::model_io::now_ms(),
+                    );
+                    if indexed.is_some() || matches!(record, RolloutRecord::TurnStats { .. }) {
+                        advance_search_cursor = true;
+                        search_record = indexed;
+                    }
+                }
+            }
+            Ok(()) => {}
+            Err(structured) => {
+                tracing::error!(
+                    session_id = %self.agent.id,
+                    error = ?structured,
+                    "rollout append failed; later records for this session are not persisted"
+                );
+                self.rollout_failure = Some(structured);
+            }
+        }
+        if self.rollout_failure.is_none()
+            && !is_subagent
+            && let Some(path) = rollout_path
+        {
+            let result = if rebuild_search {
+                crate::rollout::read_content_index_snapshot(&path)
+                    .map_err(|error| format!("read recalled session search snapshot: {error:?}"))
+                    .and_then(|snapshot| {
+                        self.store
+                            .lock()
+                            .expect("store lock")
+                            .replace_session_search_snapshot(&snapshot, &path)
+                    })
+            } else if advance_search_cursor {
+                self.store.lock().expect("store lock").index_session_record(
+                    &self.agent.id,
+                    &self.agent.cwd,
+                    search_record.as_ref(),
+                    &path,
+                )
+            } else {
+                Ok(())
+            };
+            if let Err(error) = result {
+                if rebuild_search {
+                    let _ = self
+                        .store
+                        .lock()
+                        .expect("store lock")
+                        .delete_session_search(&self.agent.id);
+                }
+                tracing::warn!(session_id = %self.agent.id, %error, "derived session search update failed");
+            }
         }
         if tool_result && self.rollout_failure.is_none() {
             self.sync_rollout();

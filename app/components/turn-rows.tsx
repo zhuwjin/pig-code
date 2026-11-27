@@ -3,7 +3,7 @@ import { Button } from "nsh/base";
 import { t } from "../i18n";
 import type { TurnState } from "../protocol";
 import { toggleExpanded, type UiContext } from "../ui-context";
-import { changeTotals, formatClock, formatCompactDuration, turnDurationMs, turnSpeed } from "../conversation";
+import { changeTotals, formatClock, formatCompactDuration, turnDurationMs, turnSpeed, turnTimingBreakdown } from "../conversation";
 import { Icon } from "./icon";
 import { formatSpeedReading, formatStatDuration, formatTokenReading, StatsPopover } from "./stats";
 
@@ -144,8 +144,10 @@ export function TurnActionsRow(props: UiContext & {
                   title={t("turn.speed_title")}
                   rows={[
                     { label: t("turn.duration"), value: formatStatDuration(turnDurationMs(turn()) ?? current.duration_ms) },
-                    { label: t("turn.model_time"), value: formatStatDuration(current.api_ms) },
-                    ...(current.tool_ms > 0 ? [{ label: t("turn.tool_time"), value: formatStatDuration(current.tool_ms) }] : []),
+                    ...turnTimingBreakdown(current).map((row) => ({
+                      label: t(row.key),
+                      value: formatStatDuration(row.value),
+                    })),
                     ...(current.ttft_ms > 0 && current.ttft_steps > 0 ? [{
                       label: t("turn.first_token"),
                       value: formatStatDuration(current.ttft_ms / current.ttft_steps),

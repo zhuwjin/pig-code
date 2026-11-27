@@ -42,10 +42,78 @@ fn stats() -> RolloutRecord {
         ttft_steps: 0,
         api_steps: 1,
         tool_ms: 0,
+        user_wait_ms: 0,
+        tool_exec_ms: 0,
+        tool_wall_ms: 0,
+        compact_ms: 0,
+        hook_ms: 0,
+        review_ms: 0,
+        overhead_ms: 0,
         has_usage: true,
         finish_reason: None,
         turn_id: None,
     }
+}
+
+#[test]
+fn legacy_turn_stats_default_all_critical_path_fields() {
+    let legacy = serde_json::json!({
+        "type": "turn_stats",
+        "input": 1,
+        "cache_read": 2,
+        "output": 3,
+        "duration_ms": 100,
+        "ended_at_ms": 900,
+        "api_ms": 60,
+        "ttft_ms": 10,
+        "ttft_steps": 1,
+        "api_steps": 1,
+        "tool_ms": 20,
+        "has_usage": true,
+        "finish_reason": null,
+        "turn_id": "old-turn"
+    });
+    let record: RolloutRecord = serde_json::from_value(legacy).expect("legacy rollout record");
+    let RolloutRecord::TurnStats {
+        user_wait_ms,
+        tool_exec_ms,
+        tool_wall_ms,
+        compact_ms,
+        hook_ms,
+        review_ms,
+        overhead_ms,
+        ..
+    } = record
+    else {
+        panic!("expected TurnStats")
+    };
+    assert_eq!(
+        (
+            user_wait_ms,
+            tool_exec_ms,
+            tool_wall_ms,
+            compact_ms,
+            hook_ms,
+            review_ms,
+            overhead_ms,
+        ),
+        (0, 0, 0, 0, 0, 0, 0)
+    );
+
+    let stats: pig_protocol::TurnUsageStats = serde_json::from_value(serde_json::json!({
+        "input": 1,
+        "cache_read": 2,
+        "output": 3,
+        "duration_ms": 100
+    }))
+    .expect("legacy event stats");
+    assert_eq!(stats.user_wait_ms, 0);
+    assert_eq!(stats.tool_exec_ms, 0);
+    assert_eq!(stats.tool_wall_ms, 0);
+    assert_eq!(stats.compact_ms, 0);
+    assert_eq!(stats.hook_ms, 0);
+    assert_eq!(stats.review_ms, 0);
+    assert_eq!(stats.overhead_ms, 0);
 }
 
 #[test]
@@ -519,6 +587,69 @@ impl Drop for TrustFixture {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);
     }
+}
+
+#[test]
+fn turn_timing_breakdown_persists_and_replays() {
+    let fixture = TrustFixture::new("turn-timing-replay");
+    let mut session = fixture.create(None);
+    let start = std::time::Instant::now();
+    let at = |ms| start + std::time::Duration::from_millis(ms);
+    session
+        .run_state
+        .timing
+        .record(TimingKind::Api, at(0), at(100));
+    session
+        .run_state
+        .timing
+        .record(TimingKind::ToolPhase, at(100), at(250));
+    session
+        .run_state
+        .timing
+        .record(TimingKind::ToolExec, at(110), at(180));
+    session
+        .run_state
+        .timing
+        .record(TimingKind::UserWait, at(180), at(230));
+    session
+        .run_state
+        .timing
+        .record(TimingKind::Hook, at(230), at(250));
+    session
+        .run_state
+        .timing
+        .record(TimingKind::Compact, at(300), at(340));
+    session.run_state.input = 0;
+    session.run_state.output = 0;
+    session.run_state.api_ms = 100;
+    session.run_state.tool_ms = 150;
+    session.run_state.usage_turn_id = Some("turn-timing".to_string());
+    let expected = session
+        .flush_turn_stats(1_000, None)
+        .expect("usage produces stats");
+    assert_eq!(expected.user_wait_ms, 50);
+    assert_eq!(expected.tool_exec_ms, 70);
+    assert_eq!(expected.tool_wall_ms, 80);
+    assert_eq!(expected.compact_ms, 40);
+    assert_eq!(expected.hook_ms, 20);
+    assert_eq!(expected.review_ms, 0);
+    assert_eq!(expected.overhead_ms, 710);
+    session.sync_rollout();
+    drop(session);
+
+    let records = Rollout::load(&fixture.sessions_dir.join("s1.jsonl")).expect("persisted rollout");
+    assert!(records.iter().any(|record| matches!(
+        record,
+        RolloutRecord::TurnStats { has_usage: false, .. }
+    )));
+    let mut resumed = fixture.load(None);
+    let (tx, rx) = async_channel::unbounded();
+    resumed.replay(&records, &tx);
+    let replayed = std::iter::from_fn(|| rx.try_recv().ok()).find_map(|event| match event {
+        Event::TurnComplete { stats, .. } => stats,
+        _ => None,
+    });
+    assert_eq!(replayed, Some(expected));
 }
 
 /// The one trust boundary refreshes every project surface on grant and revoke;

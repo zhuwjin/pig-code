@@ -117,6 +117,9 @@ struct RebuildOutput {
     history: Vec<ChatMsg>,
     user_ixs: Vec<Option<usize>>,
     notification_receipts: HashMap<String, (Option<usize>, pig_protocol::DeliveryChannel)>,
+    /// Search retains compacted history, while Recall truncates this parallel
+    /// record stream at the same logical user-message boundaries.
+    searchable_records: Vec<usize>,
     /// Earliest record index that can still contribute a message to the final
     /// history when a canonical compact applied.
     skip_media_before: Option<usize>,
@@ -140,6 +143,8 @@ fn rebuild_records(
     let mut history = vec![ChatMsg::system(system)];
     let mut provenance: Vec<Option<usize>> = vec![None];
     let mut user_ixs = Vec::new();
+    let mut searchable_records = Vec::new();
+    let mut search_user_ixs: Vec<Option<usize>> = Vec::new();
     let mut active_replay: Option<ActiveReplay> = None;
     let mut skip_media_before: Option<usize> = None;
     let mut notification_receipts = HashMap::new();
@@ -253,6 +258,8 @@ fn rebuild_records(
                 history.push(msg);
                 provenance.push(Some(record_ix));
                 user_ixs.push(Some(history.len() - 1));
+                searchable_records.push(record_ix);
+                search_user_ixs.push(Some(searchable_records.len() - 1));
             }
             RolloutRecord::Assistant {
                 text,
@@ -279,6 +286,7 @@ fn rebuild_records(
                     replay.clone(),
                 ));
                 provenance.push(Some(record_ix));
+                searchable_records.push(record_ix);
                 active_replay = Some(ActiveReplay {
                     assistant_ix,
                     call_ids,
@@ -370,6 +378,7 @@ fn rebuild_records(
                 omitted,
                 tail_len,
                 preserved_user,
+                summary,
                 ..
             } => {
                 finalize_active_replay(&mut history, &mut active_replay);
@@ -499,14 +508,24 @@ fn rebuild_records(
                     history.push(crate::rollout::compaction_note_message(note.clone()));
                     provenance.push(None);
                 }
+                if summary.as_deref().is_some_and(|text| !text.is_empty()) {
+                    searchable_records.push(record_ix);
+                }
+                // Compaction does not remove searchable history, and its
+                // recall tombstones retain their positions in this parallel
+                // stream so repeated Recall still withdraws older turns.
             }
             RolloutRecord::HookContext { text } => {
                 finalize_active_replay(&mut history, &mut active_replay);
                 history.push(ChatMsg::user(text.clone()));
                 provenance.push(Some(record_ix));
+                searchable_records.push(record_ix);
             }
             RolloutRecord::Recall => {
                 finalize_active_replay(&mut history, &mut active_replay);
+                if let Some(Some(index)) = search_user_ixs.pop() {
+                    searchable_records.truncate(index);
+                }
                 match user_ixs.pop() {
                     Some(Some(ix)) => {
                         history.truncate(ix);
@@ -528,8 +547,28 @@ fn rebuild_records(
         history,
         user_ixs,
         notification_receipts,
+        searchable_records,
         skip_media_before,
     }
+}
+
+pub(crate) fn searchable_record_indices(
+    records: &[RolloutRecord],
+) -> std::collections::HashSet<usize> {
+    rebuild_records(
+        records,
+        String::new(),
+        RebuildOptions {
+            media: None,
+            media_root: None,
+            load_media: false,
+            context_window: None,
+            skip_media_before: 0,
+        },
+    )
+    .searchable_records
+    .into_iter()
+    .collect()
 }
 
 #[allow(clippy::too_many_arguments)] // Tool result + media + projection controls stay explicit.

@@ -5,6 +5,7 @@
 //! - todos table: current session todo-list state (full upsert; the event stream no longer persists to JSONL)
 //! - file_changes table: current session file-change state (upsert by path; rows deleted when the net change is zero)
 //! - file_originals table: original-content snapshots of changed files (cross-restart diff baseline / revert)
+//! - session_search_* tables: rebuildable message-granularity FTS5 index and JSONL file cursors
 
 use std::path::{Path, PathBuf};
 
@@ -17,23 +18,32 @@ mod deletion;
 mod execution;
 pub use execution::ExecutionClaim;
 mod runtime;
+mod search;
 mod tasks;
+pub use search::{
+    SearchBackfillReport, SessionSearchHit, SessionSearchQuery, backfill_session_search,
+};
 pub use tasks::BackgroundTask;
 
 /// Current SQLite schema version tracked via `PRAGMA user_version`.
 /// Bump this and append a transactional step to `MIGRATIONS` whenever tables
 /// or columns evolve.
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 type MigrationFn = fn(&rusqlite::Transaction<'_>) -> Result<(), String>;
 
-const MIGRATIONS: &[(u32, MigrationFn)] = &[(1, migrate_v1_baseline)];
+const MIGRATIONS: &[(u32, MigrationFn)] =
+    &[(1, migrate_v1_baseline), (2, migrate_v2_session_search)];
 
 fn migrate_v1_baseline(tx: &rusqlite::Transaction<'_>) -> Result<(), String> {
     tx.execute_batch(BASELINE_SCHEMA)
         .map_err(|e| format!("store.sqlite v1 baseline schema failed: {e}"))?;
     runtime::create_schema(tx)?;
     Ok(())
+}
+
+fn migrate_v2_session_search(tx: &rusqlite::Transaction<'_>) -> Result<(), String> {
+    search::create_schema(tx)
 }
 
 fn apply_migrations(conn: &mut Connection) -> Result<(), String> {
@@ -217,6 +227,11 @@ impl Store {
         conn.execute_batch(BASELINE_SCHEMA)
             .map_err(|e| format!("store.sqlite ensure baseline schema failed: {e}"))?;
         runtime::create_schema(&conn)?;
+        if let Err(error) = search::ensure_schema(&conn) {
+            // Search is derived state: a damaged virtual table must not prevent
+            // sessions, usage and other durable stores from opening.
+            tracing::error!("session search schema self-heal failed: {error}");
+        }
         Ok(Self { conn })
     }
 
@@ -374,7 +389,13 @@ impl Store {
             .commit()
             .map_err(|error| pig_protocol::CoreError::TaskStore {
                 detail: error.to_string(),
-            })
+            })?;
+        if let Err(error) = self.delete_session_search(id) {
+            // The durable session row is already gone and search queries exclude
+            // it; a later backfill/rebuild can clear this derived residue.
+            tracing::warn!(session_id = %id, %error, "session search cleanup failed");
+        }
+        Ok(())
     }
 
     pub fn get_session(&self, id: &str) -> Option<SessionMeta> {

@@ -100,6 +100,21 @@ pub fn fork_session(
         .sync()
         .map_err(|error| error.into_core(rollout.path()))?;
     store.lock().expect("store lock").upsert_session(&meta);
+    let new_path = sessions_dir.join(format!("{new_id}.jsonl"));
+    match crate::rollout::read_content_index_snapshot(&new_path) {
+        Ok(snapshot) => {
+            if let Err(error) = store
+                .lock()
+                .expect("store lock")
+                .replace_session_search_snapshot(&snapshot, &new_path)
+            {
+                tracing::warn!(session_id = %new_id, %error, "forked session search indexing failed");
+            }
+        }
+        Err(error) => {
+            tracing::warn!(session_id = %new_id, ?error, "forked session search snapshot failed");
+        }
+    }
     Ok(new_id)
 }
 

@@ -25,7 +25,7 @@ pub use config::{
     McpEntryError, McpEntryShape, McpHttpConfig, McpOAuthConfig, McpServerConfig, McpStdioConfig,
     McpTransport, validate_server,
 };
-pub use elicitation::build_session_elicitation_handler;
+pub(crate) use elicitation::build_session_elicitation_handler;
 pub use meta_tools::{
     MCP_GET_PROMPT_TOOL, MCP_LIST_PROMPTS_TOOL, MCP_LIST_RESOURCES_TOOL, MCP_READ_RESOURCE_TOOL,
 };
@@ -717,7 +717,8 @@ mod tests {
                     };
 
                     // Client reply to our server-initiated elicitation/create request
-                    if msg.get("method").is_none() && msg.get("id").and_then(|v| v.as_u64()) == Some(77)
+                    if msg.get("method").is_none()
+                        && msg.get("id").and_then(|v| v.as_u64()) == Some(77)
                     {
                         *elicit_reply.lock().await = Some(msg["result"].clone());
                         elicit_notify.notify_waiters();
@@ -940,6 +941,7 @@ mod tests {
             "sess-1".to_string(),
             pending_questions.clone(),
             event_tx.clone(),
+            Default::default(),
         );
         let manager = McpManager::connect_all_with_trust_and_elicitation(
             &workspace,
@@ -967,9 +969,24 @@ mod tests {
                 "missing tool {expected}"
             );
         }
-        assert!(manager.tool_named(MCP_LIST_RESOURCES_TOOL).unwrap().read_only());
-        assert!(manager.tool_named(MCP_READ_RESOURCE_TOOL).unwrap().read_only());
-        assert!(manager.tool_named(MCP_LIST_PROMPTS_TOOL).unwrap().read_only());
+        assert!(
+            manager
+                .tool_named(MCP_LIST_RESOURCES_TOOL)
+                .unwrap()
+                .read_only()
+        );
+        assert!(
+            manager
+                .tool_named(MCP_READ_RESOURCE_TOOL)
+                .unwrap()
+                .read_only()
+        );
+        assert!(
+            manager
+                .tool_named(MCP_LIST_PROMPTS_TOOL)
+                .unwrap()
+                .read_only()
+        );
         assert!(manager.tool_named(MCP_GET_PROMPT_TOOL).unwrap().read_only());
 
         let (task_tx, _task_rx) = async_channel::bounded(16);
@@ -995,7 +1012,10 @@ mod tests {
         let listed = manager
             .tool_named(MCP_LIST_RESOURCES_TOOL)
             .unwrap()
-            .execute(serde_json::json!({}), make_ctx(&workspace, &mut tracker, &tool_state))
+            .execute(
+                serde_json::json!({}),
+                make_ctx(&workspace, &mut tracker, &tool_state),
+            )
             .await
             .expect("list resources");
         assert!(listed.output.contains("docs://guide"), "{}", listed.output);
@@ -1018,10 +1038,17 @@ mod tests {
         let prompts = manager
             .tool_named(MCP_LIST_PROMPTS_TOOL)
             .unwrap()
-            .execute(serde_json::json!({}), make_ctx(&workspace, &mut tracker, &tool_state))
+            .execute(
+                serde_json::json!({}),
+                make_ctx(&workspace, &mut tracker, &tool_state),
+            )
             .await
             .expect("list prompts");
-        assert!(prompts.output.contains("release_notes"), "{}", prompts.output);
+        assert!(
+            prompts.output.contains("release_notes"),
+            "{}",
+            prompts.output
+        );
 
         let prompt = manager
             .tool_named(MCP_GET_PROMPT_TOOL)
@@ -1068,7 +1095,10 @@ mod tests {
         let deploy_res = manager
             .tool_named("mcp__remote_demo__deploy")
             .unwrap()
-            .execute(serde_json::json!({}), make_ctx(&workspace, &mut tracker, &tool_state))
+            .execute(
+                serde_json::json!({}),
+                make_ctx(&workspace, &mut tracker, &tool_state),
+            )
             .await
             .expect("deploy with elicitation");
         answer_task.await.expect("answer task");

@@ -19,6 +19,7 @@ pub(crate) async fn exec_tool_gated_ctx(
     tx: &async_channel::Sender<Event>,
     cancel: &CancellationToken,
 ) -> GatedToolOutcome {
+    let _tool_phase = TurnTiming::optional_guard(&ctx.timing, TimingKind::ToolPhase);
     if cancel.is_cancelled() {
         return GatedToolOutcome::Cancelled;
     }
@@ -87,6 +88,7 @@ pub(crate) async fn exec_tool_gated_ctx(
             item_id,
         )
         .with_transcript(ctx.history);
+        let _hook_timer = TurnTiming::optional_guard(&ctx.timing, TimingKind::Hook);
         let effects = crate::hooks::run_event(
             ctx.hooks,
             crate::hooks::HookEvent::PreToolUse,
@@ -135,7 +137,9 @@ pub(crate) async fn exec_tool_gated_ctx(
             .any(|extra| extra.name() == call.name && extra.is_plugin());
     let perm_subject = match call.name.as_str() {
         name if crate::tool::is_exec_command(name) => bash_command.clone(),
-        "Write" | "Edit" | tool::APPLY_PATCH_TOOL | "FetchURL" => Some(tool::approval_subject(call)),
+        "Write" | "Edit" | tool::APPLY_PATCH_TOOL | "FetchURL" => {
+            Some(tool::approval_subject(call))
+        }
         name if name.starts_with("mcp__") || plugin_tool => Some(call.name.clone()),
         _ => None,
     };
@@ -227,7 +231,10 @@ pub(crate) async fn exec_tool_gated_ctx(
     // user directly. Write/Edit ask to write, Read/ReadMediaFile ask to read a
     // file, Grep/Glob ask to list a directory (they never read one file's
     // content through this path — their per-file reads are filtered separately).
-    let file_tool_is_write = matches!(call.name.as_str(), "Write" | "Edit" | tool::APPLY_PATCH_TOOL);
+    let file_tool_is_write = matches!(
+        call.name.as_str(),
+        "Write" | "Edit" | tool::APPLY_PATCH_TOOL
+    );
     let file_tool_lists = matches!(call.name.as_str(), "Grep" | "Glob");
     let file_targets = tool::file_tool_targets(ctx.cwd, call);
     let file_target = file_targets.first().cloned();
@@ -595,6 +602,7 @@ pub(crate) async fn exec_tool_gated_ctx(
             item_id,
         )
         .with_transcript(ctx.history);
+        let _hook_timer = TurnTiming::optional_guard(&ctx.timing, TimingKind::Hook);
         let effects = crate::hooks::run_event(
             ctx.hooks,
             crate::hooks::HookEvent::PermissionRequest,
@@ -844,6 +852,7 @@ The sandbox stays on: ordinary paths become writable, but protected files, deny 
                 danger_key,
                 requested_write_roots,
                 available_decisions,
+                timing: ctx.timing.clone(),
             },
             tx.clone(),
         );
@@ -954,6 +963,7 @@ The sandbox stays on: ordinary paths become writable, but protected files, deny 
         }
     }
     let result = {
+        let _tool_exec = TurnTiming::optional_guard(&ctx.timing, TimingKind::ToolExec);
         let tool_ctx = ToolContext {
             cwd: ctx.cwd,
             tracker: ctx.tracker,
@@ -985,9 +995,7 @@ The sandbox stays on: ordinary paths become writable, but protected files, deny 
         let stream_session_id = ctx.session_id.to_string();
         let stream_item_id = item_id.to_string();
         let output_sink: crate::task::OutputDeltaSink = Arc::new(move |chunk: &str| {
-            if chunk.is_empty()
-                || !stream_active.load(std::sync::atomic::Ordering::Acquire)
-            {
+            if chunk.is_empty() || !stream_active.load(std::sync::atomic::Ordering::Acquire) {
                 return;
             }
             let _ = stream_tx.try_send(Event::ToolOutputDelta {
@@ -1050,6 +1058,7 @@ The sandbox stays on: ordinary paths become writable, but protected files, deny 
         .with_response(&output)
         .with_interrupt(false)
         .with_transcript(ctx.history);
+        let _hook_timer = TurnTiming::optional_guard(&ctx.timing, TimingKind::Hook);
         let effects = crate::hooks::run_event(ctx.hooks, event, payload, &run).await;
         if effects.suppress_output {
             output = "(tool output suppressed by a hook)".to_string();

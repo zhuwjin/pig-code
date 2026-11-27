@@ -134,6 +134,7 @@ impl Session {
             projected_input_pdf: None,
             recorded_prompt: None,
             run_state: Default::default(),
+            turn_timing: parent.turn_timing.clone(),
             agent_seq: 0,
             tool_item_seq: 0,
             repeat: Default::default(),
@@ -584,6 +585,11 @@ impl Session {
             ownership: rt.ownership.clone(),
             mcp_inherits_all: sub.mcp_inherits_all,
             trusted: sub.trusted,
+            timing: self
+                .turn_timing
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone(),
         };
         for (offset, call) in calls[start..end].iter().enumerate() {
             let call_ix = start + offset;
@@ -903,6 +909,11 @@ impl Session {
                 extra_tools: &extra_tools,
                 hooks: &self.hooks,
                 history: &self.agent.history,
+                timing: self
+                    .turn_timing
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone(),
             };
             let outcome = exec_tool_gated_ctx(
                 &mut gate,
@@ -1534,6 +1545,7 @@ struct ChildBatchContext {
     ownership: String,
     mcp_inherits_all: bool,
     trusted: bool,
+    timing: Option<Arc<super::TurnTiming>>,
 }
 
 fn child_extra_tools_for(
@@ -1597,6 +1609,7 @@ async fn execute_child_batch_tool(
         extra_tools: &extra_tools,
         hooks: &context.hooks,
         history: &context.history,
+        timing: context.timing.clone(),
     };
     exec_tool_gated_ctx(
         &mut gate,

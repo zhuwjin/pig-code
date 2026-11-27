@@ -72,6 +72,16 @@ async fn recall_excludes_turn_and_keeps_stats() {
         2,
         "both turns' TurnStats must survive the recall: {rollout}"
     );
+    let search_store = pig_core::store::Store::open(&data_dir).expect("open search store");
+    assert!(
+        search_store.search_session_content("once").unwrap().is_empty(),
+        "the recalled turn must leave the FTS index"
+    );
+    assert_eq!(
+        search_store.search_session_content("mock").unwrap().len(),
+        1,
+        "the earlier turn remains searchable"
+    );
 
     // Live context exclusion: the next turn's request must not carry the
     // recalled message (the earlier turn and the new message stay)

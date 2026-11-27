@@ -176,6 +176,7 @@ pub(super) fn make_child_session(
         projected_input_pdf: None,
         recorded_prompt: None,
         run_state: Default::default(),
+        turn_timing: Default::default(),
         agent_seq: 0,
         tool_item_seq: 0,
         repeat: Default::default(),
@@ -616,6 +617,7 @@ async fn child_todo_write_stays_out_of_root_state_and_events() {
         extra_tools: &[],
         hooks: &hooks,
         history: &[],
+        timing: None,
     };
     let outcome = exec_tool_gated_ctx(
         &mut gate,
@@ -707,6 +709,7 @@ async fn child_gate_refuses_new_scope_widening() {
         extra_tools: &[],
         hooks: &hooks,
         history: &[],
+        timing: None,
     };
     let outcome = exec_tool_gated_ctx(
         &mut gate,

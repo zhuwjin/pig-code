@@ -47,7 +47,7 @@ impl Session {
     /// the rollout record doubles as the "counted" marker for the
     /// crash-recovery scan in Session::load. The in-flight request's usage is
     /// unrecoverable either way (usage arrives at the stream's end). Returns
-    /// None when no request of the turn reported usage.
+    /// None only when neither token usage nor a meaningful timing segment exists.
     pub(super) fn flush_turn_stats(
         &mut self,
         duration_ms: u64,
@@ -56,10 +56,21 @@ impl Session {
         self.run_state.active = false;
         let has_usage =
             self.run_state.input + self.run_state.cache_read + self.run_state.output > 0;
-        if !has_usage && finish_reason.is_none() {
+        let ended_at_ms = crate::model_io::now_ms();
+        let breakdown = self
+            .run_state
+            .timing
+            .breakdown(duration_ms, self.run_state.api_ms);
+        let has_timing = breakdown.user_wait_ms > 0
+            || breakdown.tool_exec_ms > 0
+            || breakdown.tool_wall_ms > 0
+            || breakdown.compact_ms > 0
+            || breakdown.hook_ms > 0
+            || breakdown.review_ms > 0;
+        if !has_usage && !has_timing && finish_reason.is_none() {
             return None;
         }
-        let ended_at_ms = crate::model_io::now_ms();
+        let has_stats = has_usage || has_timing;
         // An incomplete finish is durable even when the provider omitted usage.
         self.record(&RolloutRecord::TurnStats {
             input: self.run_state.input,
@@ -72,11 +83,18 @@ impl Session {
             ttft_steps: self.run_state.ttft_steps,
             api_steps: self.run_state.api_steps,
             tool_ms: self.run_state.tool_ms,
+            user_wait_ms: breakdown.user_wait_ms,
+            tool_exec_ms: breakdown.tool_exec_ms,
+            tool_wall_ms: breakdown.tool_wall_ms,
+            compact_ms: breakdown.compact_ms,
+            hook_ms: breakdown.hook_ms,
+            review_ms: breakdown.review_ms,
+            overhead_ms: breakdown.overhead_ms,
             has_usage,
             finish_reason,
             turn_id: self.run_state.usage_turn_id.clone(),
         });
-        let stats = has_usage.then_some(pig_protocol::TurnUsageStats {
+        let stats = has_stats.then_some(pig_protocol::TurnUsageStats {
             input: self.run_state.input,
             cache_read: self.run_state.cache_read,
             output: self.run_state.output,
@@ -86,6 +104,13 @@ impl Session {
             ttft_steps: self.run_state.ttft_steps,
             api_steps: self.run_state.api_steps,
             tool_ms: self.run_state.tool_ms,
+            user_wait_ms: breakdown.user_wait_ms,
+            tool_exec_ms: breakdown.tool_exec_ms,
+            tool_wall_ms: breakdown.tool_wall_ms,
+            compact_ms: breakdown.compact_ms,
+            hook_ms: breakdown.hook_ms,
+            review_ms: breakdown.review_ms,
+            overhead_ms: breakdown.overhead_ms,
             ended_at_ms,
         });
         self.run_state.history.push(pig_protocol::PluginTurnStats {

@@ -1,4 +1,4 @@
-import { t, tCount } from "./i18n";
+import { t, tCount, type MessageKey } from "./i18n";
 import type { ChatItem, EditDiff, MarkdownItem, TaskStatus, TurnState, TurnUsageStats } from "./protocol";
 import type { IconName } from "./components/icon";
 
@@ -284,6 +284,29 @@ export function turnSpeed(stats: TurnUsageStats): number | null {
   return stats.ttft_ms > 0 && decodeMs > 0 && stats.output > 0
     ? stats.output / (decodeMs / 1000)
     : null;
+}
+
+export function turnTimingBreakdown(stats: TurnUsageStats): { key: MessageKey; value: number }[] {
+  const rows: { key: MessageKey; value: number }[] = [
+    { key: "turn.model_time", value: stats.api_ms },
+  ];
+  const hasBreakdown = stats.user_wait_ms > 0 || stats.tool_exec_ms > 0 || stats.tool_wall_ms > 0 ||
+    stats.compact_ms > 0 || stats.hook_ms > 0 || stats.review_ms > 0 || stats.overhead_ms > 0;
+  if (!hasBreakdown) {
+    if (stats.tool_ms > 0) rows.push({ key: "turn.tool_time", value: stats.tool_ms });
+    return rows;
+  }
+  const optional: { key: MessageKey; value: number }[] = [
+    { key: "turn.tool_exec", value: stats.tool_exec_ms },
+    { key: "turn.tool_wall", value: stats.tool_wall_ms },
+    { key: "turn.user_wait", value: stats.user_wait_ms },
+    { key: "turn.review", value: stats.review_ms },
+    { key: "turn.hook_time", value: stats.hook_ms },
+    { key: "turn.compact", value: stats.compact_ms },
+    { key: "turn.overhead", value: stats.overhead_ms },
+  ];
+  rows.push(...optional.filter((row) => row.value > 0));
+  return rows;
 }
 
 export function formatTokens(value: number): string {

@@ -12,7 +12,7 @@ use serde_json::{Map, Value, json};
 use tokio::sync::oneshot;
 
 use crate::mcp::capabilities::{ElicitationHandler, McpElicitationRequest, McpElicitationResponse};
-use crate::session::PendingQuestions;
+use crate::session::{PendingQuestions, SharedTurnTiming, TimingKind, TurnTiming};
 
 const ELICITATION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 static ELICITATION_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -91,10 +91,7 @@ pub(crate) fn elicitation_to_questions(
     for (idx, key) in keys.into_iter().enumerate() {
         let prop = &properties[key];
         let required = required_set.contains(key.as_str());
-        let prop_type = prop
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or("string");
+        let prop_type = prop.get("type").and_then(Value::as_str).unwrap_or("string");
         let title = prop
             .get("title")
             .and_then(Value::as_str)
@@ -293,15 +290,33 @@ pub(crate) fn answers_to_elicitation_response(
 
 /// Build an [`ElicitationHandler`] bound to one live session's question queue
 /// and event channel.
-pub fn build_session_elicitation_handler(
+pub(crate) fn build_session_elicitation_handler(
     session_id: String,
     pending_questions: PendingQuestions,
     tx: async_channel::Sender<Event>,
+    turn_timing: SharedTurnTiming,
+) -> ElicitationHandler {
+    build_session_elicitation_handler_with_timeout(
+        session_id,
+        pending_questions,
+        tx,
+        turn_timing,
+        ELICITATION_TIMEOUT,
+    )
+}
+
+fn build_session_elicitation_handler_with_timeout(
+    session_id: String,
+    pending_questions: PendingQuestions,
+    tx: async_channel::Sender<Event>,
+    turn_timing: SharedTurnTiming,
+    timeout: Duration,
 ) -> ElicitationHandler {
     Arc::new(move |request: McpElicitationRequest| {
         let session_id = session_id.clone();
         let pending_questions = pending_questions.clone();
         let tx = tx.clone();
+        let turn_timing = turn_timing.clone();
         Box::pin(async move {
             let (questions, fields) = elicitation_to_questions(&request);
             let seq = ELICITATION_SEQ.fetch_add(1, Ordering::Relaxed);
@@ -327,7 +342,12 @@ pub fn build_session_elicitation_handler(
                     .remove(&request_id);
                 return McpElicitationResponse::cancel();
             }
-            let reply = match tokio::time::timeout(ELICITATION_TIMEOUT, reply_rx).await {
+            let timing = turn_timing
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            let wait_timer = TurnTiming::optional_guard(&timing, TimingKind::UserWait);
+            let reply = match tokio::time::timeout(timeout, reply_rx).await {
                 Ok(Ok(answers)) => answers,
                 Ok(Err(_)) | Err(_) => {
                     pending_questions
@@ -343,6 +363,7 @@ pub fn build_session_elicitation_handler(
                     return McpElicitationResponse::cancel();
                 }
             };
+            drop(wait_timer);
             let _ = tx
                 .send(Event::QuestionResolved {
                     session_id: session_id.clone(),
@@ -429,5 +450,63 @@ mod tests {
             answers_to_elicitation_response(&fields, Some(vec![vec!["Decline".into()]])).action,
             McpElicitationAction::Decline
         );
+    }
+
+    #[tokio::test]
+    async fn answer_channel_close_and_timeout_all_record_user_wait() {
+        for mode in ["answer", "closed", "timeout"] {
+            let pending = PendingQuestions::default();
+            let (tx, rx) = async_channel::unbounded();
+            let timing = Arc::new(TurnTiming::default());
+            let current: SharedTurnTiming = Arc::new(std::sync::Mutex::new(Some(timing.clone())));
+            let handler = build_session_elicitation_handler_with_timeout(
+                "session".to_string(),
+                pending.clone(),
+                tx,
+                current,
+                Duration::from_millis(20),
+            );
+            let request = McpElicitationRequest {
+                server: "test".to_string(),
+                message: "Confirm".to_string(),
+                requested_schema: json!({ "type": "object" }),
+            };
+            let task = tokio::spawn(async move { handler(request).await });
+            let Event::QuestionRequested { request_id, .. } = rx.recv().await.expect("question")
+            else {
+                panic!("expected question")
+            };
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            match mode {
+                "answer" => {
+                    let reply = pending
+                        .lock()
+                        .expect("pending")
+                        .remove(&request_id)
+                        .expect("reply channel");
+                    reply
+                        .send(Some(vec![vec!["Accept".to_string()]]))
+                        .expect("send answer");
+                }
+                "closed" => {
+                    drop(pending.lock().expect("pending").remove(&request_id));
+                }
+                _ => {}
+            }
+            let response = task.await.expect("handler task");
+            assert_eq!(
+                response.action,
+                if mode == "answer" {
+                    McpElicitationAction::Accept
+                } else {
+                    McpElicitationAction::Cancel
+                }
+            );
+            assert!(pending.lock().expect("pending").is_empty());
+            assert!(
+                timing.breakdown(100, 0).user_wait_ms > 0,
+                "mode {mode} must retain its wait"
+            );
+        }
     }
 }

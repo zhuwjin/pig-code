@@ -28,6 +28,16 @@ impl Session {
     ) {
         let mut turns = self.run_state.history.clone();
         if self.run_state.active {
+            let elapsed_ms = self
+                .run_state
+                .turn_started
+                .map(|started| started.elapsed().as_millis() as u64)
+                .unwrap_or(self.run_state.api_ms)
+                .max(self.run_state.api_ms);
+            let breakdown = self
+                .run_state
+                .timing
+                .breakdown(elapsed_ms, self.run_state.api_ms);
             turns.push(pig_protocol::PluginTurnStats {
                 id: self.run_state.usage_turn_id.clone(),
                 index: turns.len() as u64,
@@ -42,6 +52,13 @@ impl Session {
                     ttft_steps: self.run_state.ttft_steps,
                     api_steps: self.run_state.api_steps,
                     tool_ms: self.run_state.tool_ms,
+                    user_wait_ms: breakdown.user_wait_ms,
+                    tool_exec_ms: breakdown.tool_exec_ms,
+                    tool_wall_ms: breakdown.tool_wall_ms,
+                    compact_ms: breakdown.compact_ms,
+                    hook_ms: breakdown.hook_ms,
+                    review_ms: breakdown.review_ms,
+                    overhead_ms: breakdown.overhead_ms,
                     ended_at_ms: 0,
                 }),
             });

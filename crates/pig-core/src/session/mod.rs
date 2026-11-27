@@ -42,8 +42,8 @@ mod operations;
 mod outcome;
 mod pending;
 mod persistence;
-mod replay;
 mod repeat;
+mod replay;
 mod reviewer;
 mod run_state;
 mod runner;
@@ -56,6 +56,7 @@ mod stats;
 mod step;
 #[cfg(test)]
 mod tests;
+mod timing;
 mod title;
 mod turn;
 mod usage;
@@ -97,6 +98,7 @@ pub(crate) use pending::{
 };
 pub use pig_protocol::{AgentCatalogEntry, AgentRunStatus};
 pub use runner::agent_loop;
+pub(crate) use timing::{SharedTurnTiming, TimingKind, TurnTiming};
 pub use title::TITLE_PROMPT_MARKER;
 pub(crate) use title::spawn_title_generation;
 pub(crate) use turn::pointer_file_references;
@@ -126,6 +128,9 @@ pub struct Session {
     /// automatically falls back to full, self-healing)
     io_last_input: Vec<crate::model_io::ModelIoMessage>,
     run_state: SessionRunState,
+    /// Shared indirection lets the cached MCP manager attribute elicitation to
+    /// whichever root turn is active when the request arrives.
+    turn_timing: SharedTurnTiming,
     tracker: ChangeTracker,
     state: crate::task::SessionToolState,
     /// Memory of "always allowed in this session": (tool name, subject) —

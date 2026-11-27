@@ -672,10 +672,21 @@ export class AgentStore {
     decodeMs: number;
     apiMs: number;
     toolMs: number;
+    toolExecMs: number;
+    toolWallMs: number;
+    userWaitMs: number;
+    compactMs: number;
+    hookMs: number;
+    reviewMs: number;
+    overheadMs: number;
     ttftMs: number;
     ttftSteps: number;
   } {
-    const totals = { turns: 0, steps: 0, output: 0, decodeMs: 0, apiMs: 0, toolMs: 0, ttftMs: 0, ttftSteps: 0 };
+    const totals = {
+      turns: 0, steps: 0, output: 0, decodeMs: 0, apiMs: 0, toolMs: 0,
+      toolExecMs: 0, toolWallMs: 0, userWaitMs: 0, compactMs: 0,
+      hookMs: 0, reviewMs: 0, overheadMs: 0, ttftMs: 0, ttftSteps: 0,
+    };
     for (const turn of this.currentTurns()) {
       if (turn.status === "running" || ((turn.durationMs ?? 0) === 0 && !turn.stats)) continue;
       totals.turns += 1;
@@ -684,6 +695,13 @@ export class AgentStore {
       totals.steps += stats.api_steps;
       totals.apiMs += stats.api_ms;
       totals.toolMs += stats.tool_ms;
+      totals.toolExecMs += stats.tool_exec_ms ?? 0;
+      totals.toolWallMs += stats.tool_wall_ms ?? 0;
+      totals.userWaitMs += stats.user_wait_ms ?? 0;
+      totals.compactMs += stats.compact_ms ?? 0;
+      totals.hookMs += stats.hook_ms ?? 0;
+      totals.reviewMs += stats.review_ms ?? 0;
+      totals.overheadMs += stats.overhead_ms ?? 0;
       totals.ttftMs += stats.ttft_ms;
       totals.ttftSteps += stats.ttft_steps;
       const decodeMs = stats.api_ms - stats.ttft_ms;

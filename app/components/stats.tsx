@@ -2,7 +2,7 @@ import { signal, Text, token, View, type JSX } from "nsh";
 import { Button, Popover } from "nsh/base";
 import { Arc, Plot } from "nsh/base/plot";
 import { formatCompactDuration, formatTokens } from "../conversation";
-import { t } from "../i18n";
+import { t, type MessageKey } from "../i18n";
 import type { UiContext } from "../ui-context";
 import { Icon, type IconName } from "./icon";
 
@@ -117,11 +117,25 @@ export function SessionStatusBar(props: UiContext) {
   };
   const activityRows = () => {
     const current = totals();
+    const hasBreakdown = current.toolExecMs > 0 || current.toolWallMs > 0 || current.userWaitMs > 0 ||
+      current.compactMs > 0 || current.hookMs > 0 || current.reviewMs > 0 || current.overheadMs > 0;
+    const timingRows = hasBreakdown ? [
+      { key: "status.tool_exec", value: current.toolExecMs },
+      { key: "status.tool_wall", value: current.toolWallMs },
+      { key: "status.user_wait", value: current.userWaitMs },
+      { key: "status.review", value: current.reviewMs },
+      { key: "status.hook_time", value: current.hookMs },
+      { key: "status.compact", value: current.compactMs },
+      { key: "status.overhead", value: current.overheadMs },
+    ].filter((row) => row.value > 0).map((row) => ({
+      label: t(row.key as MessageKey),
+      value: formatStatDuration(row.value),
+    })) : (current.toolMs > 0 ? [{ label: t("status.tool_time"), value: formatStatDuration(current.toolMs) }] : []);
     return [
       { label: t("status.completed_turns"), value: String(current.turns) },
       { label: t("status.api_steps"), value: String(current.steps) },
       { label: t("status.model_time"), value: formatStatDuration(current.apiMs) },
-      { label: t("status.tool_time"), value: formatStatDuration(current.toolMs) },
+      ...timingRows,
       {
         label: t("status.first_token"),
         value: current.ttftMs > 0 && current.ttftSteps > 0

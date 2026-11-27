@@ -457,6 +457,7 @@ async fn ask_user_question_answer() {
     let session_id = new_session(&agent, cwd).await;
 
     let request_id = wait_question(&agent, &events, &session_id).await;
+    tokio::time::sleep(Duration::from_millis(10)).await;
     agent
         .ops
         .send(Op::QuestionReply {
@@ -486,6 +487,21 @@ async fn ask_user_question_answer() {
         )),
         "final text should contain the marker: {collected:#?}"
     );
+    let stats = collected
+        .iter()
+        .find_map(|event| match event {
+            Event::TurnComplete {
+                stats: Some(stats), ..
+            } => Some(*stats),
+            _ => None,
+        })
+        .expect("question turn stats");
+    assert!(
+        stats.user_wait_ms >= 10,
+        "question wait is recorded: {stats:?}"
+    );
+    assert_eq!(stats.tool_exec_ms, 0, "waiting is not tool execution");
+    assert_eq!(stats.tool_wall_ms, 0, "the question has no execution phase");
     agent.shutdown();
 }
 
@@ -515,6 +531,44 @@ async fn ask_user_question_skip() {
             Event::ToolCallEnd { output, is_error: false, .. } if output.contains("decide from context")
         )),
         "skipping should tell the model to decide from context: {collected:#?}"
+    );
+    agent.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interrupting_a_question_persists_the_accumulated_wait() {
+    let (config_path, cwd, data_dir) = setup("question-interrupt-timing");
+    let agent =
+        pig_core::spawn_agent_with_data_dir(Some(config_path), cwd.clone(), data_dir.clone());
+    let events = agent.events.clone();
+    let session_id = new_session(&agent, cwd).await;
+    let _request_id = wait_question(&agent, &events, &session_id).await;
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    agent
+        .ops
+        .send(Op::Interrupt {
+            session_id: session_id.clone(),
+        })
+        .await
+        .expect("interrupt question");
+    recv_until(&events, Duration::from_secs(20), |event| {
+        matches!(event, Event::TurnAborted { .. })
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let records = pig_core::rollout::Rollout::load(
+        &data_dir
+            .join("sessions")
+            .join(format!("{session_id}.jsonl")),
+    )
+    .expect("load interrupted rollout");
+    let user_wait_ms = records.into_iter().find_map(|record| match record {
+        pig_core::rollout::RolloutRecord::TurnStats { user_wait_ms, .. } => Some(user_wait_ms),
+        _ => None,
+    });
+    assert!(
+        user_wait_ms.is_some_and(|elapsed| elapsed >= 10),
+        "cancel wrap-up retains the question wait: {user_wait_ms:?}"
     );
     agent.shutdown();
 }

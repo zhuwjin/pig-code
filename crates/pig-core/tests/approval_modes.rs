@@ -195,19 +195,30 @@ async fn scenario_b_allow_all_then_revert() {
 
     // The turn reports measured per-call tool spans (Write + Edit + Bash, the
     // gate and its approval wait included), not a residual
-    let tool_ms = events
+    let stats = events
         .iter()
         .find_map(|e| match e {
             Event::TurnComplete {
                 stats: Some(stats), ..
-            } => Some(stats.tool_ms),
+            } => Some(*stats),
             _ => None,
         })
         .expect("turn stats are reported");
     assert!(
-        tool_ms > 0,
-        "a turn that ran three tools must report a tool span: {tool_ms}"
+        stats.tool_ms > 0,
+        "a turn that ran three tools must report a tool span: {stats:?}"
     );
+    assert!(
+        stats.tool_exec_ms > 0,
+        "pure execution is measured: {stats:?}"
+    );
+    assert!(
+        stats.tool_wall_ms > 0,
+        "tool wall time is measured: {stats:?}"
+    );
+    assert!(stats.tool_exec_ms <= stats.tool_wall_ms, "{stats:?}");
+    assert!(stats.tool_wall_ms <= stats.tool_ms, "{stats:?}");
+    assert!(stats.overhead_ms <= stats.duration_ms, "{stats:?}");
 
     let changes = file_changes(&events);
     assert_eq!(

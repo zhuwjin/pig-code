@@ -406,6 +406,19 @@ async fn auto_compact_on_high_usage() {
             .is_some_and(|s| s.contains(mock::SUMMARY_MARKER)),
         "the bare summary should ride along for the summary panel: {summary:?}"
     );
+    let stats = collected
+        .iter()
+        .find_map(|event| match event {
+            Event::TurnComplete {
+                stats: Some(stats), ..
+            } => Some(*stats),
+            _ => None,
+        })
+        .expect("compacting turn stats");
+    assert!(
+        stats.compact_ms > 0,
+        "compaction time is recorded: {stats:?}"
+    );
     agent.shutdown();
 }
 

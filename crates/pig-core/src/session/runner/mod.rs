@@ -664,6 +664,12 @@ pub async fn agent_loop(
         data_dir,
         credentials,
     );
+    let search_store = manager.store.clone();
+    let search_sessions_dir = manager.sessions_dir.clone();
+    tokio::task::spawn_blocking(move || {
+        let report = crate::store::backfill_session_search(&search_store, &search_sessions_dir);
+        tracing::debug!(?report, "session search backfill finished");
+    });
     if let Some(config) = manager.config.as_ref() {
         manager
             .credentials

@@ -31,6 +31,7 @@ impl Session {
                 self.event_session_id().to_string(),
                 self.pending_questions.clone(),
                 tx.clone(),
+                self.turn_timing.clone(),
             );
             self.mcp = Some(Arc::new(
                 crate::mcp::McpManager::connect_all_with_trust_and_elicitation(
@@ -133,6 +134,14 @@ impl Session {
         notifications: super::runner::entry::NotificationMailbox,
         notification_only: bool,
     ) -> TurnOutcome {
+        let timing = Arc::new(TurnTiming::default());
+        *self
+            .turn_timing
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(timing.clone());
+        self.run_state.timing = timing;
+        let started = Instant::now();
+        self.run_state.turn_started = Some(started);
         self.steer_signal = steer_signal;
         if !matches!(
             self.agent.run.as_ref().map(|run| run.status),
@@ -172,6 +181,7 @@ impl Session {
                 )
                 .with_transcript(&self.agent.history);
                 let run = self.hook_run_ctx(tx, cancel);
+                let _hook_timer = self.run_state.timing.guard(TimingKind::Hook);
                 let effects = crate::hooks::run_event(
                     &self.hooks,
                     crate::hooks::HookEvent::SessionStart,
@@ -199,6 +209,7 @@ impl Session {
             )
             .with_transcript(&self.agent.history);
             let run = self.hook_run_ctx(tx, cancel);
+            let _hook_timer = self.run_state.timing.guard(TimingKind::Hook);
             let effects = crate::hooks::run_event(
                 &self.hooks,
                 crate::hooks::HookEvent::UserPromptSubmit,
@@ -258,7 +269,6 @@ impl Session {
             self.run_state.usage_anchor = None;
         }
         let turn_id = format!("turn-{}", self.run_state.turn_counter);
-        let started = Instant::now();
         let run = self.run_envelope();
         self.emit(
             |session_id| Event::TurnStarted {
@@ -627,6 +637,7 @@ impl Session {
                         )
                         .with_transcript(&self.agent.history);
                         let run = self.hook_run_ctx(tx, cancel);
+                        let _hook_timer = self.run_state.timing.guard(TimingKind::Hook);
                         let effects = crate::hooks::run_event(
                             &self.hooks,
                             crate::hooks::HookEvent::Stop,
@@ -785,7 +796,11 @@ impl Session {
     /// cycle — success, failure and cancellation alike, so an interrupted step
     /// still shows up in the turn's model time, TTFT and speed.
     pub(super) fn charge_step_time(&mut self, started: Instant, first_token: Option<Instant>) {
-        let elapsed_ms = started.elapsed().as_millis() as u64;
+        let ended = Instant::now();
+        let elapsed_ms = ended.duration_since(started).as_millis() as u64;
+        self.run_state
+            .timing
+            .record(TimingKind::Api, started, ended);
         self.run_state.api_ms += elapsed_ms;
         self.run_state.ttft_ms += first_token
             .map(|at| at.duration_since(started).as_millis() as u64)
@@ -818,9 +833,7 @@ impl Session {
             pause_pin,
             // Subscribed per step: only a steer admitted after this point can
             // preempt this request.
-            self.steer_signal
-                .as_ref()
-                .map(|signal| signal.subscribe()),
+            self.steer_signal.as_ref().map(|signal| signal.subscribe()),
         );
         match super::engine::run_step(self, &mut runtime, step, tx, control.cancel_token()).await {
             super::engine::StepOutcome::Continue => StepOutcome::ToolsExecuted,
@@ -1057,6 +1070,7 @@ impl Session {
                                 ApprovalDecision::Allow,
                                 ApprovalDecision::Reject,
                             ],
+                            timing: Some(self.run_state.timing.clone()),
                         },
                         tx.clone(),
                     );
@@ -1268,10 +1282,12 @@ impl Session {
             // SubagentProgress, approvals still pop up (the subagent's writes
             // pass the approval gate themselves).
             if call.name == "Agent" {
-                match self
-                    .run_subagent(call, turn_id, &item_id, config, tx, cancel)
-                    .await
-                {
+                let outcome = {
+                    let _tool_phase = self.run_state.timing.guard(TimingKind::ToolPhase);
+                    self.run_subagent(call, turn_id, &item_id, config, tx, cancel)
+                        .await
+                };
+                match outcome {
                     SubagentOutcome::Finished {
                         note,
                         is_error,
@@ -1340,7 +1356,11 @@ impl Session {
             // message comes from inside run_swarm; each subagent's writes still
             // pass the approval gate.
             if call.name == "AgentSwarm" {
-                match self.run_swarm(call, &item_id, config, tx, cancel).await {
+                let outcome = {
+                    let _tool_phase = self.run_state.timing.guard(TimingKind::ToolPhase);
+                    self.run_swarm(call, &item_id, config, tx, cancel).await
+                };
+                match outcome {
                     SubagentOutcome::Finished {
                         note,
                         is_error,
@@ -1544,6 +1564,7 @@ impl Session {
                     },
                     tx,
                 );
+                let wait_timer = self.run_state.timing.guard(TimingKind::UserWait);
                 let reply = tokio::select! {
                     // sender dropped (replier gone) is treated as skip
                     reply = reply_rx => reply.unwrap_or(None),
@@ -1576,6 +1597,7 @@ impl Session {
                 return engine::StepOutcome::Cancelled;
                     }
                 };
+                drop(wait_timer);
                 self.emit(
                     |session_id| Event::QuestionResolved {
                         session_id,
@@ -2884,8 +2906,14 @@ mod tests {
             .run_parallel_group(&calls, &items, 0, 2, "turn-pw", 128_000, &tx, &cancel)
             .await;
         assert!(ok);
-        assert_eq!(std::fs::read_to_string(dir.join("one.txt")).unwrap(), "first\n");
-        assert_eq!(std::fs::read_to_string(dir.join("two.txt")).unwrap(), "second\n");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("one.txt")).unwrap(),
+            "first\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("two.txt")).unwrap(),
+            "second\n"
+        );
 
         let mut changed_paths = Vec::new();
         while let Ok(event) = rx.try_recv() {
@@ -3041,7 +3069,10 @@ mod tests {
             .iter()
             .filter_map(|s| s["function"]["name"].as_str())
             .collect();
-        assert!(schema_names.contains(&tool::TOOL_SEARCH_TOOL), "{schema_names:?}");
+        assert!(
+            schema_names.contains(&tool::TOOL_SEARCH_TOOL),
+            "{schema_names:?}"
+        );
         assert!(schema_names.contains(&tool::CALL_TOOL), "{schema_names:?}");
         assert!(!schema_names.contains(&"DemoRead"), "{schema_names:?}");
         let search_desc = schemas
@@ -3075,14 +3106,25 @@ mod tests {
                             result: Ok("proxy-ok".into()),
                         });
                     }
-                    Event::ToolCallEnd { output, is_error, .. } => break (output, is_error),
+                    Event::ToolCallEnd {
+                        output, is_error, ..
+                    } => break (output, is_error),
                     _ => {}
                 }
             }
         });
         assert!(
             session
-                .run_parallel_group(&calls, &items, 0, 1, "turn-proxy", 128_000, &tx_exec, &cancel)
+                .run_parallel_group(
+                    &calls,
+                    &items,
+                    0,
+                    1,
+                    "turn-proxy",
+                    128_000,
+                    &tx_exec,
+                    &cancel
+                )
                 .await
         );
         let (output, is_error) = resolver.await.expect("resolver");
@@ -3099,12 +3141,17 @@ mod tests {
         let bad_items = vec!["item-proxy-bad".into()];
         assert!(
             session
-                .run_parallel_group(&bad_calls, &bad_items, 0, 1, "turn-bad", 128_000, &tx_err, &cancel)
+                .run_parallel_group(
+                    &bad_calls, &bad_items, 0, 1, "turn-bad", 128_000, &tx_err, &cancel
+                )
                 .await
         );
         let mut bad_end = None;
         while let Ok(ev) = rx_err.try_recv() {
-            if let Event::ToolCallEnd { output, is_error, .. } = ev {
+            if let Event::ToolCallEnd {
+                output, is_error, ..
+            } = ev
+            {
                 bad_end = Some((output, is_error));
             }
         }
@@ -3123,12 +3170,24 @@ mod tests {
         let builtin_items = vec!["item-proxy-builtin".into()];
         assert!(
             session
-                .run_parallel_group(&builtin_calls, &builtin_items, 0, 1, "turn-bi", 128_000, &tx_bi, &cancel)
+                .run_parallel_group(
+                    &builtin_calls,
+                    &builtin_items,
+                    0,
+                    1,
+                    "turn-bi",
+                    128_000,
+                    &tx_bi,
+                    &cancel
+                )
                 .await
         );
         let mut bi_end = None;
         while let Ok(ev) = rx_bi.try_recv() {
-            if let Event::ToolCallEnd { output, is_error, .. } = ev {
+            if let Event::ToolCallEnd {
+                output, is_error, ..
+            } = ev
+            {
                 bi_end = Some((output, is_error));
             }
         }
@@ -3149,12 +3208,24 @@ mod tests {
         let deny_items = vec!["item-proxy-deny".into()];
         assert!(
             session
-                .run_parallel_group(&calls, &deny_items, 0, 1, "turn-deny", 128_000, &tx_deny, &cancel)
+                .run_parallel_group(
+                    &calls,
+                    &deny_items,
+                    0,
+                    1,
+                    "turn-deny",
+                    128_000,
+                    &tx_deny,
+                    &cancel
+                )
                 .await
         );
         let mut deny_end = None;
         while let Ok(ev) = rx_deny.try_recv() {
-            if let Event::ToolCallEnd { output, is_error, .. } = ev {
+            if let Event::ToolCallEnd {
+                output, is_error, ..
+            } = ev
+            {
                 deny_end = Some((output, is_error));
             }
         }
@@ -3223,7 +3294,15 @@ mod tests {
         );
         assert_eq!(
             scheduler::classify_tool_access(
-                &write_call, &tools, perms, false, media, &rules, &state, &dir, &hooks,
+                &write_call,
+                &tools,
+                perms,
+                false,
+                media,
+                &rules,
+                &state,
+                &dir,
+                &hooks,
             ),
             scheduler::ToolAccessPlan::Exclusive
         );
@@ -3239,7 +3318,15 @@ mod tests {
                 .expect("parse rules");
         assert_eq!(
             scheduler::classify_tool_access(
-                &read_call, &tools, perms, false, media, &deny_rules, &state, &dir, &hooks,
+                &read_call,
+                &tools,
+                perms,
+                false,
+                media,
+                &deny_rules,
+                &state,
+                &dir,
+                &hooks,
             ),
             scheduler::ToolAccessPlan::Exclusive
         );
@@ -3300,7 +3387,10 @@ mod tests {
         session.set_permissions(ExecMode::Auto.permissions());
 
         session.agent.history.push(ChatMsg::system("sys".into()));
-        session.agent.history.push(ChatMsg::user("update sub".into()));
+        session
+            .agent
+            .history
+            .push(ChatMsg::user("update sub".into()));
         session.user_ixs.push(Some(1));
 
         let (tx, rx) = async_channel::unbounded();
@@ -3313,7 +3403,16 @@ mod tests {
         let read_items = vec!["item-r1".into()];
         assert!(
             session
-                .run_parallel_group(&read_calls, &read_items, 0, 1, "turn-1", 128_000, &tx, &cancel)
+                .run_parallel_group(
+                    &read_calls,
+                    &read_items,
+                    0,
+                    1,
+                    "turn-1",
+                    128_000,
+                    &tx,
+                    &cancel
+                )
                 .await
         );
         let mut read_out_1 = String::new();
@@ -3331,7 +3430,16 @@ mod tests {
         let read_items_2 = vec!["item-r2".into()];
         assert!(
             session
-                .run_parallel_group(&read_calls, &read_items_2, 0, 1, "turn-1", 128_000, &tx, &cancel)
+                .run_parallel_group(
+                    &read_calls,
+                    &read_items_2,
+                    0,
+                    1,
+                    "turn-1",
+                    128_000,
+                    &tx,
+                    &cancel
+                )
                 .await
         );
         let mut read_out_2 = String::new();
@@ -3356,7 +3464,16 @@ mod tests {
         let write_items = vec!["item-w1".into()];
         assert!(
             session
-                .run_parallel_group(&write_calls, &write_items, 0, 1, "turn-1", 128_000, &tx, &cancel)
+                .run_parallel_group(
+                    &write_calls,
+                    &write_items,
+                    0,
+                    1,
+                    "turn-1",
+                    128_000,
+                    &tx,
+                    &cancel
+                )
                 .await
         );
         session.flush_turn_changes(&tx);
@@ -3372,7 +3489,16 @@ mod tests {
         let read_items_3 = vec!["item-r3".into()];
         assert!(
             session
-                .run_parallel_group(&read_calls, &read_items_3, 0, 1, "turn-2", 128_000, &tx, &cancel)
+                .run_parallel_group(
+                    &read_calls,
+                    &read_items_3,
+                    0,
+                    1,
+                    "turn-2",
+                    128_000,
+                    &tx,
+                    &cancel
+                )
                 .await
         );
         let mut read_out_3 = String::new();

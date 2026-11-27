@@ -21,6 +21,7 @@ pub(crate) struct ApprovalRequest {
     pub danger_key: Option<String>,
     pub requested_write_roots: Vec<String>,
     pub available_decisions: Vec<ApprovalDecision>,
+    pub timing: Option<Arc<super::TurnTiming>>,
 }
 
 #[derive(Clone, Debug)]
@@ -73,6 +74,8 @@ impl ApprovalReviewer for UserApprovalReviewer {
         events: async_channel::Sender<Event>,
     ) -> BoxFuture<'_, Result<ApprovalReply, ApprovalReviewError>> {
         Box::pin(async move {
+            let _wait =
+                super::TurnTiming::optional_guard(&request.timing, super::TimingKind::UserWait);
             let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
             self.pending
                 .lock()
@@ -157,7 +160,11 @@ impl ApprovalReviewer for PolicyApprovalReviewer {
         request: ApprovalRequest,
         _events: async_channel::Sender<Event>,
     ) -> BoxFuture<'_, Result<ApprovalReply, ApprovalReviewError>> {
-        Box::pin(async move { (self.evaluate)(&request) })
+        Box::pin(async move {
+            let _review =
+                super::TurnTiming::optional_guard(&request.timing, super::TimingKind::Review);
+            (self.evaluate)(&request)
+        })
     }
 }
 
@@ -285,6 +292,8 @@ impl ApprovalReviewer for AgentApprovalReviewer {
     ) -> BoxFuture<'_, Result<ApprovalReply, ApprovalReviewError>> {
         let resolve_model = self.resolve_model.clone();
         Box::pin(async move {
+            let _review =
+                super::TurnTiming::optional_guard(&request.timing, super::TimingKind::Review);
             if request.permissions.approval == pig_protocol::ApprovalPolicy::Never {
                 return Ok(ApprovalReply {
                     decision: ApprovalDecision::Reject,
@@ -298,10 +307,12 @@ impl ApprovalReviewer for AgentApprovalReviewer {
             };
             model.max_output_tokens = model.max_output_tokens.min(512);
             let prompt = Self::build_prompt(&request);
-            let structured = model.cap_structured.then(|| pig_provider::StructuredOutput {
-                name: "approval_review_verdict",
-                schema: Self::review_schema(),
-            });
+            let structured = model
+                .cap_structured
+                .then(|| pig_provider::StructuredOutput {
+                    name: "approval_review_verdict",
+                    schema: Self::review_schema(),
+                });
             let cancel = tokio_util::sync::CancellationToken::new();
             let call = pig_provider::complete_text(&model, prompt, structured, &cancel)
                 .await
@@ -382,6 +393,7 @@ mod tests {
             danger_key: None,
             requested_write_roots: vec![],
             available_decisions: vec![ApprovalDecision::Allow, ApprovalDecision::Reject],
+            timing: None,
         }
     }
 
@@ -389,32 +401,67 @@ mod tests {
     async fn user_reviewer_resolves_only_its_own_request() {
         let pending = PendingApprovals::default();
         let reviewer = UserApprovalReviewer::new(pending.clone());
+        let timing = Arc::new(super::super::TurnTiming::default());
+        let mut request = request();
+        request.timing = Some(timing.clone());
         let (events, receiver) = async_channel::unbounded();
-        let review = tokio::spawn(async move { reviewer.review(request(), events).await });
+        let review = tokio::spawn(async move { reviewer.review(request, events).await });
         let Event::ApprovalRequested { request_id, .. } = receiver.recv().await.unwrap() else {
             panic!("expected approval event");
         };
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         super::super::resolve_approval(&pending, &request_id, ApprovalDecision::Allow, None);
         let reply = review.await.unwrap().unwrap();
         assert_eq!(reply.decision, ApprovalDecision::Allow);
         assert!(pending.lock().unwrap().is_empty());
+        assert!(timing.breakdown(100, 0).user_wait_ms > 0);
+        assert_eq!(timing.breakdown(100, 0).review_ms, 0);
     }
 
     #[tokio::test]
     async fn cancelling_a_review_removes_its_pending_request() {
         let pending = PendingApprovals::default();
         let reviewer = UserApprovalReviewer::new(pending.clone());
+        let timing = Arc::new(super::super::TurnTiming::default());
+        let mut request = request();
+        request.timing = Some(timing.clone());
         let (events, receiver) = async_channel::unbounded();
-        let review = tokio::spawn(async move { reviewer.review(request(), events).await });
+        let review = tokio::spawn(async move { reviewer.review(request, events).await });
         let _ = receiver.recv().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         review.abort();
         let _ = review.await;
         assert!(pending.lock().unwrap().is_empty());
+        assert!(timing.breakdown(100, 0).user_wait_ms > 0);
+    }
+
+    #[tokio::test]
+    async fn rejected_user_review_still_records_the_wait() {
+        let pending = PendingApprovals::default();
+        let reviewer = UserApprovalReviewer::new(pending.clone());
+        let timing = Arc::new(super::super::TurnTiming::default());
+        let mut request = request();
+        request.timing = Some(timing.clone());
+        let (events, receiver) = async_channel::unbounded();
+        let review = tokio::spawn(async move { reviewer.review(request, events).await });
+        let Event::ApprovalRequested { request_id, .. } = receiver.recv().await.expect("request")
+        else {
+            panic!("expected approval event")
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        super::super::resolve_approval(&pending, &request_id, ApprovalDecision::Reject, None);
+        assert_eq!(
+            review.await.expect("review task").expect("reply").decision,
+            ApprovalDecision::Reject
+        );
+        assert!(timing.breakdown(100, 0).user_wait_ms > 0);
     }
 
     #[tokio::test]
     async fn policy_reviewer_receives_structured_identity_and_action() {
+        let timing = Arc::new(super::super::TurnTiming::default());
         let reviewer = PolicyApprovalReviewer::new(|request| {
+            std::thread::sleep(std::time::Duration::from_millis(5));
             assert_eq!(request.agent_id, "a1");
             assert_eq!(request.run_id.as_deref(), Some("run-1"));
             assert_eq!(request.turn_id.as_deref(), Some("turn-1"));
@@ -429,12 +476,17 @@ mod tests {
                 feedback: Some("policy denied".to_string()),
             })
         });
+        let mut request = request();
+        request.timing = Some(timing.clone());
         let (events, _receiver) = async_channel::unbounded();
         let reply = reviewer
-            .review(request(), events)
+            .review(request, events)
             .await
             .expect("policy reply");
         assert_eq!(reply.decision, ApprovalDecision::Reject);
+        let breakdown = timing.breakdown(100, 0);
+        assert!(breakdown.review_ms > 0);
+        assert_eq!(breakdown.user_wait_ms, 0);
     }
 
     #[tokio::test]
@@ -577,7 +629,9 @@ mod tests {
         let model = review_model(base_url);
         let pending = PendingApprovals::default();
         let reviewer = FallbackApprovalReviewer::new(
-            Arc::new(AgentApprovalReviewer::new(Arc::new(move || Some(model.clone())))),
+            Arc::new(AgentApprovalReviewer::new(Arc::new(move || {
+                Some(model.clone())
+            }))),
             Arc::new(UserApprovalReviewer::new(pending.clone())),
             std::time::Duration::from_secs(5),
         );

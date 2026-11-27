@@ -183,6 +183,32 @@ pub struct TurnUsageStats {
     /// time pairs call/result the same way.
     #[serde(default)]
     pub tool_ms: u64,
+    /// Human approval, question and MCP elicitation wait, merged across
+    /// concurrent calls so overlapping waits are counted once.
+    #[serde(default)]
+    pub user_wait_ms: u64,
+    /// Pure tool-execution intervals with human and review/hook time removed.
+    /// Concurrent intervals are merged rather than summed.
+    #[serde(default)]
+    pub tool_exec_ms: u64,
+    /// Tool critical-path wall time. Unlike tool_ms, concurrent calls are
+    /// merged; user waits, review/hooks and early work overlapped with the
+    /// model stream are excluded.
+    #[serde(default)]
+    pub tool_wall_ms: u64,
+    /// Automatic/manual context compaction within this turn.
+    #[serde(default)]
+    pub compact_ms: u64,
+    /// Lifecycle hook wall time (a subset of review_ms).
+    #[serde(default)]
+    pub hook_ms: u64,
+    /// Non-human approval reviewers plus lifecycle hooks, merged across
+    /// concurrent tool calls.
+    #[serde(default)]
+    pub review_ms: u64,
+    /// Remaining local scheduling, serialization and context-preparation time.
+    #[serde(default)]
+    pub overhead_ms: u64,
     /// Wall-clock time the turn ended (unix ms). The message action row prints
     /// it as the turn's end time; replay restores it from the rollout's TurnStats.
     #[serde(default)]

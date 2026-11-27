@@ -85,6 +85,13 @@ export interface TurnUsageStats {
   ttft_steps: number;
   api_steps: number;
   tool_ms: number;
+  user_wait_ms: number;
+  tool_exec_ms: number;
+  tool_wall_ms: number;
+  compact_ms: number;
+  hook_ms: number;
+  review_ms: number;
+  overhead_ms: number;
   ended_at_ms: number;
 }
 

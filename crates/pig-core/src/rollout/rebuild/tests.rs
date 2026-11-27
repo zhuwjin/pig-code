@@ -238,6 +238,33 @@ fn repeated_compaction_and_recall_keep_canonical_boundaries() {
 }
 
 #[test]
+fn repeated_recall_withdraws_compacted_turns_from_search_indices() {
+    let mut records = vec![
+        user("u1"),
+        assistant("a1", vec![]),
+        user("u2"),
+        assistant("a2", vec![]),
+        compact("note-1", 2),
+        user("u3"),
+        assistant("a3", vec![]),
+        compact("note-2", 3),
+        RolloutRecord::Recall,
+        RolloutRecord::Recall,
+    ];
+    let indices = searchable_record_indices(&records);
+    let remaining = records
+        .drain(..)
+        .enumerate()
+        .filter(|(index, _)| indices.contains(index))
+        .filter_map(|(_, record)| match record {
+            RolloutRecord::User { text, .. } | RolloutRecord::Assistant { text, .. } => Some(text),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(remaining, ["u1", "a1"]);
+}
+
+#[test]
 fn latest_prompt_snapshot_controls_the_rebuilt_system() {
     let snapshot = |text: &str| crate::rollout::PromptSnapshot {
         text: text.into(),

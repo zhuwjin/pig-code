@@ -9,6 +9,8 @@ pub(crate) struct SessionRunState {
     pub(crate) ttft_steps: u64,
     pub(crate) api_steps: u64,
     pub(crate) tool_ms: u64,
+    pub(crate) timing: std::sync::Arc<super::timing::TurnTiming>,
+    pub(crate) turn_started: Option<std::time::Instant>,
     pub(crate) turn_counter: u64,
     pub(crate) turns: usize,
     pub(crate) history: Vec<pig_protocol::PluginTurnStats>,

@@ -286,6 +286,20 @@ credential_dirs = []
         // An exit-0 JSON block decision labels the chain Finished (Blocked is
         // the exit-2 label; see user_prompt_submit_block_stops_turn)
         assert_eq!(states, vec![HookRunState::Running, HookRunState::Finished]);
+        let stats = events
+            .iter()
+            .find_map(|event| match event {
+                Event::TurnComplete {
+                    stats: Some(stats), ..
+                } => Some(*stats),
+                _ => None,
+            })
+            .expect("hook turn stats");
+        assert!(stats.hook_ms > 0, "hook wall time is recorded: {stats:?}");
+        assert_eq!(
+            stats.review_ms, 0,
+            "hooks are tracked separately from approval review: {stats:?}"
+        );
     }
 
     /// Handling `Op::TrustProjectHooks` refreshes every project-file surface

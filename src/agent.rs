@@ -1,6 +1,6 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use nsh_core::{file_dialog::OpenDialog, prelude::*};
 use nsh_engine::perf::ProcessSampler;
@@ -38,6 +38,7 @@ pub struct Agent {
     cwd: PathBuf,
     data_dir: PathBuf,
     active_session: Arc<Mutex<Option<String>>>,
+    search_backfill_checked: Arc<AtomicBool>,
     plugins: crate::plugin_system::PluginSystemManager,
     process_sampler: Mutex<ProcessSampler>,
     _selftest_dir: Option<SelftestDir>,
@@ -114,29 +115,28 @@ default_reasoning_level = "low"
             )
         } else {
             let data_dir = pig_utils::data_dir();
-            let connection = match pig_daemon::DaemonClient::connect_or_spawn(
-                pig_daemon::DaemonConnectConfig {
+            let connection =
+                match pig_daemon::DaemonClient::connect_or_spawn(pig_daemon::DaemonConnectConfig {
                     data_dir: data_dir.clone(),
                     cwd: cwd.clone(),
                     config_path: None,
-                },
-            ) {
-                Ok(client) => AgentConnection::Remote(client),
-                Err(error) => {
-                    if std::env::var_os("PIG_REQUIRE_DAEMON").is_some() {
-                        panic!("failed to attach pig-daemon: {error}");
+                }) {
+                    Ok(client) => AgentConnection::Remote(client),
+                    Err(error) => {
+                        if std::env::var_os("PIG_REQUIRE_DAEMON").is_some() {
+                            panic!("failed to attach pig-daemon: {error}");
+                        }
+                        tracing::warn!(
+                            %error,
+                            "failed to attach pig-daemon; falling back to in-process core"
+                        );
+                        AgentConnection::Local(pig_core::spawn_agent_with_data_dir(
+                            None,
+                            cwd.clone(),
+                            data_dir.clone(),
+                        ))
                     }
-                    tracing::warn!(
-                        %error,
-                        "failed to attach pig-daemon; falling back to in-process core"
-                    );
-                    AgentConnection::Local(pig_core::spawn_agent_with_data_dir(
-                        None,
-                        cwd.clone(),
-                        data_dir.clone(),
-                    ))
-                }
-            };
+                };
             (connection, None, data_dir)
         };
         if let AgentConnection::Local(handle) = &handle {
@@ -161,6 +161,7 @@ default_reasoning_level = "low"
             cwd,
             data_dir,
             active_session: Arc::new(Mutex::new(None)),
+            search_backfill_checked: Arc::new(AtomicBool::new(false)),
             process_sampler: Mutex::new(ProcessSampler::new()),
             _selftest_dir: selftest_dir,
         }
@@ -421,9 +422,39 @@ default_reasoning_level = "low"
         this: Instance<Self>,
         query: String,
     ) -> Result<String, String> {
-        let sessions_dir = this.with(|agent| agent.data_dir.join("sessions"));
+        let (data_dir, backfill_checked) = this.with(|agent| {
+            (
+                agent.data_dir.clone(),
+                agent.search_backfill_checked.clone(),
+            )
+        });
         let hits = tokio::task::spawn_blocking(move || {
-            pig_core::rollout::search_sessions_by_content(&sessions_dir, &query)
+            let sessions_dir = data_dir.join("sessions");
+            let indexed = (|| -> Result<_, String> {
+                let store = std::sync::Arc::new(std::sync::Mutex::new(
+                    pig_core::store::Store::open(&data_dir)?,
+                ));
+                if !backfill_checked.swap(true, Ordering::AcqRel) {
+                    let report = pig_core::store::backfill_session_search(&store, &sessions_dir);
+                    if report.failed > 0 {
+                        tracing::warn!(
+                            ?report,
+                            "some legacy rollouts could not be indexed during search backfill"
+                        );
+                    }
+                }
+                store
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .search_session_content(&query)
+            })();
+            match indexed {
+                Ok(hits) => hits,
+                Err(error) => {
+                    tracing::warn!(%error, "session search index unavailable; using JSONL fallback");
+                    pig_core::rollout::search_sessions_by_content(&sessions_dir, &query)
+                }
+            }
         })
         .await
         .map_err(|error| error.to_string())?;

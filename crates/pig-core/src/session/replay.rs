@@ -251,6 +251,13 @@ impl Session {
                     ttft_steps,
                     api_steps,
                     tool_ms,
+                    user_wait_ms,
+                    tool_exec_ms,
+                    tool_wall_ms,
+                    compact_ms,
+                    hook_ms,
+                    review_ms,
+                    overhead_ms,
                     has_usage,
                     finish_reason,
                     turn_id,
@@ -271,7 +278,14 @@ impl Session {
                     // Replay restore: session totals + historical turns' footer stats (the usage watermark is restored by StepUsage)
                     self.run_state.input_total += input;
                     self.run_state.cache_read_total += cache_read;
-                    let stats = has_usage.then_some(pig_protocol::TurnUsageStats {
+                    let has_stats = *has_usage
+                        || *user_wait_ms > 0
+                        || *tool_exec_ms > 0
+                        || *tool_wall_ms > 0
+                        || *compact_ms > 0
+                        || *hook_ms > 0
+                        || *review_ms > 0;
+                    let stats = has_stats.then_some(pig_protocol::TurnUsageStats {
                         input: *input,
                         cache_read: *cache_read,
                         output: *output,
@@ -281,6 +295,13 @@ impl Session {
                         ttft_steps: *ttft_steps,
                         api_steps: *api_steps,
                         tool_ms: *tool_ms,
+                        user_wait_ms: *user_wait_ms,
+                        tool_exec_ms: *tool_exec_ms,
+                        tool_wall_ms: *tool_wall_ms,
+                        compact_ms: *compact_ms,
+                        hook_ms: *hook_ms,
+                        review_ms: *review_ms,
+                        overhead_ms: *overhead_ms,
                         ended_at_ms: *ended_at_ms,
                     });
                     self.run_state.history.push(pig_protocol::PluginTurnStats {

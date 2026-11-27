@@ -39,6 +39,7 @@ pub(super) struct SessionGateSnapshot {
     plan_enabled: bool,
     store: Arc<Mutex<Store>>,
     hooks: crate::hooks::HookSet,
+    timing: Option<Arc<TurnTiming>>,
 }
 
 impl SessionGateSnapshot {
@@ -86,6 +87,7 @@ impl SessionGateSnapshot {
             extra_tools: &extra,
             hooks: &self.hooks,
             history: &self.history,
+            timing: self.timing.clone(),
         };
         exec_tool_gated_ctx(&mut gate, call, tool, item_id, turn_id, tx, cancel).await
     }
@@ -115,6 +117,11 @@ impl Session {
             plan_enabled: self.plan_enabled,
             store: self.store.clone(),
             hooks: self.hooks.clone(),
+            timing: self
+                .turn_timing
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone(),
         }
     }
 

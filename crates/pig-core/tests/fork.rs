@@ -102,6 +102,23 @@ async fn fork_session_truncates_and_switches() {
         !rollout.contains("Summarize once more"),
         "fork rollout must not contain the second turn"
     );
+    let search_store = pig_core::store::Store::open(&data_dir).expect("open search store");
+    assert!(
+        search_store
+            .search_sessions(&pig_core::store::SessionSearchQuery::new("once"))
+            .unwrap()
+            .iter()
+            .all(|hit| hit.session_id != fork_id),
+        "the truncated second turn is absent from the fork index"
+    );
+    assert!(
+        search_store
+            .search_sessions(&pig_core::store::SessionSearchQuery::new("mock"))
+            .unwrap()
+            .iter()
+            .any(|hit| hit.session_id == fork_id),
+        "the retained first turn is indexed for the fork"
+    );
 
     // Index: the SessionList re-emitted for the fork arrives in the C1 batch (before SessionConfigured)
     let listed = configured

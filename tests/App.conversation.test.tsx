@@ -15,6 +15,7 @@ import {
   streamingDiffRows,
   turnDurationMs,
   turnSpeed,
+  turnTimingBreakdown,
   userMessageIsLong,
 } from "../app/conversation";
 import type { ChatItem, TurnState } from "../app/protocol";
@@ -35,6 +36,13 @@ const turn: TurnState = {
     ttft_steps: 1,
     api_steps: 1,
     tool_ms: 300,
+    user_wait_ms: 0,
+    tool_exec_ms: 0,
+    tool_wall_ms: 0,
+    compact_ms: 0,
+    hook_ms: 0,
+    review_ms: 0,
+    overhead_ms: 0,
     ended_at_ms: 2400,
   },
   changes: [{ path: "src/a.ts", unified_diff: "", additions: 3, deletions: 1 }],
@@ -187,6 +195,31 @@ test("resolves replay durations from stats without inventing unknown durations",
 test("calculates decode speed from provider timing rather than character estimates", () => {
   expect(Math.abs(turnSpeed(turn.stats!)! - 200 / 1.5) < 0.0001).toBe(true);
   expect(turnSpeed({ ...turn.stats!, ttft_ms: 0 })).toBeNull();
+});
+
+test("formats critical-path timing and preserves the legacy tool-time fallback", () => {
+  expect(turnTimingBreakdown(turn.stats!)).toEqual([
+    { key: "turn.model_time", value: 2000 },
+    { key: "turn.tool_time", value: 300 },
+  ]);
+  expect(turnTimingBreakdown({
+    ...turn.stats!,
+    user_wait_ms: 100,
+    tool_exec_ms: 150,
+    tool_wall_ms: 200,
+    compact_ms: 0,
+    hook_ms: 20,
+    review_ms: 30,
+    overhead_ms: 20,
+  })).toEqual([
+    { key: "turn.model_time", value: 2000 },
+    { key: "turn.tool_exec", value: 150 },
+    { key: "turn.tool_wall", value: 200 },
+    { key: "turn.user_wait", value: 100 },
+    { key: "turn.review", value: 30 },
+    { key: "turn.hook_time", value: 20 },
+    { key: "turn.overhead", value: 20 },
+  ]);
 });
 
 test("formats compact tokens and wall-clock stamps like the original turn actions", () => {

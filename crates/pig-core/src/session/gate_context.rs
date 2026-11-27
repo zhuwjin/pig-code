@@ -45,4 +45,5 @@ pub(crate) struct GateCtx<'a> {
     /// Conversation history for the hooks' transcript_path snapshot (parent
     /// session's history; background drives carry a detach-time snapshot)
     pub history: &'a [ChatMsg],
+    pub timing: Option<Arc<TurnTiming>>,
 }

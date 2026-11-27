@@ -1,9 +1,9 @@
 import { expect, open, test } from "nsh/test";
 
-async function openStats() {
+async function openStats(locale: "en" | "zh-CN" = "zh-CN") {
   return open("./App.stats.fixture.tsx", {
     platform: "macos",
-    locale: "zh-CN",
+    locale,
     width: 1200,
     height: 800,
     colorScheme: "dark",
@@ -30,6 +30,12 @@ test("opens turn and session statistic details", async () => {
   await app.waitFor("id:turn-speed-turn-stats-panel");
   expect(app.texts()).toContain("回合速度");
   expect(app.texts()).toContain("纯解码速度");
+  expect(app.texts()).toContain("纯工具执行");
+  expect(app.texts()).toContain("工具关键路径");
+  expect(app.texts()).toContain("等待人工审批 / 提问");
+  expect(app.texts()).toContain("审批审核");
+  expect(app.texts()).toContain("上下文压缩");
+  expect(app.texts()).toContain("其他开销");
   await app.press("id:turn-speed-turn-stats");
   await app.waitFor("id:turn-speed-turn-stats-panel", { state: "gone" });
 
@@ -41,6 +47,10 @@ test("opens turn and session statistic details", async () => {
   await app.press("id:session-activity");
   await app.waitFor("id:session-activity-panel");
   expect(app.texts()).toContain("加权解码速度");
+  expect(app.texts()).toContain("纯工具执行累计");
+  expect(app.texts()).toContain("工具关键路径累计");
+  expect(app.texts()).toContain("人工等待累计");
+  expect(app.texts()).toContain("审批审核累计");
 
   await app.press("id:session-usage");
   await app.waitFor("id:session-usage-panel");
@@ -50,4 +60,18 @@ test("opens turn and session statistic details", async () => {
   await app.waitFor("id:context-usage-panel");
   expect(app.texts()).toContain("上下文已使用 1%");
   expect(app.texts()).toContain("系统提示（估算）");
+});
+
+
+test("shows localized critical-path labels in English", async () => {
+  const app = await openStats("en");
+  await app.waitFor("id:turn-speed-turn-stats");
+  await app.press("id:turn-speed-turn-stats");
+  await app.waitFor("id:turn-speed-turn-stats-panel");
+  expect(app.texts()).toContain("Tool execution");
+  expect(app.texts()).toContain("Tool critical path");
+  expect(app.texts()).toContain("User wait");
+  expect(app.texts()).toContain("Approval review");
+  expect(app.texts()).toContain("Compaction");
+  expect(app.texts()).toContain("Other overhead");
 });

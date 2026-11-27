@@ -335,6 +335,20 @@ pub enum RolloutRecord {
         /// Summed per-call tool spans (gate + approval + execution)
         #[serde(default)]
         tool_ms: u64,
+        #[serde(default)]
+        user_wait_ms: u64,
+        #[serde(default)]
+        tool_exec_ms: u64,
+        #[serde(default)]
+        tool_wall_ms: u64,
+        #[serde(default)]
+        compact_ms: u64,
+        #[serde(default)]
+        hook_ms: u64,
+        #[serde(default)]
+        review_ms: u64,
+        #[serde(default)]
+        overhead_ms: u64,
         #[serde(default = "default_true")]
         has_usage: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -662,6 +676,12 @@ impl Rollout {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Byte offset just past the last appended record. Together with the
+    /// session id this is a stable identity for derived search-index rows.
+    pub(crate) fn record_offset(&self) -> u64 {
+        self.bytes
     }
 
     /// Append one durable record. On error the caller must surface it; a
@@ -1006,17 +1026,6 @@ impl RolloutError {
     }
 }
 
-/// Conversation record line prefixes (`#[serde(tag = "type")]` serializes the
-/// tag first) scanned by [`search_sessions_by_content`]: user messages,
-/// Conversation lines searched by content: user messages, canonical assistant
-/// records (text and reasoning), and stop-hook context. Tool calls,
-/// usage/compact records and the meta line are not conversation.
-const CONVERSATION_LINE_PREFIXES: [&str; 3] = [
-    "{\"type\":\"user\"",
-    "{\"type\":\"assistant\"",
-    "{\"type\":\"hook_context\"",
-];
-
 /// One content-search hit: the session id plus the match context (original
 /// casing) pre-split for highlighted rendering — [before] hit [after]
 pub struct ContentHit {
@@ -1033,16 +1042,10 @@ pub struct ContentHit {
 const SNIPPET_BEFORE_CHARS: usize = 40;
 const SNIPPET_AFTER_CHARS: usize = 60;
 
-/// Content search for the UI quick switcher: a session matches when any
-/// conversation record's text contains the query, case-insensitively
-/// (serde_json writes non-ASCII raw, so CJK queries match UTF-8 text
-/// directly). The `*.model-io.jsonl` debug traces are skipped; subagent
-/// rollouts (`{id}.agents/`) live in subdirectories and are not scanned.
-/// Read-only and uncached — meant to be called off the UI thread
-/// (debounced). Returns the hits in directory read order (callers re-sort by
-/// recency).
+/// Compatibility fallback for the UI quick switcher. Normal searches use the
+/// SQLite index; this path reads the same canonical records when that derived
+/// index is unavailable. Subagent rollouts and model-io traces are skipped.
 pub fn search_sessions_by_content(sessions_dir: &Path, query: &str) -> Vec<ContentHit> {
-    let needle = query.to_lowercase();
     let Ok(entries) = std::fs::read_dir(sessions_dir) else {
         return Vec::new();
     };
@@ -1055,11 +1058,16 @@ pub fn search_sessions_by_content(sessions_dir: &Path, query: &str) -> Vec<Conte
         if !name.ends_with(".jsonl") || name.ends_with(".model-io.jsonl") {
             continue;
         }
-        if let Some((before, hit, after)) = rollout_file_snippet(&entry.path(), &needle)
-            && let Some(id) = name.strip_suffix(".jsonl")
+        let Ok(snapshot) = read_content_index_snapshot(&entry.path()) else {
+            continue;
+        };
+        if let Some((before, hit, after)) = snapshot
+            .records
+            .iter()
+            .find_map(|record| content_snippet(&record.content, query))
         {
             hits.push(ContentHit {
-                session_id: id.to_string(),
+                session_id: snapshot.session_id,
                 before,
                 hit,
                 after,
@@ -1069,85 +1077,177 @@ pub fn search_sessions_by_content(sessions_dir: &Path, query: &str) -> Vec<Conte
     hits
 }
 
-/// First-match-wins scan of one rollout file (conversation lines only);
-/// the line buffer is reused so a large rollout does not allocate per line.
-/// Returns the match context as (before, hit, after)
-fn rollout_file_snippet(path: &Path, needle_lower: &str) -> Option<(String, String, String)> {
-    use std::io::BufRead as _;
-    let Ok(file) = std::fs::File::open(path) else {
-        return None;
-    };
-    let mut reader = std::io::BufReader::new(file);
-    let mut line = String::new();
-    loop {
-        line.clear();
-        let Ok(read) = reader.read_line(&mut line) else {
-            return None;
-        };
-        if read == 0 {
-            return None;
-        }
-        // Cheap raw-line gate first (the needle may have matched outside the
-        // text — e.g. a path in a user record's "files" — so the text field
-        // itself is verified below)
-        if !CONVERSATION_LINE_PREFIXES
-            .iter()
-            .any(|prefix| line.starts_with(prefix))
-            || !line.to_lowercase().contains(needle_lower)
-        {
-            continue;
-        }
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
-            continue;
-        };
-        let combined;
-        let text = if value["type"] == "assistant" {
-            combined = ["reasoning", "text"]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ContentIndexRecord {
+    pub offset: u64,
+    pub kind: &'static str,
+    pub content: String,
+    pub created_at_ms: u64,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ContentIndexSnapshot {
+    pub session_id: String,
+    pub cwd: PathBuf,
+    pub records: Vec<ContentIndexRecord>,
+}
+
+/// The single record-type policy shared by incremental indexing, backfill and
+/// the compatibility scanner. Display text is indexed rather than internal
+/// model reminders, attachment payloads or tool results.
+pub(crate) fn content_index_record(
+    record: &RolloutRecord,
+    offset: u64,
+    fallback_ts_ms: u64,
+) -> Option<ContentIndexRecord> {
+    let (kind, content, created_at_ms) = match record {
+        RolloutRecord::User {
+            text, sent_at_ms, ..
+        } => ("user", text.clone(), *sent_at_ms),
+        RolloutRecord::Assistant {
+            text,
+            reasoning,
+            ts_ms,
+            ..
+        } => (
+            "assistant",
+            [reasoning.as_deref(), Some(text.as_str())]
                 .into_iter()
-                .filter_map(|field| value[field].as_str())
+                .flatten()
                 .collect::<Vec<_>>()
-                .join("\n");
-            combined.as_str()
-        } else if let Some(text) = value.get("text").and_then(|text| text.as_str()) {
-            text
-        } else {
+                .join("\n"),
+            *ts_ms,
+        ),
+        RolloutRecord::HookContext { text } => ("hook_context", text.clone(), fallback_ts_ms),
+        RolloutRecord::Compact {
+            summary: Some(summary),
+            ..
+        } => ("summary", summary.clone(), fallback_ts_ms),
+        _ => return None,
+    };
+    (!content.is_empty()).then_some(ContentIndexRecord {
+        offset,
+        kind,
+        content,
+        created_at_ms,
+    })
+}
+
+/// Read a stable search snapshot without repairing the source file. A final
+/// in-flight line is ignored; malformed complete records still reject the
+/// snapshot so a partial index is never marked as current.
+pub(crate) fn read_content_index_snapshot(path: &Path) -> Result<ContentIndexSnapshot, CoreError> {
+    let bytes = std::fs::read(path).map_err(|error| CoreError::RolloutRead {
+        path: path.display().to_string(),
+        detail: error.to_string(),
+    })?;
+    let mut records = Vec::new();
+    let mut offsets = Vec::new();
+    for line in jsonl::lines(&bytes) {
+        if line.body.iter().all(u8::is_ascii_whitespace) {
             continue;
-        };
-        // Single-line display: whitespace runs (incl. newlines) collapse to
-        // one space before windowing
-        let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
-        let Some(start) = flat.to_lowercase().find(needle_lower) else {
-            continue;
-        };
-        let end = start + needle_lower.len();
-        // Byte offsets come from the lowercased copy; for exotic casing
-        // (e.g. İ) they can fall off `flat`'s char boundaries — skip rather
-        // than slice wrong (CJK/latin queries are unaffected)
-        let Some(hit) = flat.get(start..end) else {
-            continue;
-        };
-        let before_full = &flat[..start];
-        let before_chars = before_full.chars().count();
-        let before = if before_chars > SNIPPET_BEFORE_CHARS {
-            let skip = before_chars - SNIPPET_BEFORE_CHARS;
-            format!("…{}", before_full.chars().skip(skip).collect::<String>())
-        } else {
-            before_full.to_string()
-        };
-        let after_full = &flat[end..];
-        let after = if after_full.chars().count() > SNIPPET_AFTER_CHARS {
-            format!(
-                "{}…",
-                after_full
-                    .chars()
-                    .take(SNIPPET_AFTER_CHARS)
-                    .collect::<String>()
-            )
-        } else {
-            after_full.to_string()
-        };
-        return Some((before, hit.to_string(), after));
+        }
+        match parse_line(line.body, line.number) {
+            Ok(record) => {
+                records.push(record);
+                offsets.push((line.start + line.chunk.len()) as u64);
+            }
+            Err(error) => {
+                let is_final = !bytes[line.start + line.chunk.len()..]
+                    .iter()
+                    .any(|byte| !byte.is_ascii_whitespace());
+                if is_final {
+                    break;
+                }
+                return Err(error);
+            }
+        }
     }
+    let session_id = records
+        .iter()
+        .find_map(|record| match record {
+            RolloutRecord::Meta { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .or_else(|| {
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+    let cwd = records
+        .iter()
+        .find_map(|record| match record {
+            RolloutRecord::Meta { cwd, .. } => Some(cwd.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let searchable = rebuild::searchable_record_indices(&records);
+    let mut last_ts_ms = records
+        .iter()
+        .find_map(|record| match record {
+            RolloutRecord::Meta { created_at, .. } => Some(created_at.saturating_mul(1_000)),
+            _ => None,
+        })
+        .unwrap_or(0);
+    let mut indexed = Vec::new();
+    for (index, (record, offset)) in records.iter().zip(offsets).enumerate() {
+        match record {
+            RolloutRecord::User { sent_at_ms, .. } if *sent_at_ms > 0 => {
+                last_ts_ms = *sent_at_ms;
+            }
+            RolloutRecord::Assistant { ts_ms, .. } if *ts_ms > 0 => {
+                last_ts_ms = *ts_ms;
+            }
+            _ => {}
+        }
+        if searchable.contains(&index)
+            && let Some(entry) = content_index_record(record, offset, last_ts_ms)
+        {
+            indexed.push(entry);
+        }
+    }
+    Ok(ContentIndexSnapshot {
+        session_id,
+        cwd,
+        records: indexed,
+    })
+}
+
+/// Split a case-insensitive substring match into the UI's existing snippet
+/// contract. Whitespace is collapsed before applying the character windows.
+pub(crate) fn content_snippet(text: &str, query: &str) -> Option<(String, String, String)> {
+    if query.is_empty() {
+        return None;
+    }
+    let needle_lower = query.to_lowercase();
+    let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let start = flat.to_lowercase().find(&needle_lower)?;
+    let end = start + needle_lower.len();
+    // Exotic casing can change UTF-8 lengths; skip those invalid offsets
+    // instead of slicing at a non-character boundary.
+    let hit = flat.get(start..end)?;
+    let before_full = &flat[..start];
+    let before_chars = before_full.chars().count();
+    let before = if before_chars > SNIPPET_BEFORE_CHARS {
+        let skip = before_chars - SNIPPET_BEFORE_CHARS;
+        format!("…{}", before_full.chars().skip(skip).collect::<String>())
+    } else {
+        before_full.to_string()
+    };
+    let after_full = &flat[end..];
+    let after = if after_full.chars().count() > SNIPPET_AFTER_CHARS {
+        format!(
+            "{}…",
+            after_full
+                .chars()
+                .take(SNIPPET_AFTER_CHARS)
+                .collect::<String>()
+        )
+    } else {
+        after_full.to_string()
+    };
+    Some((before, hit.to_string(), after))
 }
 
 pub fn now_secs() -> u64 {
