@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock, mpsc};
 
 use pig_protocol::{CoreError, ProviderConfig, ProviderCredentialStatus};
@@ -87,8 +88,131 @@ trait CredentialStore: Send + 'static {
     fn delete(&mut self, id: &CredentialId) -> Result<(), CredentialError>;
 }
 
+struct FileCredentialStore {
+    path: PathBuf,
+    profile: String,
+}
+
+impl FileCredentialStore {
+    fn new(data_dir: &Path, profile: String) -> Self {
+        Self {
+            path: data_dir.join("credentials.json"),
+            profile,
+        }
+    }
+
+    fn load_map(&self) -> Result<BTreeMap<String, String>, CredentialError> {
+        let bytes = match std::fs::read(&self.path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(BTreeMap::new());
+            }
+            Err(_) => {
+                return Err(CredentialError::Unavailable(
+                    "failed to read local credential file".to_owned(),
+                ));
+            }
+        };
+        serde_json::from_slice(&bytes).map_err(|_| {
+            CredentialError::Unavailable("local credential file is corrupted".to_owned())
+        })
+    }
+
+    fn save_map(&self, map: &BTreeMap<String, String>) -> Result<(), CredentialError> {
+        let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent).map_err(|_| {
+            CredentialError::Unavailable("failed to create credential directory".to_owned())
+        })?;
+        let tmp = parent.join(format!("credentials-{}.tmp", std::process::id()));
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).truncate(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&tmp).map_err(|_| {
+            CredentialError::Unavailable("failed to open local credential file".to_owned())
+        })?;
+        let encoded = serde_json::to_vec_pretty(map).map_err(|_| {
+            CredentialError::Unavailable("failed to serialize local credentials".to_owned())
+        })?;
+        file.write_all(&encoded).map_err(|_| {
+            CredentialError::Unavailable("failed to write local credential file".to_owned())
+        })?;
+        file.sync_all().map_err(|_| {
+            CredentialError::Unavailable("failed to flush local credential file".to_owned())
+        })?;
+        drop(file);
+        std::fs::rename(&tmp, &self.path).map_err(|_| {
+            let _ = std::fs::remove_file(&tmp);
+            CredentialError::Unavailable("failed to commit local credential file".to_owned())
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let _ = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600));
+        }
+        Ok(())
+    }
+}
+
+impl CredentialStore for FileCredentialStore {
+    fn get(&mut self, id: &CredentialId) -> Result<String, CredentialError> {
+        let map = self.load_map()?;
+        let secret = map
+            .get(&id.account(&self.profile))
+            .cloned()
+            .ok_or(CredentialError::NoEntry)?;
+        if secret.trim().is_empty() {
+            return Err(CredentialError::Empty);
+        }
+        Ok(secret)
+    }
+
+    fn set(&mut self, id: &CredentialId, secret: String) -> Result<(), CredentialError> {
+        if secret.trim().is_empty() {
+            return Err(CredentialError::Empty);
+        }
+        let mut map = self.load_map()?;
+        map.insert(id.account(&self.profile), secret);
+        self.save_map(&map)
+    }
+
+    fn delete(&mut self, id: &CredentialId) -> Result<(), CredentialError> {
+        let mut map = self.load_map()?;
+        let removed = map.remove(&id.account(&self.profile));
+        if removed.is_none() {
+            return Err(CredentialError::NoEntry);
+        }
+        self.save_map(&map)
+    }
+}
+
+fn should_fallback_to_file_store(error: &keyring::Error) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        matches!(
+            error,
+            keyring::Error::NoDefaultStore
+                | keyring::Error::NotSupportedByStore(_)
+                | keyring::Error::NoStorageAccess(_)
+                | keyring::Error::PlatformFailure(_)
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        matches!(
+            error,
+            keyring::Error::NoDefaultStore | keyring::Error::NotSupportedByStore(_)
+        )
+    }
+}
+
 struct SystemCredentialStore {
     profile: String,
+    fallback: FileCredentialStore,
+    use_fallback: bool,
 }
 
 impl SystemCredentialStore {
@@ -101,46 +225,84 @@ impl SystemCredentialStore {
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
-        Self { profile }
+        let fallback = FileCredentialStore::new(data_dir, profile.clone());
+        Self {
+            profile,
+            fallback,
+            use_fallback: false,
+        }
     }
 
-    fn entry(&self, id: &CredentialId) -> Result<keyring::Entry, CredentialError> {
+    fn activate_fallback(&mut self, reason: &str) {
+        if !self.use_fallback {
+            self.use_fallback = true;
+            tracing::warn!(
+                path = %self.fallback.path.display(),
+                reason,
+                "system keyring unavailable; falling back to mode-0600 local credential file"
+            );
+        }
+    }
+
+    fn entry(&self, id: &CredentialId) -> Result<keyring::Entry, keyring::Error> {
         keyring::Entry::new(SERVICE, &id.account(&self.profile))
-            .map_err(|error| CredentialError::Unavailable(safe_keyring_error(error)))
     }
 }
 
 impl CredentialStore for SystemCredentialStore {
     fn get(&mut self, id: &CredentialId) -> Result<String, CredentialError> {
-        let secret = self
-            .entry(id)?
-            .get_password()
-            .map_err(|error| match error {
-                keyring::Error::NoEntry => CredentialError::NoEntry,
-                other => CredentialError::Unavailable(safe_keyring_error(other)),
-            })?;
-        if secret.trim().is_empty() {
-            return Err(CredentialError::Empty);
+        if self.use_fallback {
+            return self.fallback.get(id);
         }
-        Ok(secret)
+        let result = self.entry(id).and_then(|entry| entry.get_password());
+        match result {
+            Ok(secret) => {
+                if secret.trim().is_empty() {
+                    return Err(CredentialError::Empty);
+                }
+                Ok(secret)
+            }
+            Err(keyring::Error::NoEntry) => Err(CredentialError::NoEntry),
+            Err(error) if should_fallback_to_file_store(&error) => {
+                self.activate_fallback(&safe_keyring_error(error));
+                self.fallback.get(id)
+            }
+            Err(error) => Err(CredentialError::Unavailable(safe_keyring_error(error))),
+        }
     }
 
     fn set(&mut self, id: &CredentialId, secret: String) -> Result<(), CredentialError> {
         if secret.trim().is_empty() {
             return Err(CredentialError::Empty);
         }
-        self.entry(id)?
-            .set_password(&secret)
-            .map_err(|error| CredentialError::Unavailable(safe_keyring_error(error)))
+        if self.use_fallback {
+            return self.fallback.set(id, secret);
+        }
+        let result = self.entry(id).and_then(|entry| entry.set_password(&secret));
+        match result {
+            Ok(()) => Ok(()),
+            Err(error) if should_fallback_to_file_store(&error) => {
+                self.activate_fallback(&safe_keyring_error(error));
+                self.fallback.set(id, secret)
+            }
+            Err(error) => Err(CredentialError::Unavailable(safe_keyring_error(error))),
+        }
     }
 
     fn delete(&mut self, id: &CredentialId) -> Result<(), CredentialError> {
-        self.entry(id)?
-            .delete_credential()
-            .map_err(|error| match error {
-                keyring::Error::NoEntry => CredentialError::NoEntry,
-                other => CredentialError::Unavailable(safe_keyring_error(other)),
-            })
+        if self.use_fallback {
+            return self.fallback.delete(id);
+        }
+        let result = self.entry(id).and_then(|entry| entry.delete_credential());
+        match result {
+            Ok(()) => Ok(()),
+            Err(keyring::Error::NoEntry) => Err(CredentialError::NoEntry),
+            Err(error) if should_fallback_to_file_store(&error) => {
+                self.activate_fallback(&safe_keyring_error(error));
+                self.fallback.delete(id)
+            }
+            Err(error) => Err(CredentialError::Unavailable(safe_keyring_error(error))),
+        }
     }
 }
 
@@ -454,5 +616,40 @@ mod tests {
     fn keyring_errors_never_include_raw_bad_encoding_bytes() {
         let detail = safe_keyring_error(keyring::Error::BadEncoding(b"canary".to_vec()));
         assert!(!detail.contains("canary"));
+    }
+
+    #[test]
+    fn file_credential_store_persists_reads_and_deletes_secrets() {
+        let dir = std::env::temp_dir().join(format!(
+            "pig-cred-file-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let mut store = FileCredentialStore::new(&dir, "abcd1234".to_owned());
+        let id = CredentialId::provider("deepseek");
+        assert_eq!(store.get(&id), Err(CredentialError::NoEntry));
+        store.set(&id, "sk-test-123".to_owned()).expect("set");
+        assert_eq!(store.get(&id).expect("get"), "sk-test-123");
+
+        let mut reloaded = FileCredentialStore::new(&dir, "abcd1234".to_owned());
+        assert_eq!(reloaded.get(&id).expect("reloaded get"), "sk-test-123");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(dir.join("credentials.json"))
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+
+        reloaded.delete(&id).expect("delete");
+        assert_eq!(reloaded.get(&id), Err(CredentialError::NoEntry));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

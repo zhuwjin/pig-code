@@ -481,4 +481,32 @@ async fn multi_device_discovery_remote_session_cursor_resync_revocation_and_priv
     )
     .await;
     assert!(rejected.is_err(), "revoked device must reject remote clients");
+
+    // 10. Headless CLI login + live daemon `relay.reload` + logout.
+    let headless_creds = pig_daemon::relay::login_headless(
+        &data_b,
+        &relay_url,
+        "alice",
+        "password-1234",
+        Some("Headless-B"),
+        false,
+    )
+    .await
+    .expect("headless login");
+    assert_eq!(headless_creds.device_name, "Headless-B");
+    let _ = call_rpc(&client_b, "relay.reload", json!({}))
+        .await
+        .expect("relay.reload rpc");
+    let reconnected = wait_relay_connected(&client_b).await;
+    assert_eq!(reconnected.device_name.as_deref(), Some("Headless-B"));
+    pig_daemon::relay::logout_headless(&data_b)
+        .await
+        .expect("headless logout");
+    let after_logout: RelayConnectionStatus = serde_json::from_value(
+        call_rpc(&client_b, "relay.reload", json!({}))
+            .await
+            .expect("relay.reload after logout"),
+    )
+    .expect("parse status after logout");
+    assert!(!after_logout.configured);
 }

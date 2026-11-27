@@ -434,6 +434,10 @@ pub async fn handle_rpc(
             let ok = ctx.relay.revoke_device(device_id).await?;
             Ok(Value::Bool(ok))
         }
+        "relay.reload" => {
+            let status = ctx.relay.reload_from_disk();
+            serde_json::to_value(status).map_err(|error| error.to_string())
+        }
         other => Err(format!("unknown daemon rpc method: {other}")),
     }
 }

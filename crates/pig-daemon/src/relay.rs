@@ -447,6 +447,22 @@ impl RelayManager {
         Ok(true)
     }
 
+    pub fn reload_from_disk(&self) -> RelayConnectionStatus {
+        let loaded = load_saved_relay_credentials(&self.data_dir);
+        {
+            let mut inner = self
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            inner.credentials = loaded;
+            inner.connected = false;
+            inner.last_error = None;
+            inner.generation = inner.generation.wrapping_add(1);
+        }
+        self.notify.notify_waiters();
+        self.status()
+    }
+
     fn require_credentials(&self) -> Result<RelayCredentials, String> {
         self.inner
             .lock()
@@ -821,4 +837,162 @@ async fn decode_http_json<T: for<'de> Deserialize<'de>>(
         return Err(format!("relay returned HTTP {}: {}", status.as_u16(), text));
     }
     serde_json::from_str(&text).map_err(|error| format!("invalid relay JSON response: {error}"))
+}
+
+/// Interactive headless Device-Code pairing flow. Prints the verification URI
+/// and user code, polls until approved or expired, and persists `relay.json`.
+pub async fn pair_headless(
+    data_dir: &Path,
+    relay_url: &str,
+    device_name: Option<&str>,
+) -> Result<RelayCredentials, String> {
+    let base = normalize_relay_http_base(relay_url)?;
+    let resolved_name = device_name
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(default_device_name);
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    let start_resp = http
+        .post(format!("{base}/api/v1/auth/device/start"))
+        .json(&json!({
+            "device_name": resolved_name,
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+        }))
+        .send()
+        .await
+        .map_err(|error| format!("failed to reach relay: {error}"))?;
+    let challenge: DeviceCodeStartResponse = decode_http_json(start_resp).await?;
+
+    println!("Device pairing started for \"{resolved_name}\"");
+    println!("  Open: {}", challenge.verification_uri);
+    println!("  Code: {}", challenge.user_code);
+    println!(
+        "Waiting for approval in Desktop Settings -> Remote or the Web UI (expires in {}s)...",
+        challenge.expires_in_secs
+    );
+    let _ = std::io::stdout().flush();
+
+    let poll_interval = Duration::from_secs(challenge.interval_secs.max(1));
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                return Err("pairing cancelled".to_string());
+            }
+            _ = tokio::time::sleep(poll_interval) => {}
+        }
+        let poll_resp = http
+            .post(format!("{base}/api/v1/auth/device/poll"))
+            .json(&json!({ "device_code": challenge.device_code }))
+            .send()
+            .await
+            .map_err(|error| format!("failed to poll relay: {error}"))?;
+        let poll: DeviceCodePollResponse = decode_http_json(poll_resp).await?;
+        match poll {
+            DeviceCodePollResponse::Pending => continue,
+            DeviceCodePollResponse::Expired => {
+                return Err("device code expired before approval".to_string());
+            }
+            DeviceCodePollResponse::Approved {
+                user,
+                session_token,
+                device_id,
+                device_token,
+            } => {
+                let creds = RelayCredentials {
+                    relay_url: base,
+                    user_id: user.user_id,
+                    username: user.username,
+                    session_token,
+                    device_id,
+                    device_token,
+                    device_name: resolved_name,
+                };
+                save_relay_credentials(data_dir, &creds)?;
+                return Ok(creds);
+            }
+        }
+    }
+}
+
+/// Non-interactive headless login or registration for a relay account.
+pub async fn login_headless(
+    data_dir: &Path,
+    relay_url: &str,
+    username: &str,
+    password: &str,
+    device_name: Option<&str>,
+    register: bool,
+) -> Result<RelayCredentials, String> {
+    let base = normalize_relay_http_base(relay_url)?;
+    let resolved_name = device_name
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(default_device_name);
+    let existing_device_id = load_saved_relay_credentials(data_dir)
+        .filter(|creds| creds.relay_url == base)
+        .map(|creds| creds.device_id);
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+    let path = if register {
+        "/api/v1/auth/register"
+    } else {
+        "/api/v1/auth/login"
+    };
+    let resp = http
+        .post(format!("{base}{path}"))
+        .json(&json!({
+            "username": username,
+            "password": password,
+            "device_name": resolved_name,
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+            "device_id": existing_device_id,
+        }))
+        .send()
+        .await
+        .map_err(|error| format!("failed to reach relay: {error}"))?;
+    let auth: RelayAuthResponse = decode_http_json(resp).await?;
+    let device_id = auth
+        .device_id
+        .ok_or_else(|| "relay did not return a device_id".to_string())?;
+    let device_token = auth
+        .device_token
+        .ok_or_else(|| "relay did not return a device_token".to_string())?;
+    let creds = RelayCredentials {
+        relay_url: base,
+        user_id: auth.user.user_id,
+        username: auth.user.username,
+        session_token: auth.session_token,
+        device_id,
+        device_token,
+        device_name: resolved_name,
+    };
+    save_relay_credentials(data_dir, &creds)?;
+    Ok(creds)
+}
+
+/// Revoke the saved session token on the relay (best-effort) and remove `relay.json`.
+pub async fn logout_headless(data_dir: &Path) -> Result<(), String> {
+    if let Some(creds) = load_saved_relay_credentials(data_dir) {
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        let _ = http
+            .post(format!("{}/api/v1/auth/logout", creds.relay_url))
+            .bearer_auth(&creds.session_token)
+            .send()
+            .await;
+    }
+    delete_relay_credentials(data_dir);
+    Ok(())
 }
