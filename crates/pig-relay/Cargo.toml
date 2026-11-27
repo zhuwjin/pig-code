@@ -1,0 +1,32 @@
+[package]
+name = "pig-relay"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+pig-protocol = { path = "../pig-protocol" }
+pig-utils = { path = "../pig-utils" }
+async-channel = "2"
+base64 = "0.22"
+futures-util = "0.3"
+hmac = "0.12"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio", "http1", "server"] }
+rand = "0.9"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+subtle = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time", "io-util", "sync"] }
+tokio-tungstenite = "0.28"
+tracing = "0.1"
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+pig-core = { path = "../pig-core" }
+pig-daemon = { path = "../pig-daemon" }
+pig-provider = { path = "../pig-provider" }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

@@ -6,14 +6,16 @@ import { ModelSettings } from "./model-settings";
 import { PluginMarketplace } from "./marketplace";
 import { ThemePicker } from "../../theme-picker";
 import { DeveloperSettings } from "./developer-settings";
+import { RemoteSettings } from "./remote-settings";
 
-export type SettingsPageId = "models" | "appearance" | "plugins" | "marketplace" | "developer";
+export type SettingsPageId = "models" | "appearance" | "plugins" | "marketplace" | "remote" | "developer";
 
 export const SETTINGS_PAGES: { id: SettingsPageId; titleKey: MessageKey; icon: IconName }[] = [
   { id: "models", titleKey: "settings.nav.models", icon: "settings" },
   { id: "appearance", titleKey: "settings.nav.appearance", icon: "sun" },
   { id: "plugins", titleKey: "settings.nav.plugins", icon: "sliders-horizontal" },
   { id: "marketplace", titleKey: "settings.nav.marketplace", icon: "globe" },
+  { id: "remote", titleKey: "settings.nav.remote", icon: "wifi" },
   { id: "developer", titleKey: "settings.nav.developer", icon: "code" },
 ];
 
@@ -69,6 +71,7 @@ export function SettingsPage(props: UiContext & { page: SettingsPageId }) {
         <If when={props.page === "appearance"}><ThemePicker {...pickerProps("appearance")} /></If>
         <If when={props.page === "plugins"}><ThemePicker {...pickerProps("plugins")} /></If>
         <If when={props.page === "marketplace"}><PluginMarketplace {...props} /></If>
+        <If when={props.page === "remote"}><RemoteSettings {...props} /></If>
         <If when={props.page === "developer"}><DeveloperSettings {...props} /></If>
       </View>
     </View>

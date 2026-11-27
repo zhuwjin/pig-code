@@ -12,7 +12,10 @@ use crossterm::terminal::{
 };
 use crossterm::{execute, queue};
 use futures_util::StreamExt as _;
-use pig_daemon::{DaemonClient, DaemonConnectConfig, DaemonMessage, snapshot_events};
+use pig_daemon::{
+    DaemonClient, DaemonConnectConfig, DaemonMessage, RemoteConnectConfig, list_relay_devices,
+    load_saved_relay_credentials, snapshot_events,
+};
 use pig_protocol::{
     ApprovalDecision, ConversationItem, Event, ExecMode, MessageDelivery, Op, PermissionSettings,
 };
@@ -37,8 +40,13 @@ impl Drop for TerminalGuard {
 
 struct Options {
     connect: DaemonConnectConfig,
+    cwd_explicit: bool,
     session_id: Option<String>,
     new_session: bool,
+    relay_url: Option<String>,
+    relay_token: Option<String>,
+    device: Option<String>,
+    list_devices: bool,
 }
 
 fn options() -> Result<Options, String> {
@@ -48,8 +56,13 @@ fn options() -> Result<Options, String> {
             cwd: std::env::current_dir().map_err(|error| error.to_string())?,
             config_path: None,
         },
+        cwd_explicit: false,
         session_id: None,
         new_session: false,
+        relay_url: None,
+        relay_token: None,
+        device: None,
+        list_devices: false,
     };
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
@@ -67,6 +80,7 @@ fn options() -> Result<Options, String> {
                         .next()
                         .ok_or("--cwd requires a path".to_string())?,
                 );
+                options.cwd_explicit = true;
             }
             "--config" => {
                 options.connect.config_path = Some(PathBuf::from(
@@ -82,10 +96,32 @@ fn options() -> Result<Options, String> {
                         .ok_or("--session requires an id".to_string())?,
                 );
             }
+            "--relay" => {
+                options.relay_url = Some(
+                    arguments
+                        .next()
+                        .ok_or("--relay requires a URL".to_string())?,
+                );
+            }
+            "--token" => {
+                options.relay_token = Some(
+                    arguments
+                        .next()
+                        .ok_or("--token requires a session token".to_string())?,
+                );
+            }
+            "--device" => {
+                options.device = Some(
+                    arguments
+                        .next()
+                        .ok_or("--device requires a device id or name".to_string())?,
+                );
+            }
+            "--list-devices" => options.list_devices = true,
             "--new" => options.new_session = true,
             "--help" | "-h" => {
                 println!(
-                    "pig-tui [--data-dir PATH] [--cwd PATH] [--config PATH] [--session ID | --new]\n\n/open ID /new [PATH] /sessions /stop /allow ID /deny ID /answer ID TEXT /skip ID /quit"
+                    "pig-tui [--data-dir PATH] [--cwd PATH] [--config PATH] [--session ID | --new] [--relay URL] [--token TOKEN] [--device ID_OR_NAME] [--list-devices]\n\n/open ID /new [PATH] /sessions /stop /allow ID /deny ID /answer ID TEXT /skip ID /quit"
                 );
                 std::process::exit(0);
             }
@@ -97,6 +133,7 @@ fn options() -> Result<Options, String> {
 
 struct Tui {
     client: DaemonClient,
+    target_label: Option<String>,
     cwd: PathBuf,
     session_id: Option<String>,
     auto_open: bool,
@@ -110,10 +147,15 @@ struct Tui {
 }
 
 impl Tui {
-    fn new(client: DaemonClient, options: &Options) -> Self {
+    fn new(client: DaemonClient, options: &Options, target_label: Option<String>) -> Self {
         Self {
             client,
-            cwd: options.connect.cwd.clone(),
+            target_label,
+            cwd: if options.device.is_some() && !options.cwd_explicit {
+                PathBuf::from(".")
+            } else {
+                options.connect.cwd.clone()
+            },
             session_id: options.session_id.clone(),
             auto_open: !options.new_session && options.session_id.is_none(),
             awaiting_new_session: options.new_session,
@@ -401,11 +443,18 @@ impl Tui {
         }
         let mut output = stdout();
         queue!(output, Clear(ClearType::All), MoveTo(0, 0)).map_err(|error| error.to_string())?;
-        let status = format!(
-            "pig-tui | {} | {}",
-            self.session_id.as_deref().unwrap_or("no session"),
-            if self.running { "running" } else { "idle" }
-        );
+        let status = match &self.target_label {
+            Some(label) => format!(
+                "pig-tui [@{label}] | {} | {}",
+                self.session_id.as_deref().unwrap_or("no session"),
+                if self.running { "running" } else { "idle" }
+            ),
+            None => format!(
+                "pig-tui | {} | {}",
+                self.session_id.as_deref().unwrap_or("no session"),
+                if self.running { "running" } else { "idle" }
+            ),
+        };
         let width_usize = width as usize;
         queue!(output, Print(truncate(&status, width_usize)))
             .map_err(|error| error.to_string())?;
@@ -599,16 +648,87 @@ async fn run(mut tui: Tui) -> Result<(), String> {
     }
 }
 
+fn resolve_relay_auth(options: &Options) -> Result<(String, String), String> {
+    let saved = load_saved_relay_credentials(&options.connect.data_dir);
+    let relay_url = options
+        .relay_url
+        .clone()
+        .or_else(|| saved.as_ref().map(|creds| creds.relay_url.clone()))
+        .ok_or_else(|| {
+            "missing --relay URL (and no saved relay login in daemon/relay.json)".to_string()
+        })?;
+    let token = options
+        .relay_token
+        .clone()
+        .or_else(|| saved.as_ref().map(|creds| creds.session_token.clone()))
+        .ok_or_else(|| {
+            "missing --token session token (and no saved relay login in daemon/relay.json)"
+                .to_string()
+        })?;
+    Ok((relay_url, token))
+}
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() {
     let result = async {
         let options = options()?;
-        let client = DaemonClient::connect_or_spawn(options.connect.clone())?;
-        let mut tui = Tui::new(client.clone(), &options);
+        if options.list_devices {
+            let (relay_url, token) = resolve_relay_auth(&options)?;
+            let devices = list_relay_devices(&relay_url, &token).await?;
+            if devices.is_empty() {
+                println!("No devices registered.");
+            } else {
+                for device in devices {
+                    let status = if device.online { "online" } else { "offline" };
+                    println!(
+                        "{:<7}  {:<24}  {}/{:<10}  {}",
+                        status, device.name, device.os, device.arch, device.device_id
+                    );
+                }
+            }
+            return Ok(());
+        }
+
+        let (client, target_label) = if let Some(requested) = options.device.as_deref() {
+            let (relay_url, session_token) = resolve_relay_auth(&options)?;
+            let devices = list_relay_devices(&relay_url, &session_token).await?;
+            let matched = devices
+                .iter()
+                .find(|device| {
+                    device.device_id == requested
+                        || device.name.eq_ignore_ascii_case(requested)
+                        || device.device_id.starts_with(requested)
+                })
+                .cloned();
+            let (device_id, label) = match matched {
+                Some(device) => {
+                    if !device.online {
+                        return Err(format!("device `{}` is currently offline", device.name));
+                    }
+                    (device.device_id, device.name)
+                }
+                None => (requested.to_string(), requested.to_string()),
+            };
+            let client = DaemonClient::connect_remote_managed(
+                RemoteConnectConfig {
+                    relay_url,
+                    session_token,
+                    device_id,
+                },
+                None,
+                None,
+            )
+            .await?;
+            (client, Some(label))
+        } else {
+            (DaemonClient::connect_or_spawn(options.connect.clone())?, None)
+        };
+
+        let mut tui = Tui::new(client.clone(), &options, target_label);
         client.send_op(Op::ListSessions)?;
         if options.new_session {
             client.send_op(Op::NewSession {
-                cwd: options.connect.cwd.clone(),
+                cwd: tui.cwd.clone(),
                 provider_id: None,
                 model_id: None,
                 reasoning_level: None,
@@ -644,10 +764,15 @@ mod tests {
                 cwd: PathBuf::from("."),
                 config_path: None,
             },
+            cwd_explicit: false,
             session_id: session_id.map(str::to_string),
             new_session,
+            relay_url: None,
+            relay_token: None,
+            device: None,
+            list_devices: false,
         };
-        Tui::new(client, &options)
+        Tui::new(client, &options, None)
     }
 
     fn configured(session_id: &str) -> Event {

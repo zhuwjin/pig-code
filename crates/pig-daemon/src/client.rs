@@ -22,9 +22,23 @@ pub struct DaemonConnectConfig {
     pub config_path: Option<PathBuf>,
 }
 
+#[derive(Clone, Debug)]
+pub struct RemoteConnectConfig {
+    pub relay_url: String,
+    pub session_token: String,
+    pub device_id: String,
+}
+
+#[derive(Clone)]
+enum ReconnectTarget {
+    Local(DaemonConnectConfig),
+    Remote(RemoteConnectConfig),
+}
+
 #[derive(Clone)]
 pub struct DaemonClient {
     pub ops: async_channel::Sender<Op>,
+    requests: Option<async_channel::Sender<DaemonRequest>>,
     pub messages: async_channel::Receiver<DaemonMessage>,
     cursor: Arc<Mutex<Option<EventCursor>>>,
 }
@@ -36,6 +50,7 @@ impl DaemonClient {
     ) -> Self {
         Self {
             ops,
+            requests: None,
             messages,
             cursor: Arc::new(Mutex::new(None)),
         }
@@ -43,6 +58,25 @@ impl DaemonClient {
 
     pub fn send_op(&self, op: Op) -> Result<(), String> {
         self.ops.try_send(op).map_err(|error| error.to_string())
+    }
+
+    pub fn send_rpc(
+        &self,
+        id: impl Into<String>,
+        method: impl Into<String>,
+        params: serde_json::Value,
+    ) -> Result<(), String> {
+        let sender = self
+            .requests
+            .as_ref()
+            .ok_or_else(|| "RPC channel is unavailable on channel-backed client".to_string())?;
+        sender
+            .try_send(DaemonRequest::Rpc {
+                id: id.into(),
+                method: method.into(),
+                params,
+            })
+            .map_err(|error| error.to_string())
     }
 
     pub async fn recv(&self) -> Result<DaemonMessage, async_channel::RecvError> {
@@ -72,20 +106,77 @@ impl DaemonClient {
         Ok(spawn_io(websocket, None, session_ids))
     }
 
+    pub async fn connect_remote(
+        remote: RemoteConnectConfig,
+        after: Option<EventCursor>,
+        session_ids: Option<Vec<String>>,
+    ) -> Result<Self, String> {
+        let websocket = open_remote_websocket(&remote, after, session_ids.clone()).await?;
+        Ok(spawn_io(websocket, None, session_ids))
+    }
+
+    pub async fn connect_remote_managed(
+        remote: RemoteConnectConfig,
+        after: Option<EventCursor>,
+        session_ids: Option<Vec<String>>,
+    ) -> Result<Self, String> {
+        let websocket = open_remote_websocket(&remote, after, session_ids.clone()).await?;
+        Ok(spawn_io(
+            websocket,
+            Some(ReconnectTarget::Remote(remote)),
+            session_ids,
+        ))
+    }
+
     pub fn connect_or_spawn(config: DaemonConnectConfig) -> Result<Self, String> {
         let endpoint = discover_or_spawn(&config)?;
         let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
         let reconnect_config = config.clone();
         client_runtime().spawn(async move {
-            let result = open_websocket(&endpoint, None, None)
-                .await
-                .map(|websocket| spawn_io(websocket, Some(reconnect_config), None));
+            let result = open_websocket(&endpoint, None, None).await.map(|websocket| {
+                spawn_io(
+                    websocket,
+                    Some(ReconnectTarget::Local(reconnect_config)),
+                    None,
+                )
+            });
             let _ = result_tx.send(result);
         });
         result_rx
             .recv_timeout(Duration::from_secs(15))
             .map_err(|_| "timed out initializing pig-daemon client".to_string())?
     }
+}
+
+async fn open_remote_websocket(
+    remote: &RemoteConnectConfig,
+    after: Option<EventCursor>,
+    session_ids: Option<Vec<String>>,
+) -> Result<DaemonSocket, String> {
+    let url = crate::relay::relay_ws_endpoint(
+        &remote.relay_url,
+        &format!("/ws/client/{}", remote.device_id),
+    )?;
+    let mut request = url
+        .into_client_request()
+        .map_err(|error| error.to_string())?;
+    let authorization = HeaderValue::from_str(&format!("Bearer {}", remote.session_token))
+        .map_err(|error| error.to_string())?;
+    request.headers_mut().insert(AUTHORIZATION, authorization);
+    let (mut websocket, _) = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio_tungstenite::connect_async(request),
+    )
+    .await
+    .map_err(|_| "timed out connecting to pig-relay".to_string())?
+    .map_err(|error| error.to_string())?;
+    let subscribe = serde_json::to_string(&DaemonRequest::Subscribe { after, session_ids })
+        .map_err(|error| error.to_string())?;
+    websocket
+        .send(Message::text(subscribe))
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(websocket)
 }
 
 async fn open_websocket(
@@ -144,32 +235,33 @@ enum SessionOutcome {
     Shutdown,
     Disconnected {
         reason: String,
-        unsent_op: Option<Op>,
+        unsent_request: Option<DaemonRequest>,
     },
 }
 
 async fn drive_socket(
     websocket: DaemonSocket,
     op_receiver: &async_channel::Receiver<Op>,
+    request_receiver: &async_channel::Receiver<DaemonRequest>,
     message_sender: &async_channel::Sender<DaemonMessage>,
     task_cursor: &Mutex<Option<EventCursor>>,
-    mut pending_op: Option<Op>,
+    mut pending_request: Option<DaemonRequest>,
 ) -> SessionOutcome {
     let (mut writer, mut reader) = websocket.split();
-    if let Some(op) = pending_op.take() {
-        let encoded = match serde_json::to_string(&DaemonRequest::Op { op: op.clone() }) {
+    if let Some(request) = pending_request.take() {
+        let encoded = match serde_json::to_string(&request) {
             Ok(encoded) => encoded,
             Err(error) => {
                 return SessionOutcome::Disconnected {
                     reason: error.to_string(),
-                    unsent_op: None,
+                    unsent_request: None,
                 };
             }
         };
         if let Err(error) = writer.send(Message::text(encoded)).await {
             return SessionOutcome::Disconnected {
                 reason: error.to_string(),
-                unsent_op: Some(op),
+                unsent_request: Some(request),
             };
         }
     }
@@ -178,19 +270,42 @@ async fn drive_socket(
             operation = op_receiver.recv() => {
                 match operation {
                     Ok(op) => {
-                        let encoded = match serde_json::to_string(&DaemonRequest::Op { op: op.clone() }) {
+                        let req = DaemonRequest::Op { op };
+                        let encoded = match serde_json::to_string(&req) {
                             Ok(encoded) => encoded,
                             Err(error) => {
                                 return SessionOutcome::Disconnected {
                                     reason: error.to_string(),
-                                    unsent_op: None,
+                                    unsent_request: None,
                                 };
                             }
                         };
                         if let Err(error) = writer.send(Message::text(encoded)).await {
                             return SessionOutcome::Disconnected {
                                 reason: error.to_string(),
-                                unsent_op: Some(op),
+                                unsent_request: Some(req),
+                            };
+                        }
+                    }
+                    Err(_) => return SessionOutcome::Shutdown,
+                }
+            }
+            request = request_receiver.recv() => {
+                match request {
+                    Ok(req) => {
+                        let encoded = match serde_json::to_string(&req) {
+                            Ok(encoded) => encoded,
+                            Err(error) => {
+                                return SessionOutcome::Disconnected {
+                                    reason: error.to_string(),
+                                    unsent_request: None,
+                                };
+                            }
+                        };
+                        if let Err(error) = writer.send(Message::text(encoded)).await {
+                            return SessionOutcome::Disconnected {
+                                reason: error.to_string(),
+                                unsent_request: Some(req),
                             };
                         }
                     }
@@ -210,7 +325,7 @@ async fn drive_socket(
                             Err(error) => {
                                 return SessionOutcome::Disconnected {
                                     reason: error.to_string(),
-                                    unsent_op: None,
+                                    unsent_request: None,
                                 };
                             }
                         }
@@ -226,7 +341,7 @@ async fn drive_socket(
                             Err(error) => {
                                 return SessionOutcome::Disconnected {
                                     reason: error.to_string(),
-                                    unsent_op: None,
+                                    unsent_request: None,
                                 };
                             }
                         }
@@ -235,21 +350,21 @@ async fn drive_socket(
                         if let Err(error) = writer.send(Message::Pong(payload)).await {
                             return SessionOutcome::Disconnected {
                                 reason: error.to_string(),
-                                unsent_op: None,
+                                unsent_request: None,
                             };
                         }
                     }
                     Some(Ok(Message::Close(_))) | None => {
                         return SessionOutcome::Disconnected {
                             reason: "daemon connection closed".to_string(),
-                            unsent_op: None,
+                            unsent_request: None,
                         };
                     }
                     Some(Ok(_)) => {}
                     Some(Err(error)) => {
                         return SessionOutcome::Disconnected {
                             reason: error.to_string(),
-                            unsent_op: None,
+                            unsent_request: None,
                         };
                     }
                 }
@@ -259,7 +374,7 @@ async fn drive_socket(
 }
 
 async fn reconnect_socket(
-    config: &DaemonConnectConfig,
+    target: &ReconnectTarget,
     cursor: Option<EventCursor>,
     session_ids: Option<Vec<String>>,
 ) -> Result<DaemonSocket, String> {
@@ -267,23 +382,35 @@ async fn reconnect_socket(
     let mut last_error = "daemon connection closed".to_string();
     for delay_ms in BACKOFF_MS {
         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-        let config_clone = config.clone();
-        let endpoint = match tokio::task::spawn_blocking(move || discover_or_spawn(&config_clone))
-            .await
-        {
-            Ok(Ok(endpoint)) => endpoint,
-            Ok(Err(error)) => {
-                last_error = error;
-                continue;
+        match target {
+            ReconnectTarget::Local(config) => {
+                let config_clone = config.clone();
+                let endpoint = match tokio::task::spawn_blocking(move || {
+                    discover_or_spawn(&config_clone)
+                })
+                .await
+                {
+                    Ok(Ok(endpoint)) => endpoint,
+                    Ok(Err(error)) => {
+                        last_error = error;
+                        continue;
+                    }
+                    Err(error) => {
+                        last_error = error.to_string();
+                        continue;
+                    }
+                };
+                match open_websocket(&endpoint, cursor.clone(), session_ids.clone()).await {
+                    Ok(socket) => return Ok(socket),
+                    Err(error) => last_error = error,
+                }
             }
-            Err(error) => {
-                last_error = error.to_string();
-                continue;
+            ReconnectTarget::Remote(remote) => {
+                match open_remote_websocket(remote, cursor.clone(), session_ids.clone()).await {
+                    Ok(socket) => return Ok(socket),
+                    Err(error) => last_error = error,
+                }
             }
-        };
-        match open_websocket(&endpoint, cursor.clone(), session_ids.clone()).await {
-            Ok(socket) => return Ok(socket),
-            Err(error) => last_error = error,
         }
     }
     Err(last_error)
@@ -291,28 +418,33 @@ async fn reconnect_socket(
 
 fn spawn_io(
     mut websocket: DaemonSocket,
-    reconnect_config: Option<DaemonConnectConfig>,
+    reconnect_target: Option<ReconnectTarget>,
     session_ids: Option<Vec<String>>,
 ) -> DaemonClient {
     let (ops, op_receiver) = async_channel::bounded::<Op>(256);
+    let (requests, request_receiver) = async_channel::bounded::<DaemonRequest>(256);
     let (message_sender, messages) = async_channel::bounded::<DaemonMessage>(256);
     let cursor = Arc::new(Mutex::new(None));
     let task_cursor = cursor.clone();
     tokio::spawn(async move {
-        let mut pending_op = None;
+        let mut pending_request = None;
         loop {
             match drive_socket(
                 websocket,
                 &op_receiver,
+                &request_receiver,
                 &message_sender,
                 &task_cursor,
-                pending_op.take(),
+                pending_request.take(),
             )
             .await
             {
                 SessionOutcome::Shutdown => break,
-                SessionOutcome::Disconnected { reason, unsent_op } => {
-                    let Some(config) = reconnect_config.as_ref() else {
+                SessionOutcome::Disconnected {
+                    reason,
+                    unsent_request,
+                } => {
+                    let Some(target) = reconnect_target.as_ref() else {
                         if reason != "daemon connection closed" {
                             let _ = message_sender
                                 .send(DaemonMessage::Error { detail: reason })
@@ -327,10 +459,10 @@ fn spawn_io(
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
                         .clone();
-                    match reconnect_socket(config, resume_cursor, session_ids.clone()).await {
+                    match reconnect_socket(target, resume_cursor, session_ids.clone()).await {
                         Ok(next_socket) => {
                             websocket = next_socket;
-                            pending_op = unsent_op;
+                            pending_request = unsent_request;
                         }
                         Err(error) => {
                             let _ = message_sender
@@ -350,6 +482,7 @@ fn spawn_io(
     });
     DaemonClient {
         ops,
+        requests: Some(requests),
         messages,
         cursor,
     }

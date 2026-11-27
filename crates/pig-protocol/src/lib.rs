@@ -25,6 +25,7 @@ mod event;
 mod op;
 mod plugin;
 mod plugin_runtime;
+mod relay;
 
 pub use config::*;
 pub use daemon::*;
@@ -33,6 +34,7 @@ pub use event::*;
 pub use op::*;
 pub use plugin::*;
 pub use plugin_runtime::*;
+pub use relay::*;
 
 /// Sandbox policy (Codex's permission profile): the filesystem boundary.
 ///

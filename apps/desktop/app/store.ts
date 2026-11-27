@@ -1,5 +1,12 @@
 import { batch, signal } from "nsh";
-import { DaemonAgent, type DirectoryListing } from "./daemon-client";
+import {
+  DaemonAgent,
+  type DeviceCodePollResult,
+  type DeviceCodeStartResponse,
+  type DirectoryListing,
+  type RelayConnectionStatus,
+  type RelayDeviceInfo,
+} from "./daemon-client";
 import { t } from "./i18n";
 import {
   AppConfig,
@@ -150,6 +157,12 @@ export class AgentStore {
   readonly fontFamilies = signal<string[]>([]);
   readonly sandboxStatusState = signal<PlatformSandboxStatus | null>(null);
   readonly themeError = signal("");
+  readonly relayStatus = signal<RelayConnectionStatus | null>(null);
+  readonly relayDevices = signal<RelayDeviceInfo[]>([]);
+  readonly relayBusy = signal(false);
+  readonly relayError = signal("");
+  readonly activeDevice = signal<RelayDeviceInfo | null>(null);
+  readonly switchingDevice = signal(false);
   private autoOpen = true;
   private heroModelDirty = false;
   private pendingSubmission: PendingSubmission | null = null;
@@ -211,6 +224,7 @@ export class AgentStore {
     );
     this.refreshSandboxStatus();
     this.refreshPluginMarketplaces();
+    void this.refreshRelayStatus();
     void this.agent.listen((raw) => {
       try {
         const events = JSON.parse(raw);
@@ -1952,5 +1966,228 @@ export class AgentStore {
 
   private setError(sessionId: string, message: string): void {
     this.errors.update((all) => ({ ...all, [sessionId]: message }));
+  }
+
+  async refreshRelayStatus(): Promise<RelayConnectionStatus | null> {
+    try {
+      const status = await this.agent.relayStatus();
+      this.relayStatus.set(status);
+      if (status.configured) {
+        await this.refreshRelayDevices();
+      } else {
+        this.relayDevices.set([]);
+      }
+      return status;
+    } catch {
+      return null;
+    }
+  }
+
+  async refreshRelayDevices(): Promise<RelayDeviceInfo[]> {
+    try {
+      const devices = await this.agent.relayDevices();
+      this.relayDevices.set(devices);
+      return devices;
+    } catch (error) {
+      this.relayError.set(errorMessage(error));
+      return [];
+    }
+  }
+
+  async relayRegister(
+    relayUrl: string,
+    username: string,
+    password: string,
+    deviceName?: string,
+  ): Promise<boolean> {
+    this.relayBusy.set(true);
+    this.relayError.set("");
+    try {
+      const status = await this.agent.relayRegister(relayUrl, username, password, deviceName);
+      this.relayStatus.set(status);
+      await this.refreshRelayDevices();
+      setTimeout(() => void this.refreshRelayStatus(), 1200);
+      return true;
+    } catch (error) {
+      this.relayError.set(errorMessage(error));
+      return false;
+    } finally {
+      this.relayBusy.set(false);
+    }
+  }
+
+  async relayLogin(
+    relayUrl: string,
+    username: string,
+    password: string,
+    deviceName?: string,
+  ): Promise<boolean> {
+    this.relayBusy.set(true);
+    this.relayError.set("");
+    try {
+      const status = await this.agent.relayLogin(relayUrl, username, password, deviceName);
+      this.relayStatus.set(status);
+      await this.refreshRelayDevices();
+      setTimeout(() => void this.refreshRelayStatus(), 1200);
+      return true;
+    } catch (error) {
+      this.relayError.set(errorMessage(error));
+      return false;
+    } finally {
+      this.relayBusy.set(false);
+    }
+  }
+
+  async relayDeviceStart(relayUrl: string, deviceName?: string): Promise<DeviceCodeStartResponse | null> {
+    this.relayBusy.set(true);
+    this.relayError.set("");
+    try {
+      return await this.agent.relayDeviceStart(relayUrl, deviceName);
+    } catch (error) {
+      this.relayError.set(errorMessage(error));
+      return null;
+    } finally {
+      this.relayBusy.set(false);
+    }
+  }
+
+  async relayDevicePoll(
+    relayUrl: string,
+    deviceCode: string,
+    deviceName?: string,
+  ): Promise<DeviceCodePollResult | null> {
+    this.relayBusy.set(true);
+    this.relayError.set("");
+    try {
+      const res = await this.agent.relayDevicePoll(relayUrl, deviceCode, deviceName);
+      if (res.status === "approved") {
+        if (res.relay) this.relayStatus.set(res.relay);
+        await this.refreshRelayDevices();
+        setTimeout(() => void this.refreshRelayStatus(), 1200);
+      }
+      return res;
+    } catch (error) {
+      this.relayError.set(errorMessage(error));
+      return null;
+    } finally {
+      this.relayBusy.set(false);
+    }
+  }
+
+  async relayApproveCode(userCode: string): Promise<boolean> {
+    this.relayBusy.set(true);
+    this.relayError.set("");
+    try {
+      await this.agent.relayApproveCode(userCode);
+      setTimeout(() => void this.refreshRelayDevices(), 1200);
+      return true;
+    } catch (error) {
+      this.relayError.set(errorMessage(error));
+      return false;
+    } finally {
+      this.relayBusy.set(false);
+    }
+  }
+
+  async relayLogout(): Promise<void> {
+    this.relayBusy.set(true);
+    this.relayError.set("");
+    try {
+      if (this.activeDevice() !== null) {
+        await this.selectDevice(null);
+      }
+      const status = await this.agent.relayLogout();
+      this.relayStatus.set(status);
+      this.relayDevices.set([]);
+    } catch (error) {
+      this.relayError.set(errorMessage(error));
+    } finally {
+      this.relayBusy.set(false);
+    }
+  }
+
+  async relayRevokeDevice(deviceId: string): Promise<void> {
+    this.relayBusy.set(true);
+    this.relayError.set("");
+    try {
+      if (this.activeDevice()?.device_id === deviceId) {
+        await this.selectDevice(null);
+      }
+      await this.agent.relayRevokeDevice(deviceId);
+      await this.refreshRelayStatus();
+    } catch (error) {
+      this.relayError.set(errorMessage(error));
+    } finally {
+      this.relayBusy.set(false);
+    }
+  }
+
+  async selectDevice(device: RelayDeviceInfo | null): Promise<void> {
+    const status = this.relayStatus();
+    const isSelf = device !== null && status?.device_id === device.device_id;
+    const nextRemote = device !== null && !isSelf ? device : null;
+    if (nextRemote === null && this.activeDevice() === null) return;
+    if (nextRemote !== null && this.activeDevice()?.device_id === nextRemote.device_id) return;
+
+    this.switchingDevice.set(true);
+    this.relayError.set("");
+    try {
+      if (nextRemote && (!status?.relay_url || !status?.session_token)) {
+        throw new Error("relay session token unavailable");
+      }
+      batch(() => {
+        this.autoOpen = true;
+        this.pendingSubmission = null;
+        this.activeTurns.clear();
+        this.configuredSessions.clear();
+        this.current.set(null);
+        this.heroCwd.set(null);
+        this.cwd.set(".");
+        this.currentTitle.set(t("store.new_task"));
+        this.currentModel.set("");
+        this.sessions.set([]);
+        this.workspaces.set([]);
+        this.items.set({});
+        this.turns.set({});
+        this.running.set({});
+        this.approvals.set({});
+        this.questions.set({});
+        this.queues.set({});
+        this.configurations.set({});
+        this.errors.set({});
+        this.contextUsage.set({});
+        this.contextBreakdowns.set({});
+        this.todos.set({});
+        this.tasks.set({});
+        this.sessionChanges.set({});
+        this.retrying.set({});
+        this.hookRunning.set({});
+        this.projectHooks.set({});
+        this.subagents.set({});
+        this.gitStatus.set(null);
+        this.gitDiff.set(null);
+        this.globalError.set("");
+        this.activeDevice.set(nextRemote);
+      });
+      await this.agent.switchTarget(
+        nextRemote
+          ? {
+              kind: "remote",
+              relayUrl: status!.relay_url!,
+              sessionToken: status!.session_token!,
+              deviceId: nextRemote.device_id,
+              deviceName: nextRemote.name,
+            }
+          : { kind: "local" },
+      );
+      this.refreshSandboxStatus();
+      this.refreshPluginMarketplaces();
+    } catch (error) {
+      this.relayError.set(errorMessage(error));
+      this.activeDevice.set(null);
+      await this.agent.switchTarget({ kind: "local" }).catch(() => {});
+    } finally {
+      this.switchingDevice.set(false);
+    }
   }
 }

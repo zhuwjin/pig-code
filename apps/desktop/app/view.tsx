@@ -225,7 +225,10 @@ function App(props: UiContext) {
               {...props}
               mode={settingsVisible() ? "settings" : "workspace"}
               settingsPage={settingsPage()}
-              onNavigateSettings={(page) => settingsPage.set(page)}
+              onNavigateSettings={(page) => {
+                settingsPage.set(page);
+                settingsVisible.set(true);
+              }}
               onBackSettings={() => settingsVisible.set(false)}
               onToggle={() => toggleSidebar(false)}
               onOpenSettings={() => settingsVisible.set(true)}

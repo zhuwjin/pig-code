@@ -22,7 +22,7 @@ use crate::{
     ProjectedEventBatch,
 };
 
-const SUBSCRIBER_CHANNEL_CAPACITY: usize = DAEMON_HISTORY + 64;
+pub(crate) const SUBSCRIBER_CHANNEL_CAPACITY: usize = DAEMON_HISTORY + 64;
 const PONG_CHANNEL_CAPACITY: usize = 16;
 
 #[derive(Clone, Debug)]
@@ -149,13 +149,14 @@ impl Subscriber {
     }
 }
 
-struct SharedState {
+pub(crate) struct SharedState {
     epoch: String,
     latest: u64,
     history: VecDeque<ProjectedEventBatch>,
     projection: ProjectionRegistry,
     sessions: HashMap<String, SessionOverlay>,
     loading_sessions: HashSet<String>,
+    workspaces: Vec<String>,
     subscribers: HashMap<u64, Subscriber>,
     next_subscriber: u64,
 }
@@ -169,9 +170,14 @@ impl SharedState {
             projection: ProjectionRegistry::new(),
             sessions: HashMap::new(),
             loading_sessions: HashSet::new(),
+            workspaces: Vec::new(),
             subscribers: HashMap::new(),
             next_subscriber: 0,
         }
+    }
+
+    pub(crate) fn workspace_paths(&self) -> Vec<String> {
+        self.workspaces.clone()
     }
 
     fn cursor(&self) -> EventCursor {
@@ -181,7 +187,7 @@ impl SharedState {
         }
     }
 
-    fn subscribe(
+    pub(crate) fn subscribe(
         &mut self,
         after: Option<EventCursor>,
         session_ids: Option<Vec<String>>,
@@ -250,7 +256,7 @@ impl SharedState {
         id
     }
 
-    fn unsubscribe(&mut self, id: u64) {
+    pub(crate) fn unsubscribe(&mut self, id: u64) {
         self.subscribers.remove(&id);
     }
 
@@ -259,7 +265,7 @@ impl SharedState {
             .retain(|_, subscriber| subscriber.sender.try_send(message.clone()).is_ok());
     }
 
-    fn note_op(&mut self, op: &Op) {
+    pub(crate) fn note_op(&mut self, op: &Op) {
         match op {
             Op::SetPermissions {
                 session_id,
@@ -356,7 +362,7 @@ impl SharedState {
         }
     }
 
-    fn begin_attach(&mut self, subscriber_id: u64, session_id: &str) -> bool {
+    pub(crate) fn begin_attach(&mut self, subscriber_id: u64, session_id: &str) -> bool {
         if let Some(subscriber) = self.subscribers.get_mut(&subscriber_id)
             && let Some(allowed) = subscriber.session_filter.as_mut()
         {
@@ -456,6 +462,13 @@ impl SharedState {
     }
 
     fn publish_projected(&mut self, envelope: &EventEnvelope, projected: Projected) {
+        if let Event::WorkspaceList { workspaces } = &envelope.event {
+            self.workspaces = workspaces
+                .iter()
+                .filter(|workspace| !workspace.hidden)
+                .map(|workspace| workspace.path.display().to_string())
+                .collect();
+        }
         self.apply_session_event(&envelope.event, false);
         self.epoch = envelope.epoch.clone();
         self.latest = envelope.sequence;
@@ -552,7 +565,7 @@ fn endpoint_path(data_dir: &Path) -> PathBuf {
 }
 
 #[cfg(windows)]
-fn restrict_windows_permissions(path: &Path) {
+pub(crate) fn restrict_windows_permissions(path: &Path) {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt as _;
 
@@ -798,15 +811,24 @@ pub async fn serve_with_ready(
         }
     });
     let broadcast_state = state.clone();
+    let selftest_mode = config.selftest || std::env::var_os("PIG_SELFTEST").is_some();
+    let relay = crate::relay::RelayManager::new(
+        config.data_dir.clone(),
+        config.cwd.clone(),
+        !selftest_mode,
+        state.clone(),
+        agent.clone(),
+    );
     let rpc_ctx = crate::rpc::RpcContext {
         data_dir: config.data_dir.clone(),
         cwd: config.cwd.clone(),
-        selftest: config.selftest || std::env::var_os("PIG_SELFTEST").is_some(),
+        selftest: selftest_mode,
         agent_ops: agent.ops.clone(),
         plugins: plugins.clone(),
         terminals: crate::terminal::TerminalManager::default(),
         process_sampler: Arc::new(crate::process_sample::ProcessSampler::new()),
         search_backfill_checked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        relay: relay.clone(),
         broadcast: Arc::new(move |message| {
             broadcast_state
                 .lock()
@@ -814,6 +836,8 @@ pub async fn serve_with_ready(
                 .broadcast_message(message);
         }),
     };
+    relay.start(rpc_ctx.clone());
+    let _ = agent.ops.try_send(Op::ListWorkspaces);
     tokio::spawn(run_core(agent.clone(), state.clone(), plugins));
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
@@ -1003,84 +1027,17 @@ async fn handle_connection(
                             Ok(request) => request,
                             Err(error) => break Err(error),
                         };
-                        match request {
-                            DaemonRequest::Subscribe { .. } => continue,
-                            DaemonRequest::Rpc { id, method, params } => {
-                                if matches!(method.as_str(), "terminal.write" | "terminal.resize") {
-                                    let message = match crate::rpc::handle_rpc(
-                                        rpc_ctx.clone(),
-                                        &method,
-                                        params,
-                                    )
-                                    .await
-                                    {
-                                        Ok(result) => DaemonMessage::RpcResult {
-                                            id,
-                                            result: Some(result),
-                                            error: None,
-                                        },
-                                        Err(error) => DaemonMessage::RpcResult {
-                                            id,
-                                            result: None,
-                                            error: Some(error),
-                                        },
-                                    };
-                                    let _ = rpc_sender.send(message).await;
-                                    continue;
-                                }
-                                let rpc_ctx = rpc_ctx.clone();
-                                let rpc_sender = rpc_sender.clone();
-                                tokio::spawn(async move {
-                                    let message = match crate::rpc::handle_rpc(rpc_ctx, &method, params).await {
-                                        Ok(result) => DaemonMessage::RpcResult {
-                                            id,
-                                            result: Some(result),
-                                            error: None,
-                                        },
-                                        Err(error) => DaemonMessage::RpcResult {
-                                            id,
-                                            result: None,
-                                            error: Some(error),
-                                        },
-                                    };
-                                    let _ = rpc_sender.send(message).await;
-                                });
-                                continue;
-                            }
-                            DaemonRequest::Op { mut op } => {
-                                normalize_default_cwd(&mut op, &rpc_ctx.cwd);
-                                if matches!(op, Op::Shutdown) {
-                                    let _ = state
-                                        .lock()
-                                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                                        .subscribers
-                                        .get(&subscriber_id)
-                                        .map(|subscriber| {
-                                            subscriber.sender.try_send(DaemonMessage::Error {
-                                                detail: "daemon shutdown is not tied to a client"
-                                                    .to_string(),
-                                            })
-                                        });
-                                    continue;
-                                }
-                                let should_forward = if let Op::OpenSession { session_id } = &op {
-                                    state
-                                        .lock()
-                                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                                        .begin_attach(subscriber_id, session_id)
-                                } else {
-                                    state
-                                        .lock()
-                                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                                        .note_op(&op);
-                                    true
-                                };
-                                if should_forward
-                                    && let Err(error) = agent.ops.send(op).await
-                                {
-                                    break Err(error.to_string());
-                                }
-                            }
+                        if let Err(error) = dispatch_client_request(
+                            request,
+                            subscriber_id,
+                            &rpc_sender,
+                            &agent,
+                            &state,
+                            &rpc_ctx,
+                        )
+                        .await
+                        {
+                            break Err(error);
                         }
                     }
                 }
@@ -1093,6 +1050,87 @@ async fn handle_connection(
         .unsubscribe(subscriber_id);
     write_task.abort();
     result
+}
+
+pub(crate) async fn dispatch_client_request(
+    request: DaemonRequest,
+    subscriber_id: u64,
+    rpc_sender: &async_channel::Sender<DaemonMessage>,
+    agent: &Arc<AgentHandle>,
+    state: &Arc<Mutex<SharedState>>,
+    rpc_ctx: &crate::rpc::RpcContext,
+) -> Result<(), String> {
+    match request {
+        DaemonRequest::Subscribe { .. } => Ok(()),
+        DaemonRequest::Rpc { id, method, params } => {
+            if matches!(method.as_str(), "terminal.write" | "terminal.resize") {
+                let message = match crate::rpc::handle_rpc(rpc_ctx.clone(), &method, params).await {
+                    Ok(result) => DaemonMessage::RpcResult {
+                        id,
+                        result: Some(result),
+                        error: None,
+                    },
+                    Err(error) => DaemonMessage::RpcResult {
+                        id,
+                        result: None,
+                        error: Some(error),
+                    },
+                };
+                let _ = rpc_sender.send(message).await;
+                return Ok(());
+            }
+            let rpc_ctx = rpc_ctx.clone();
+            let rpc_sender = rpc_sender.clone();
+            tokio::spawn(async move {
+                let message = match crate::rpc::handle_rpc(rpc_ctx, &method, params).await {
+                    Ok(result) => DaemonMessage::RpcResult {
+                        id,
+                        result: Some(result),
+                        error: None,
+                    },
+                    Err(error) => DaemonMessage::RpcResult {
+                        id,
+                        result: None,
+                        error: Some(error),
+                    },
+                };
+                let _ = rpc_sender.send(message).await;
+            });
+            Ok(())
+        }
+        DaemonRequest::Op { mut op } => {
+            normalize_default_cwd(&mut op, &rpc_ctx.cwd);
+            if matches!(op, Op::Shutdown) {
+                let _ = state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .subscribers
+                    .get(&subscriber_id)
+                    .map(|subscriber| {
+                        subscriber.sender.try_send(DaemonMessage::Error {
+                            detail: "daemon shutdown is not tied to a client".to_string(),
+                        })
+                    });
+                return Ok(());
+            }
+            let should_forward = if let Op::OpenSession { session_id } = &op {
+                state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .begin_attach(subscriber_id, session_id)
+            } else {
+                state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .note_op(&op);
+                true
+            };
+            if should_forward {
+                agent.ops.send(op).await.map_err(|error| error.to_string())?;
+            }
+            Ok(())
+        }
+    }
 }
 
 fn is_placeholder_cwd(path: &Path) -> bool {

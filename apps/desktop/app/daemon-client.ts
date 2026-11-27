@@ -42,6 +42,60 @@ export interface TerminalInfo {
   exited?: boolean;
 }
 
+export interface RelayConnectionStatus {
+  configured: boolean;
+  connected: boolean;
+  relay_url?: string | null;
+  user_id?: string | null;
+  username?: string | null;
+  device_id?: string | null;
+  device_name?: string | null;
+  session_token?: string | null;
+  last_error?: string | null;
+}
+
+export interface RelayDeviceInfo {
+  device_id: string;
+  name: string;
+  os: string;
+  arch: string;
+  online: boolean;
+  last_seen_ms: number;
+  workspaces: string[];
+  daemon_protocol: number;
+}
+
+export interface DeviceCodeStartResponse {
+  device_code: string;
+  user_code: string;
+  verification_uri: string;
+  expires_in_secs: number;
+  interval_secs: number;
+}
+
+export interface DeviceCodePollResult {
+  status: "pending" | "expired" | "approved";
+  relay?: RelayConnectionStatus;
+}
+
+export type DaemonTarget =
+  | { kind: "local" }
+  | {
+      kind: "remote";
+      relayUrl: string;
+      sessionToken: string;
+      deviceId: string;
+      deviceName: string;
+    };
+
+function relayWsUrl(relayUrl: string, path: string): string {
+  const trimmed = relayUrl.trim().replace(/\/+$/, "");
+  if (trimmed.startsWith("https://")) return `wss://${trimmed.slice("https://".length)}${path}`;
+  if (trimmed.startsWith("http://")) return `ws://${trimmed.slice("http://".length)}${path}`;
+  if (trimmed.startsWith("ws://") || trimmed.startsWith("wss://")) return `${trimmed}${path}`;
+  return `ws://${trimmed}${path}`;
+}
+
 type EventListener = (rawEventsJson: string) => void;
 type PluginListener = (rawPayload: string) => void;
 type TerminalOutputListener = (terminalId: string, data: string) => void;
@@ -215,6 +269,9 @@ function processCwdOption(): { cwd?: string } {
 export class DaemonAgent {
   private readonly selftest: boolean;
   private cwdValue = ".";
+  private target: DaemonTarget = { kind: "local" };
+  private targetGeneration = 0;
+  private localEndpoint: DaemonEndpoint | null = null;
   private socket: WebSocketConnection | null = null;
   private child: ChildProcess | null = null;
   private cursor: EventCursor | null = null;
@@ -240,6 +297,34 @@ export class DaemonAgent {
 
   get cwd(): string {
     return this.cwdValue;
+  }
+
+  get currentTarget(): DaemonTarget {
+    return this.target;
+  }
+
+  async switchTarget(next: DaemonTarget): Promise<void> {
+    this.targetGeneration += 1;
+    this.target = next;
+    const oldSocket = this.socket;
+    this.socket = null;
+    this.connectPromise = null;
+    this.cursor = null;
+    this.activeSessionId = null;
+    this.cwdValue = ".";
+    this.queuedFrames.length = 0;
+    for (const [, pending] of this.pendingRpcs) {
+      pending.reject(new Error("switched target device"));
+    }
+    this.pendingRpcs.clear();
+    if (oldSocket) {
+      try {
+        await oldSocket.close();
+      } catch {
+        // Ignore close errors while switching targets.
+      }
+    }
+    await this.ensureConnected();
   }
 
   onCwdChange(listener: CwdListener): () => void {
@@ -436,6 +521,7 @@ export class DaemonAgent {
         `unsupported daemon protocol ${endpoint.protocol} (expected ${DAEMON_PROTOCOL_VERSION})`,
       );
     }
+    this.localEndpoint = endpoint;
     const conn = await websocket.connect(`ws://${endpoint.address}/`, {
       headers: { Authorization: `Bearer ${endpoint.token}` },
     });
@@ -447,8 +533,37 @@ export class DaemonAgent {
     return conn;
   }
 
+  private async openRemoteSocket(target: Extract<DaemonTarget, { kind: "remote" }>): Promise<WebSocketConnection> {
+    const url = relayWsUrl(target.relayUrl, `/ws/client/${encodeURIComponent(target.deviceId)}`);
+    const conn = await websocket.connect(url, {
+      headers: { Authorization: `Bearer ${target.sessionToken}` },
+    });
+    const subscribeFrame = JSON.stringify({
+      kind: "subscribe",
+      after: this.cursor,
+    });
+    await conn.write(subscribeFrame);
+    return conn;
+  }
+
+  private async openActiveTargetSocket(): Promise<WebSocketConnection> {
+    if (this.target.kind === "remote") {
+      return this.openRemoteSocket(this.target);
+    }
+    return this.connectDirectOrSpawn();
+  }
+
   private async connectInternal(): Promise<void> {
-    const conn = await this.connectDirectOrSpawn();
+    const generation = this.targetGeneration;
+    const conn = await this.openActiveTargetSocket();
+    if (this.disposed || generation !== this.targetGeneration) {
+      try {
+        await conn.close();
+      } catch {
+        // Ignore stale socket close errors.
+      }
+      return;
+    }
     this.socket = conn;
     this.startReadLoop(conn);
     await this.sendBootstrap(false);
@@ -613,12 +728,22 @@ export class DaemonAgent {
   }
 
   private async reconnectLoop(initialReason: string): Promise<void> {
+    const generation = this.targetGeneration;
     let lastError = initialReason;
     for (const ms of RECONNECT_BACKOFF_MS) {
-      if (this.disposed) return;
+      if (this.disposed || generation !== this.targetGeneration) return;
       await delay(ms);
+      if (this.disposed || generation !== this.targetGeneration) return;
       try {
-        const conn = await this.connectDirectOrSpawn();
+        const conn = await this.openActiveTargetSocket();
+        if (this.disposed || generation !== this.targetGeneration) {
+          try {
+            await conn.close();
+          } catch {
+            // Ignore stale socket close errors.
+          }
+          return;
+        }
         this.socket = conn;
         this.startReadLoop(conn);
         await this.flushQueuedFrames();
@@ -627,7 +752,9 @@ export class DaemonAgent {
         lastError = error instanceof Error ? error.message : String(error);
       }
     }
-    this.emitBridgeError(lastError);
+    if (generation === this.targetGeneration) {
+      this.emitBridgeError(lastError);
+    }
   }
 
   private deliverEvents(encoded: string): void {
@@ -660,6 +787,114 @@ export class DaemonAgent {
       });
       this.enqueueFrame(JSON.stringify({ kind: "rpc", id, method, params }));
     });
+  }
+
+  /**
+   * Execute an RPC against the local pig-daemon even when the active session
+   * target is switched to a remote device over pig-relay.
+   */
+  async localRpc<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+    if (this.target.kind === "local") {
+      return this.rpc<T>(method, params);
+    }
+    const endpoint = this.localEndpoint ?? (await this.readEndpointFile());
+    if (!endpoint) {
+      throw new Error("local pig-daemon endpoint is unavailable");
+    }
+    const conn = await websocket.connect(`ws://${endpoint.address}/`, {
+      headers: { Authorization: `Bearer ${endpoint.token}` },
+    });
+    const id = `local-rpc-${++this.rpcSeq}`;
+    try {
+      await conn.write(JSON.stringify({ kind: "subscribe", after: null }));
+      await conn.write(JSON.stringify({ kind: "rpc", id, method, params }));
+      while (true) {
+        const frame = await conn.read();
+        if (frame === null) {
+          throw new Error("local pig-daemon closed before RPC replied");
+        }
+        const message = JSON.parse(decodeText(frame)) as Record<string, any>;
+        if (message.kind === "rpc_result" && message.id === id) {
+          if (typeof message.error === "string" && message.error.length > 0) {
+            throw new Error(message.error);
+          }
+          return message.result as T;
+        }
+      }
+    } finally {
+      try {
+        await conn.close();
+      } catch {
+        // Ignore close errors.
+      }
+    }
+  }
+
+  relayStatus(): Promise<RelayConnectionStatus> {
+    return this.localRpc<RelayConnectionStatus>("relay.status");
+  }
+
+  relayRegister(
+    relayUrl: string,
+    username: string,
+    password: string,
+    deviceName?: string,
+  ): Promise<RelayConnectionStatus> {
+    return this.localRpc<RelayConnectionStatus>("relay.register", {
+      relay_url: relayUrl,
+      username,
+      password,
+      ...(deviceName ? { device_name: deviceName } : {}),
+    });
+  }
+
+  relayLogin(
+    relayUrl: string,
+    username: string,
+    password: string,
+    deviceName?: string,
+  ): Promise<RelayConnectionStatus> {
+    return this.localRpc<RelayConnectionStatus>("relay.login", {
+      relay_url: relayUrl,
+      username,
+      password,
+      ...(deviceName ? { device_name: deviceName } : {}),
+    });
+  }
+
+  relayDeviceStart(relayUrl: string, deviceName?: string): Promise<DeviceCodeStartResponse> {
+    return this.localRpc<DeviceCodeStartResponse>("relay.device_start", {
+      relay_url: relayUrl,
+      ...(deviceName ? { device_name: deviceName } : {}),
+    });
+  }
+
+  relayDevicePoll(
+    relayUrl: string,
+    deviceCode: string,
+    deviceName?: string,
+  ): Promise<DeviceCodePollResult> {
+    return this.localRpc<DeviceCodePollResult>("relay.device_poll", {
+      relay_url: relayUrl,
+      device_code: deviceCode,
+      ...(deviceName ? { device_name: deviceName } : {}),
+    });
+  }
+
+  relayApproveCode(userCode: string): Promise<boolean> {
+    return this.localRpc<boolean>("relay.approve_code", { user_code: userCode });
+  }
+
+  relayLogout(): Promise<RelayConnectionStatus> {
+    return this.localRpc<RelayConnectionStatus>("relay.logout");
+  }
+
+  relayDevices(): Promise<RelayDeviceInfo[]> {
+    return this.localRpc<RelayDeviceInfo[]>("relay.devices");
+  }
+
+  relayRevokeDevice(deviceId: string): Promise<boolean> {
+    return this.localRpc<boolean>("relay.revoke_device", { device_id: deviceId });
   }
 
   send(opJson: string): void {

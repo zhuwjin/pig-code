@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 
 use crate::code_highlight::highlight_spans;
 use crate::process_sample::ProcessSampler;
+use crate::relay::RelayManager;
 use crate::terminal::TerminalManager;
 use crate::{DAEMON_PROTOCOL_VERSION, DaemonMessage};
 
@@ -20,6 +21,7 @@ pub struct RpcContext {
     pub terminals: TerminalManager,
     pub process_sampler: Arc<ProcessSampler>,
     pub search_backfill_checked: Arc<AtomicBool>,
+    pub relay: RelayManager,
     pub broadcast: Arc<dyn Fn(DaemonMessage) + Send + Sync>,
 }
 
@@ -373,6 +375,64 @@ pub async fn handle_rpc(
             tokio::task::spawn_blocking(move || plugins.install(&downloaded.package_path, &root))
                 .await
                 .map_err(|error| error.to_string())?
+        }
+        "relay.status" => {
+            let status = ctx.relay.status();
+            serde_json::to_value(status).map_err(|error| error.to_string())
+        }
+        "relay.register" => {
+            let relay_url = required_str(&params, "relay_url")?;
+            let username = required_str(&params, "username")?;
+            let password = required_str(&params, "password")?;
+            let device_name = params.get("device_name").and_then(Value::as_str);
+            let status = ctx
+                .relay
+                .register(relay_url, username, password, device_name)
+                .await?;
+            serde_json::to_value(status).map_err(|error| error.to_string())
+        }
+        "relay.login" => {
+            let relay_url = required_str(&params, "relay_url")?;
+            let username = required_str(&params, "username")?;
+            let password = required_str(&params, "password")?;
+            let device_name = params.get("device_name").and_then(Value::as_str);
+            let status = ctx
+                .relay
+                .login(relay_url, username, password, device_name)
+                .await?;
+            serde_json::to_value(status).map_err(|error| error.to_string())
+        }
+        "relay.device_start" => {
+            let relay_url = required_str(&params, "relay_url")?;
+            let device_name = params.get("device_name").and_then(Value::as_str);
+            let challenge = ctx.relay.device_start(relay_url, device_name).await?;
+            serde_json::to_value(challenge).map_err(|error| error.to_string())
+        }
+        "relay.device_poll" => {
+            let relay_url = required_str(&params, "relay_url")?;
+            let device_code = required_str(&params, "device_code")?;
+            let device_name = params.get("device_name").and_then(Value::as_str);
+            ctx.relay
+                .device_poll(relay_url, device_code, device_name)
+                .await
+        }
+        "relay.approve_code" => {
+            let user_code = required_str(&params, "user_code")?;
+            let ok = ctx.relay.approve_device_code(user_code).await?;
+            Ok(Value::Bool(ok))
+        }
+        "relay.logout" => {
+            let status = ctx.relay.logout().await?;
+            serde_json::to_value(status).map_err(|error| error.to_string())
+        }
+        "relay.devices" => {
+            let devices = ctx.relay.list_devices().await?;
+            serde_json::to_value(devices).map_err(|error| error.to_string())
+        }
+        "relay.revoke_device" => {
+            let device_id = required_str(&params, "device_id")?;
+            let ok = ctx.relay.revoke_device(device_id).await?;
+            Ok(Value::Bool(ok))
         }
         other => Err(format!("unknown daemon rpc method: {other}")),
     }

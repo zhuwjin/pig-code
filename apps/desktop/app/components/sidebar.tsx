@@ -183,6 +183,7 @@ export function Sidebar(props: UiContext & {
 }) {
   const { store, themeStore } = props;
   const manageOpen = signal(false);
+  const deviceMenuOpen = signal(false);
   const workspaceMenuOpen = signal(false);
   const hoveredSession = signal<string | null>(null);
   const renaming = signal<{ kind: "workspace" | "session"; id: string } | null>(null);
@@ -672,7 +673,104 @@ export function Sidebar(props: UiContext & {
           </View>
         </View>
       </If>
-      <View class="border-t border-sidebar-border p-2">
+      <View class="gap-1 border-t border-sidebar-border p-2">
+        <If when={props.mode === "workspace" && (Boolean(store.relayStatus()?.configured) || store.activeDevice() !== null)}>
+          <Menu
+            open={deviceMenuOpen()}
+            onOpenChange={({ open: value }) => {
+              deviceMenuOpen.set(value);
+              if (value) void store.refreshRelayDevices();
+            }}
+            placement="top"
+            align="start"
+            popupClass="w-56 rounded-xl border border-border bg-popover p-1 shadow-xl"
+            trigger={
+              <View
+                role="button"
+                testID="device-switcher"
+                accessibilityLabel={t("sidebar.device.label")}
+                class="flex-row items-center gap-2 rounded-(--radius) px-2 py-1 hover:bg-sidebar-accent"
+              >
+                <Icon
+                  name={store.activeDevice() ? "wifi" : "terminal"}
+                  size={14}
+                  color={store.activeDevice() ? token("primary") : token("muted-foreground")}
+                />
+                <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-left text-xs text-sidebar-foreground">
+                  {store.switchingDevice()
+                    ? t("sidebar.device.switching")
+                    : (store.activeDevice()?.name ?? t("sidebar.device.local_short"))}
+                </Text>
+                <If when={store.activeDevice() !== null}>
+                  <Text class="rounded bg-primary/15 px-1 text-[10px] text-primary">
+                    {t("sidebar.device.remote_badge")}
+                  </Text>
+                </If>
+              </View>
+            }
+          >
+            <View class="gap-0.5">
+              <MenuItem
+                testID="device-switch-local"
+                class="flex-row items-center gap-2 rounded-(--radius) px-2 py-1 hover:bg-accent"
+                onSelect={() => {
+                  deviceMenuOpen.set(false);
+                  void store.selectDevice(null);
+                }}
+              >
+                <Icon name="terminal" size={14} color={token("muted-foreground")} />
+                <Text class="flex-1 text-sm text-foreground">{t("sidebar.device.local")}</Text>
+                <If when={store.activeDevice() === null}>
+                  <Icon name="check" size={14} color={token("foreground")} />
+                </If>
+              </MenuItem>
+              <Each
+                of={store.relayDevices().filter((d) => d.device_id !== store.relayStatus()?.device_id)}
+                key={(device) => device.device_id}
+              >
+                {(device) => (
+                  <MenuItem
+                    testID={`device-switch-${device().device_id}`}
+                    disabled={!device().online}
+                    class="flex-row items-center gap-2 rounded-(--radius) px-2 py-1 hover:bg-accent disabled:opacity-40"
+                    onSelect={() => {
+                      if (!device().online) return;
+                      deviceMenuOpen.set(false);
+                      void store.selectDevice(device());
+                    }}
+                  >
+                    <Icon
+                      name={device().online ? "wifi" : "wifi-off"}
+                      size={14}
+                      color={device().online ? token("primary") : token("muted-foreground")}
+                    />
+                    <Text style={{ numberOfLines: 1 }} class="min-w-0 flex-1 text-sm text-foreground">
+                      {device().name}
+                    </Text>
+                    <If when={!device().online}>
+                      <Text class="text-[10px] text-muted-foreground">{t("sidebar.device.offline")}</Text>
+                    </If>
+                    <If when={store.activeDevice()?.device_id === device().device_id}>
+                      <Icon name="check" size={14} color={token("foreground")} />
+                    </If>
+                  </MenuItem>
+                )}
+              </Each>
+              <MenuSeparator class="my-0.5 h-px bg-border" />
+              <MenuItem
+                testID="device-manage-remote"
+                class="flex-row items-center gap-2 rounded-(--radius) px-2 py-1 hover:bg-accent"
+                onSelect={() => {
+                  deviceMenuOpen.set(false);
+                  props.onNavigateSettings("remote");
+                }}
+              >
+                <Icon name="settings" size={14} color={token("muted-foreground")} />
+                <Text class="flex-1 text-sm text-foreground">{t("sidebar.device.manage")}</Text>
+              </MenuItem>
+            </View>
+          </Menu>
+        </If>
         <Button
           testID={props.mode === "settings" ? "settings-back" : "settings-open"}
           accessibilityLabel={t(props.mode === "settings" ? "sidebar.return_workspace" : "sidebar.open_settings")}

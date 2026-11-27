@@ -210,3 +210,24 @@ test("stores and clears provider keys without exposing them in the page", async 
   await app.press("id:provider-clear-key-mock");
   await app.waitUntil(() => !app.enabled("id:provider-clear-key-mock"), { timeout: 20000 });
 });
+
+
+test("opens remote control settings with account login and device-code pairing", async () => {
+  const app = await openApp();
+  await app.press("id:settings-open");
+  await app.waitFor("id:settings-remote");
+  await app.press("id:settings-remote");
+  await app.waitFor("id:remote-settings");
+  expect(app.texts()).toContain("远程控制与账号");
+  expect(app.texts()).toContain("设备码配对登录");
+  expect(app.count("id:remote-auth-card")).toBe(1);
+  expect(app.count("id:remote-device-code-card")).toBe(1);
+  expect(app.value("id:remote-server-url")).toBe("http://127.0.0.1:8787");
+  expect(app.enabled("id:remote-sign-in")).toBe(false);
+  expect(app.enabled("id:remote-start-device-code")).toBe(true);
+
+  await app.type("id:remote-username", "alice");
+  await app.type("id:remote-password", "super-secret-pass");
+  expect(app.enabled("id:remote-sign-in")).toBe(true);
+  expect(app.enabled("id:remote-register")).toBe(true);
+});
